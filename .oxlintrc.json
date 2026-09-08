@@ -1,0 +1,25 @@
+{
+  "plugins": ["react", "typescript", "unicorn"],
+  "env": {
+    "browser": true,
+    "es2024": true,
+    "node": true
+  },
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-console": "off",
+    "eqeqeq": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "typescript/no-explicit-any": "warn",
+    "react/jsx-key": "error",
+    "react/no-danger": "off"
+  },
+  "ignorePatterns": [
+    "dist",
+    "node_modules",
+    "server/node_modules",
+    "specs",
+    "*.md"
+  ]
+}

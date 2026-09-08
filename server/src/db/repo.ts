@@ -1,0 +1,1743 @@
+/**
+ * THE REPOSITORY LAYER
+ *
+ * Every SQL statement in the product lives here or in the skill handlers that
+ * own their own domain. Raw, parameterised SQL by design.
+ *
+ * Two conventions worth knowing:
+ *   · Latest metrics are always read with a LATERAL join ordered by
+ *     `captured_at DESC LIMIT 1`, never by overwriting a row.
+ *   · Nothing is deleted. `deactivate`, `link`, and status changes replace what
+ *     a DELETE would otherwise do.
+ */
+
+import type {
+  ActivityStatus,
+  AgentId,
+  AgentRunStatus,
+  CalendarSlot,
+  IdeaStatus,
+  Platform,
+  ResolvedConfig,
+  SkillRunStatus,
+  ValidationVerdict,
+} from '../../../shared/agent-contract'
+import { config } from '../config'
+import { query, queryOne } from './pool'
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WORKSPACE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+let cachedWorkspaceId: string | null = null
+
+/**
+ * Resolves the current workspace from `WORKSPACE_SLUG`, creating it if absent
+ * so a fresh database is never a hard error.
+ */
+export async function currentWorkspaceId(): Promise<string> {
+  if (cachedWorkspaceId) return cachedWorkspaceId
+
+  const slug = config.core.workspaceSlug
+  const existing = await queryOne<{ id: string }>(
+    'SELECT id FROM workspaces WHERE slug = $1',
+    [slug],
+  )
+  if (existing) {
+    cachedWorkspaceId = existing.id
+    return existing.id
+  }
+
+  const created = await queryOne<{ id: string }>(
+    `INSERT INTO workspaces (name, slug) VALUES ($1, $2)
+     ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id`,
+    [`Ethara.AI · ${slug}`, slug],
+  )
+  if (!created) throw new Error(`Could not resolve workspace "${slug}"`)
+  cachedWorkspaceId = created.id
+  return created.id
+}
+
+/** Clears the memo. Used by tests and after a reseed. */
+export function forgetWorkspace(): void {
+  cachedWorkspaceId = null
+}
+
+export interface WorkspaceRow {
+  id: string
+  name: string
+  slug: string
+  brand_voice: string | null
+  audience: string | null
+  settings: Record<string, unknown>
+}
+
+export async function getWorkspace(workspaceId: string): Promise<WorkspaceRow | null> {
+  return queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId])
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   KEYWORDS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface KeywordRow {
+  id: string
+  term: string
+  category: string
+  weight: number
+  active: boolean
+  created_at: string
+}
+
+export async function listKeywords(
+  workspaceId: string,
+  activeOnly = false,
+): Promise<KeywordRow[]> {
+  return query<KeywordRow>(
+    `SELECT id, term, category, weight, active, created_at
+       FROM keywords
+      WHERE workspace_id = $1 ${activeOnly ? 'AND active = true' : ''}
+      ORDER BY weight DESC, term ASC`,
+    [workspaceId],
+  )
+}
+
+export async function createKeyword(
+  workspaceId: string,
+  term: string,
+  category: string,
+  weight: number,
+): Promise<KeywordRow | null> {
+  return queryOne<KeywordRow>(
+    `INSERT INTO keywords (workspace_id, term, category, weight)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (workspace_id, lower(term)) DO UPDATE
+       SET weight = EXCLUDED.weight, category = EXCLUDED.category, active = true
+     RETURNING id, term, category, weight, active, created_at`,
+    [workspaceId, term.trim(), category, weight],
+  )
+}
+
+export async function updateKeyword(
+  workspaceId: string,
+  id: string,
+  patch: { term?: string; category?: string; weight?: number; active?: boolean },
+): Promise<KeywordRow | null> {
+  return queryOne<KeywordRow>(
+    `UPDATE keywords SET
+       term     = COALESCE($3, term),
+       category = COALESCE($4, category),
+       weight   = COALESCE($5, weight),
+       active   = COALESCE($6, active)
+     WHERE workspace_id = $1 AND id = $2
+     RETURNING id, term, category, weight, active, created_at`,
+    [
+      workspaceId,
+      id,
+      patch.term ?? null,
+      patch.category ?? null,
+      patch.weight ?? null,
+      patch.active ?? null,
+    ],
+  )
+}
+
+export async function findKeywordByTerm(
+  workspaceId: string,
+  term: string,
+): Promise<KeywordRow | null> {
+  return queryOne<KeywordRow>(
+    `SELECT id, term, category, weight, active, created_at
+       FROM keywords WHERE workspace_id = $1 AND lower(term) = lower($2)`,
+    [workspaceId, term],
+  )
+}
+
+/**
+ * Deactivates rather than deletes, so historical signals keep a valid parent.
+ * There is no hard delete for a keyword anywhere in the product.
+ */
+export async function deactivateKeyword(workspaceId: string, id: string): Promise<boolean> {
+  const row = await queryOne<{ id: string }>(
+    `UPDATE keywords SET active = false
+      WHERE workspace_id = $1 AND id = $2 RETURNING id`,
+    [workspaceId, id],
+  )
+  return row !== null
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   KEYWORD SIGNALS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface KeywordSignalRow {
+  id: string
+  keyword_id: string
+  term: string
+  run_id: string | null
+  post_count: number
+  total_engagement: number
+  avg_engagement: string
+  velocity: string
+  growth_pct: string
+  trend_score: number
+  rank: number | null
+  is_trending: boolean
+  trend_reason: string | null
+  captured_at: string
+}
+
+/** The most recent signal per keyword. */
+export async function latestKeywordSignals(
+  workspaceId: string,
+): Promise<KeywordSignalRow[]> {
+  return query<KeywordSignalRow>(
+    `SELECT DISTINCT ON (ks.keyword_id)
+            ks.id, ks.keyword_id, k.term, ks.run_id, ks.post_count, ks.total_engagement,
+            ks.avg_engagement, ks.velocity, ks.growth_pct, ks.trend_score, ks.rank,
+            ks.is_trending, ks.trend_reason, ks.captured_at
+       FROM keyword_signals ks
+       JOIN keywords k ON k.id = ks.keyword_id
+      WHERE ks.workspace_id = $1
+      ORDER BY ks.keyword_id, ks.captured_at DESC`,
+    [workspaceId],
+  )
+}
+
+/** The current trending set, ordered by rank. */
+export async function trendingKeywords(
+  workspaceId: string,
+  limit = 5,
+): Promise<KeywordSignalRow[]> {
+  const all = await latestKeywordSignals(workspaceId)
+  return all
+    .filter((s) => s.is_trending)
+    .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99))
+    .slice(0, limit)
+}
+
+/**
+ * The prior-run averages that `validation.keyword.trend` computes growth from.
+ * Excludes the run being written, so a run never compares against itself.
+ */
+export async function priorKeywordAverages(
+  workspaceId: string,
+  windowRuns: number,
+  excludeRunId?: string,
+): Promise<Map<string, { avgEngagement: number; avgPosts: number; runs: number }>> {
+  const rows = await query<{
+    keyword_id: string
+    total_engagement: number
+    post_count: number
+    captured_at: string
+  }>(
+    `SELECT keyword_id, total_engagement, post_count, captured_at
+       FROM keyword_signals
+      WHERE workspace_id = $1 ${excludeRunId ? 'AND (run_id IS NULL OR run_id <> $2)' : ''}
+      ORDER BY captured_at DESC`,
+    excludeRunId ? [workspaceId, excludeRunId] : [workspaceId],
+  )
+
+  const byKeyword = new Map<string, Array<{ engagement: number; posts: number }>>()
+  for (const row of rows) {
+    const list = byKeyword.get(row.keyword_id) ?? []
+    if (list.length < windowRuns) {
+      list.push({ engagement: row.total_engagement, posts: row.post_count })
+      byKeyword.set(row.keyword_id, list)
+    }
+  }
+
+  const out = new Map<string, { avgEngagement: number; avgPosts: number; runs: number }>()
+  for (const [keywordId, list] of byKeyword) {
+    if (list.length === 0) continue
+    out.set(keywordId, {
+      avgEngagement: list.reduce((n, r) => n + r.engagement, 0) / list.length,
+      avgPosts: list.reduce((n, r) => n + r.posts, 0) / list.length,
+      runs: list.length,
+    })
+  }
+  return out
+}
+
+export interface KeywordSignalInsert {
+  keywordId: string
+  runId: string
+  postCount: number
+  totalEngagement: number
+  avgEngagement: number
+  velocity: number
+  growthPct: number
+  trendScore: number
+  rank: number
+  isTrending: boolean
+  trendReason: string
+}
+
+export async function insertKeywordSignal(
+  workspaceId: string,
+  s: KeywordSignalInsert,
+): Promise<void> {
+  await query(
+    `INSERT INTO keyword_signals
+       (workspace_id, keyword_id, run_id, post_count, total_engagement, avg_engagement,
+        velocity, growth_pct, trend_score, rank, is_trending, trend_reason)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      workspaceId,
+      s.keywordId,
+      s.runId,
+      s.postCount,
+      s.totalEngagement,
+      s.avgEngagement,
+      s.velocity,
+      s.growthPct,
+      s.trendScore,
+      s.rank,
+      s.isTrending,
+      s.trendReason,
+    ],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SOURCES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface SourceRow {
+  id: string
+  name: string
+  kind: string
+  source_type: string
+  url: string | null
+  trusted: boolean
+  enabled: boolean
+}
+
+export async function listSources(workspaceId: string): Promise<SourceRow[]> {
+  return query<SourceRow>(
+    `SELECT id, name, kind, source_type, url, trusted, enabled
+       FROM sources WHERE workspace_id = $1 ORDER BY name`,
+    [workspaceId],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SCRAPED ITEMS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface ScrapedItemRow {
+  id: string
+  keyword_id: string | null
+  keyword_term: string | null
+  run_id: string | null
+  external_id: string | null
+  title: string
+  snippet: string | null
+  url: string | null
+  source_name: string | null
+  source_type: string | null
+  author_name: string | null
+  author_headline: string | null
+  author_followers: number | null
+  hashtags: string[]
+  engagement: number
+  reactions: number
+  comments: number
+  reposts: number
+  relevance: number
+  credibility: string
+  freshness: number
+  is_duplicate: boolean
+  duplicate_of_id: string | null
+  validation: ValidationVerdict
+  verdict_reason: string | null
+  capture_source: 'live' | 'fixture'
+  posted_at: string | null
+  scraped_at: string
+}
+
+export async function listScrapedItems(
+  workspaceId: string,
+  opts: { limit?: number; validation?: ValidationVerdict } = {},
+): Promise<ScrapedItemRow[]> {
+  const params: Array<string | number> = [workspaceId]
+  let where = 'si.workspace_id = $1'
+  if (opts.validation) {
+    params.push(opts.validation)
+    where += ` AND si.validation = $${params.length}`
+  }
+  params.push(opts.limit ?? 200)
+
+  return query<ScrapedItemRow>(
+    `SELECT si.*, k.term AS keyword_term
+       FROM scraped_items si
+       LEFT JOIN keywords k ON k.id = si.keyword_id
+      WHERE ${where}
+      ORDER BY si.scraped_at DESC
+      LIMIT $${params.length}`,
+    params,
+  )
+}
+
+/** External ids captured within the look-back window, for the dedupe pre-filter. */
+export async function recentExternalIds(
+  workspaceId: string,
+  historyDays: number,
+): Promise<Set<string>> {
+  const rows = await query<{ external_id: string | null; url: string | null }>(
+    `SELECT external_id, url FROM scraped_items
+      WHERE workspace_id = $1 AND scraped_at > now() - ($2 || ' days')::interval`,
+    [workspaceId, String(historyDays)],
+  )
+  const set = new Set<string>()
+  for (const r of rows) {
+    if (r.external_id) set.add(r.external_id)
+    if (r.url) set.add(r.url)
+  }
+  return set
+}
+
+export async function setItemValidation(
+  workspaceId: string,
+  id: string,
+  validation: ValidationVerdict,
+  reason?: string,
+): Promise<ScrapedItemRow | null> {
+  return queryOne<ScrapedItemRow>(
+    `UPDATE scraped_items
+        SET validation = $3,
+            verdict_reason = COALESCE($4, verdict_reason),
+            validated_at = now()
+      WHERE workspace_id = $1 AND id = $2
+      RETURNING *`,
+    [workspaceId, id, validation, reason ?? null],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   HASHTAGS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface HashtagRow {
+  id: string
+  tag: string
+  display_tag: string
+  keyword_id: string | null
+  keyword_term: string | null
+  run_id: string | null
+  post_count: number
+  total_engagement: number
+  engagement_per_post: string
+  relevance: number
+  credibility: string
+  freshness: number
+  hashtag_score: number
+  rank: number | null
+  validation: ValidationVerdict
+  verdict_reason: string | null
+  duplicate_of_id: string | null
+  duplicate_of_tag: string | null
+  in_top_set: boolean
+  researched_at: string | null
+  first_seen_at: string
+  last_seen_at: string
+}
+
+export async function listHashtags(
+  workspaceId: string,
+  opts: { status?: ValidationVerdict; keywordId?: string; top?: boolean; limit?: number } = {},
+): Promise<HashtagRow[]> {
+  const params: Array<string | number> = [workspaceId]
+  let where = 'h.workspace_id = $1'
+
+  if (opts.status) {
+    params.push(opts.status)
+    where += ` AND h.validation = $${params.length}`
+  }
+  if (opts.keywordId) {
+    params.push(opts.keywordId)
+    where += ` AND h.keyword_id = $${params.length}`
+  }
+  if (opts.top) where += ' AND h.in_top_set = true'
+
+  params.push(opts.limit ?? 300)
+
+  return query<HashtagRow>(
+    `SELECT h.*, k.term AS keyword_term, o.display_tag AS duplicate_of_tag
+       FROM hashtags h
+       LEFT JOIN keywords k ON k.id = h.keyword_id
+       LEFT JOIN hashtags o ON o.id = h.duplicate_of_id
+      WHERE ${where}
+      ORDER BY h.rank NULLS LAST, h.hashtag_score DESC
+      LIMIT $${params.length}`,
+    params,
+  )
+}
+
+export async function findHashtagByTag(
+  workspaceId: string,
+  tag: string,
+): Promise<HashtagRow | null> {
+  const normalised = tag.replace(/^#/, '').toLowerCase()
+  return queryOne<HashtagRow>(
+    `SELECT h.*, k.term AS keyword_term, o.display_tag AS duplicate_of_tag
+       FROM hashtags h
+       LEFT JOIN keywords k ON k.id = h.keyword_id
+       LEFT JOIN hashtags o ON o.id = h.duplicate_of_id
+      WHERE h.workspace_id = $1 AND h.tag = $2
+      ORDER BY h.last_seen_at DESC
+      LIMIT 1`,
+    [workspaceId, normalised],
+  )
+}
+
+export async function setHashtagValidation(
+  workspaceId: string,
+  id: string,
+  validation: ValidationVerdict,
+  reason?: string,
+): Promise<HashtagRow | null> {
+  return queryOne<HashtagRow>(
+    `UPDATE hashtags
+        SET validation = $3,
+            verdict_reason = COALESCE($4, verdict_reason),
+            validated_at = now()
+      WHERE workspace_id = $1 AND id = $2
+      RETURNING *, NULL::text AS keyword_term, NULL::text AS duplicate_of_tag`,
+    [workspaceId, id, validation, reason ?? null],
+  )
+}
+
+export async function markHashtagResearched(
+  workspaceId: string,
+  id: string,
+): Promise<void> {
+  await query(
+    'UPDATE hashtags SET researched_at = now() WHERE workspace_id = $1 AND id = $2',
+    [workspaceId, id],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONTENT IDEAS, DRAFTS AND MEDIA
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface IdeaRow {
+  id: string
+  source_item_id: string | null
+  hashtag_id: string | null
+  hashtag_display: string | null
+  title: string
+  description: string | null
+  source_topic: string | null
+  platform: Platform
+  alt_platforms: Array<{ platform: Platform; score: number }>
+  scheduled_date: string
+  scheduled_time: string
+  confidence: number
+  priority_score: number
+  platform_rank: number | null
+  calendar_slot: CalendarSlot
+  status: IdeaStatus
+  analysis: Record<string, unknown>
+  feedback: Array<Record<string, unknown>>
+  is_new_trend: boolean
+  marketing_approved_by: string | null
+  marketing_approved_at: string | null
+  leadership_decision: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+}
+
+export async function listIdeas(
+  workspaceId: string,
+  opts: {
+    platform?: Platform
+    status?: IdeaStatus
+    slot?: CalendarSlot
+    date?: string
+    limit?: number
+  } = {},
+): Promise<IdeaRow[]> {
+  const params: Array<string | number> = [workspaceId]
+  let where = 'ci.workspace_id = $1'
+
+  if (opts.platform) {
+    params.push(opts.platform)
+    where += ` AND ci.platform = $${params.length}`
+  }
+  if (opts.status) {
+    params.push(opts.status)
+    where += ` AND ci.status = $${params.length}`
+  }
+  if (opts.slot) {
+    params.push(opts.slot)
+    where += ` AND ci.calendar_slot = $${params.length}`
+  }
+  if (opts.date) {
+    params.push(opts.date)
+    where += ` AND ci.scheduled_date = $${params.length}::date`
+  }
+  params.push(opts.limit ?? 200)
+
+  return query<IdeaRow>(
+    `SELECT ci.*, h.display_tag AS hashtag_display
+       FROM content_ideas ci
+       LEFT JOIN hashtags h ON h.id = ci.hashtag_id
+      WHERE ${where}
+      ORDER BY ci.scheduled_date ASC, ci.platform_rank NULLS LAST, ci.scheduled_time ASC
+      LIMIT $${params.length}`,
+    params,
+  )
+}
+
+export async function getIdea(workspaceId: string, id: string): Promise<IdeaRow | null> {
+  return queryOne<IdeaRow>(
+    `SELECT ci.*, h.display_tag AS hashtag_display
+       FROM content_ideas ci
+       LEFT JOIN hashtags h ON h.id = ci.hashtag_id
+      WHERE ci.workspace_id = $1 AND ci.id = $2`,
+    [workspaceId, id],
+  )
+}
+
+/**
+ * Fuzzy title lookup, for JARVIS resolving "publish the reward models post".
+ * The Dice threshold lives with the caller; this returns candidates in order.
+ */
+export async function findIdeasByTitle(
+  workspaceId: string,
+  fragment: string,
+  limit = 8,
+): Promise<IdeaRow[]> {
+  return query<IdeaRow>(
+    `SELECT ci.*, h.display_tag AS hashtag_display
+       FROM content_ideas ci
+       LEFT JOIN hashtags h ON h.id = ci.hashtag_id
+      WHERE ci.workspace_id = $1 AND ci.title ILIKE '%' || $2 || '%'
+      ORDER BY ci.scheduled_date DESC
+      LIMIT $3`,
+    [workspaceId, fragment, limit],
+  )
+}
+
+export async function updateIdea(
+  workspaceId: string,
+  id: string,
+  patch: {
+    scheduledDate?: string
+    scheduledTime?: string
+    platform?: Platform
+    status?: IdeaStatus
+    calendarSlot?: CalendarSlot
+    platformRank?: number
+    analysis?: Record<string, unknown>
+  },
+): Promise<IdeaRow | null> {
+  return queryOne<IdeaRow>(
+    `UPDATE content_ideas SET
+       scheduled_date = COALESCE($3::date, scheduled_date),
+       scheduled_time = COALESCE($4, scheduled_time),
+       platform       = COALESCE($5, platform),
+       status         = COALESCE($6, status),
+       calendar_slot  = COALESCE($7, calendar_slot),
+       platform_rank  = COALESCE($8, platform_rank),
+       analysis       = COALESCE($9::jsonb, analysis),
+       updated_at     = now()
+     WHERE workspace_id = $1 AND id = $2
+     RETURNING *, NULL::text AS hashtag_display`,
+    [
+      workspaceId,
+      id,
+      patch.scheduledDate ?? null,
+      patch.scheduledTime ?? null,
+      patch.platform ?? null,
+      patch.status ?? null,
+      patch.calendarSlot ?? null,
+      patch.platformRank ?? null,
+      patch.analysis ? JSON.stringify(patch.analysis) : null,
+    ],
+  )
+}
+
+/** Primary ideas on one platform, weakest rank last — used by the promote rule. */
+export async function primaryIdeasForPlatform(
+  workspaceId: string,
+  platform: Platform,
+): Promise<IdeaRow[]> {
+  return query<IdeaRow>(
+    `SELECT ci.*, NULL::text AS hashtag_display
+       FROM content_ideas ci
+      WHERE ci.workspace_id = $1 AND ci.platform = $2 AND ci.calendar_slot = 'primary'
+      ORDER BY ci.platform_rank NULLS LAST`,
+    [workspaceId, platform],
+  )
+}
+
+export interface DraftRow {
+  id: string
+  idea_id: string
+  platform: Platform
+  body: string
+  revision: number
+  generated_by: string | null
+  model: string | null
+  source: 'live' | 'fixture'
+  updated_at: string
+}
+
+export async function getDraft(
+  ideaId: string,
+  platform: Platform,
+): Promise<DraftRow | null> {
+  return queryOne<DraftRow>(
+    'SELECT * FROM drafts WHERE idea_id = $1 AND platform = $2',
+    [ideaId, platform],
+  )
+}
+
+/**
+ * Upserts a draft, INCREMENTING the revision rather than overwriting silently.
+ * A draft versions; it is never replaced in a way that loses what came before.
+ */
+export async function upsertDraft(d: {
+  ideaId: string
+  platform: Platform
+  body: string
+  generatedBy: string
+  model: string
+  source: 'live' | 'fixture'
+}): Promise<DraftRow | null> {
+  return queryOne<DraftRow>(
+    `INSERT INTO drafts (idea_id, platform, body, revision, generated_by, model, source)
+     VALUES ($1,$2,$3,1,$4,$5,$6)
+     ON CONFLICT (idea_id, platform) DO UPDATE
+       SET body = EXCLUDED.body,
+           revision = drafts.revision + 1,
+           generated_by = EXCLUDED.generated_by,
+           model = EXCLUDED.model,
+           source = EXCLUDED.source,
+           updated_at = now()
+     RETURNING *`,
+    [d.ideaId, d.platform, d.body, d.generatedBy, d.model, d.source],
+  )
+}
+
+export async function listDraftsForIdeas(ideaIds: string[]): Promise<DraftRow[]> {
+  if (ideaIds.length === 0) return []
+  return query<DraftRow>('SELECT * FROM drafts WHERE idea_id = ANY($1::uuid[])', [ideaIds])
+}
+
+export interface MediaAssetRow {
+  id: string
+  idea_id: string
+  platform: Platform
+  kind: string
+  concept: string | null
+  canvas: string | null
+  width: number | null
+  height: number | null
+  alt_text: string | null
+  render_mode: 'demo' | 'live'
+  model: string
+  prompt: string | null
+  fallback_reason: string | null
+  data_uri: string
+  variants: unknown[]
+}
+
+export async function upsertMediaAsset(a: {
+  ideaId: string
+  platform: Platform
+  concept: string
+  canvas: string
+  width: number
+  height: number
+  altText: string
+  renderMode: 'demo' | 'live'
+  model: string
+  prompt: string
+  fallbackReason: string | null
+  dataUri: string
+}): Promise<MediaAssetRow | null> {
+  return queryOne<MediaAssetRow>(
+    `INSERT INTO media_assets
+       (idea_id, platform, kind, concept, canvas, width, height, alt_text,
+        render_mode, model, prompt, fallback_reason, data_uri)
+     VALUES ($1,$2,'single',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     ON CONFLICT (idea_id, platform) DO UPDATE
+       SET concept = EXCLUDED.concept, canvas = EXCLUDED.canvas,
+           width = EXCLUDED.width, height = EXCLUDED.height,
+           alt_text = EXCLUDED.alt_text, render_mode = EXCLUDED.render_mode,
+           model = EXCLUDED.model, prompt = EXCLUDED.prompt,
+           fallback_reason = EXCLUDED.fallback_reason, data_uri = EXCLUDED.data_uri,
+           updated_at = now()
+     RETURNING *`,
+    [
+      a.ideaId,
+      a.platform,
+      a.concept,
+      a.canvas,
+      a.width,
+      a.height,
+      a.altText,
+      a.renderMode,
+      a.model,
+      a.prompt,
+      a.fallbackReason,
+      a.dataUri,
+    ],
+  )
+}
+
+export async function getMediaAsset(
+  ideaId: string,
+  platform: Platform,
+): Promise<MediaAssetRow | null> {
+  return queryOne<MediaAssetRow>(
+    'SELECT * FROM media_assets WHERE idea_id = $1 AND platform = $2',
+    [ideaId, platform],
+  )
+}
+
+export async function listMediaForIdeas(ideaIds: string[]): Promise<MediaAssetRow[]> {
+  if (ideaIds.length === 0) return []
+  return query<MediaAssetRow>(
+    'SELECT * FROM media_assets WHERE idea_id = ANY($1::uuid[])',
+    [ideaIds],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   POSTS AND METRICS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface PostRow {
+  id: string
+  idea_id: string | null
+  title: string
+  platform: Platform
+  content: string
+  status: string
+  external_id: string | null
+  publish_mode: 'demo' | 'live'
+  published_at: string | null
+  history: Array<Record<string, unknown>>
+  media_asset_id: string | null
+  analysis_summary: string | null
+  analysis_recommendation: string | null
+  reach: number | null
+  impressions: number | null
+  likes: number | null
+  comments: number | null
+  shares: number | null
+  engagement_rate: string | null
+  metrics_captured_at: string | null
+  data_uri: string | null
+}
+
+/**
+ * Published posts with their LATEST metrics reading.
+ * The LATERAL join is how metrics are always read — never by overwriting.
+ */
+export async function listPosts(
+  workspaceId: string,
+  opts: { platform?: Platform; limit?: number } = {},
+): Promise<PostRow[]> {
+  const params: Array<string | number> = [workspaceId]
+  let where = 'p.workspace_id = $1'
+  if (opts.platform) {
+    params.push(opts.platform)
+    where += ` AND p.platform = $${params.length}`
+  }
+  params.push(opts.limit ?? 100)
+
+  return query<PostRow>(
+    `SELECT p.*, m.reach, m.impressions, m.likes, m.comments, m.shares,
+            m.engagement_rate, m.captured_at AS metrics_captured_at,
+            ma.data_uri
+       FROM posts p
+       LEFT JOIN LATERAL (
+         SELECT reach, impressions, likes, comments, shares, engagement_rate, captured_at
+           FROM post_metrics
+          WHERE post_id = p.id
+          ORDER BY captured_at DESC
+          LIMIT 1
+       ) m ON true
+       LEFT JOIN media_assets ma ON ma.id = p.media_asset_id
+      WHERE ${where}
+      ORDER BY p.published_at DESC NULLS LAST, p.created_at DESC
+      LIMIT $${params.length}`,
+    params,
+  )
+}
+
+export async function getPost(workspaceId: string, id: string): Promise<PostRow | null> {
+  const rows = await query<PostRow>(
+    `SELECT p.*, m.reach, m.impressions, m.likes, m.comments, m.shares,
+            m.engagement_rate, m.captured_at AS metrics_captured_at, ma.data_uri
+       FROM posts p
+       LEFT JOIN LATERAL (
+         SELECT reach, impressions, likes, comments, shares, engagement_rate, captured_at
+           FROM post_metrics WHERE post_id = p.id ORDER BY captured_at DESC LIMIT 1
+       ) m ON true
+       LEFT JOIN media_assets ma ON ma.id = p.media_asset_id
+      WHERE p.workspace_id = $1 AND p.id = $2`,
+    [workspaceId, id],
+  )
+  return rows[0] ?? null
+}
+
+export async function insertPost(p: {
+  workspaceId: string
+  ideaId: string | null
+  title: string
+  platform: Platform
+  content: string
+  externalId: string
+  publishMode: 'demo' | 'live'
+  publishedAt: string
+  history: Array<Record<string, unknown>>
+  mediaAssetId: string | null
+}): Promise<{ id: string } | null> {
+  return queryOne<{ id: string }>(
+    `INSERT INTO posts
+       (workspace_id, idea_id, title, platform, content, status, external_id,
+        publish_mode, published_at, history, media_asset_id)
+     VALUES ($1,$2,$3,$4,$5,'published',$6,$7,$8::date,$9,$10)
+     RETURNING id`,
+    [
+      p.workspaceId,
+      p.ideaId,
+      p.title,
+      p.platform,
+      p.content,
+      p.externalId,
+      p.publishMode,
+      p.publishedAt,
+      JSON.stringify(p.history),
+      p.mediaAssetId,
+    ],
+  )
+}
+
+/** Appends a metrics reading. Never updates an existing row. */
+export async function insertPostMetrics(m: {
+  postId: string
+  reach: number
+  impressions: number
+  likes: number
+  comments: number
+  shares: number
+  engagementRate: number
+}): Promise<void> {
+  await query(
+    `INSERT INTO post_metrics
+       (post_id, reach, impressions, likes, comments, shares, engagement_rate)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [m.postId, m.reach, m.impressions, m.likes, m.comments, m.shares, m.engagementRate],
+  )
+}
+
+export async function setPostAnalysis(
+  workspaceId: string,
+  postId: string,
+  summary: string,
+  recommendation: string,
+): Promise<void> {
+  await query(
+    `UPDATE posts SET analysis_summary = $3, analysis_recommendation = $4
+      WHERE workspace_id = $1 AND id = $2`,
+    [workspaceId, postId, summary, recommendation],
+  )
+}
+
+/** The trailing baseline for a platform, from THIS account's own history. */
+export async function postBaseline(
+  workspaceId: string,
+  platform: Platform,
+  windowPosts: number,
+): Promise<{ avgReach: number; avgEngagementRate: number; samples: number }> {
+  const rows = await query<{ reach: number; engagement_rate: string }>(
+    `SELECT m.reach, m.engagement_rate
+       FROM posts p
+       JOIN LATERAL (
+         SELECT reach, engagement_rate FROM post_metrics
+          WHERE post_id = p.id ORDER BY captured_at DESC LIMIT 1
+       ) m ON true
+      WHERE p.workspace_id = $1 AND p.platform = $2 AND p.status = 'published'
+      ORDER BY p.published_at DESC
+      LIMIT $3`,
+    [workspaceId, platform, windowPosts],
+  )
+  if (rows.length === 0) return { avgReach: 0, avgEngagementRate: 0, samples: 0 }
+  return {
+    avgReach: rows.reduce((n, r) => n + r.reach, 0) / rows.length,
+    avgEngagementRate:
+      rows.reduce((n, r) => n + Number(r.engagement_rate), 0) / rows.length,
+    samples: rows.length,
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PLATFORM ANALYTICS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface PlatformAnalyticsRow {
+  id: string
+  platform: Platform
+  month: string
+  label: string | null
+  is_reported: boolean
+  metrics: Record<string, number>
+  daily: Array<{ date: string; value: number }>
+}
+
+export async function listPlatformAnalytics(
+  workspaceId: string,
+  opts: { platform?: Platform; month?: string } = {},
+): Promise<PlatformAnalyticsRow[]> {
+  const params: string[] = [workspaceId]
+  let where = 'workspace_id = $1'
+  if (opts.platform) {
+    params.push(opts.platform)
+    where += ` AND platform = $${params.length}`
+  }
+  if (opts.month) {
+    params.push(opts.month)
+    where += ` AND month = $${params.length}`
+  }
+  return query<PlatformAnalyticsRow>(
+    `SELECT * FROM platform_analytics WHERE ${where} ORDER BY month DESC, platform`,
+    params,
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   KNOWLEDGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface KnowledgeEntryRow {
+  id: string
+  title: string
+  category: string
+  content: string
+  source: string
+  sources: Array<{ title: string; url: string; publishedAt?: string }>
+  hashtag_id: string | null
+  hashtag_display: string | null
+  tags: string[]
+  confidence: 'High' | 'Medium' | 'Low'
+  evidence_count: number
+  active: boolean
+  origin: string
+  build_id: string | null
+  created_at: string
+}
+
+export async function listKnowledge(
+  workspaceId: string,
+  opts: { activeOnly?: boolean; category?: string; limit?: number } = {},
+): Promise<KnowledgeEntryRow[]> {
+  const params: Array<string | number> = [workspaceId]
+  let where = 'ke.workspace_id = $1'
+  if (opts.activeOnly) where += ' AND ke.active = true'
+  if (opts.category) {
+    params.push(opts.category)
+    where += ` AND ke.category = $${params.length}`
+  }
+  params.push(opts.limit ?? 500)
+
+  return query<KnowledgeEntryRow>(
+    `SELECT ke.*, h.display_tag AS hashtag_display
+       FROM knowledge_entries ke
+       LEFT JOIN hashtags h ON h.id = ke.hashtag_id
+      WHERE ${where}
+      ORDER BY
+        CASE ke.confidence WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
+        ke.created_at DESC
+      LIMIT $${params.length}`,
+    params,
+  )
+}
+
+export async function insertKnowledgeEntry(e: {
+  workspaceId: string
+  title: string
+  category: string
+  content: string
+  source: string
+  sources: Array<{ title: string; url: string; publishedAt?: string }>
+  hashtagId: string | null
+  confidence: 'High' | 'Medium' | 'Low'
+  origin: string
+  buildId: string | null
+  tags: string[]
+}): Promise<{ id: string } | null> {
+  return queryOne<{ id: string }>(
+    `INSERT INTO knowledge_entries
+       (workspace_id, title, category, content, source, sources, hashtag_id,
+        confidence, evidence_count, active, origin, build_id, tags)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12)
+     RETURNING id`,
+    [
+      e.workspaceId,
+      e.title,
+      e.category,
+      e.content,
+      e.source,
+      JSON.stringify(e.sources),
+      e.hashtagId,
+      e.confidence,
+      Math.max(1, e.sources.length),
+      e.origin,
+      e.buildId,
+      e.tags,
+    ],
+  )
+}
+
+/** Merges evidence into an existing entry rather than inserting a duplicate. */
+export async function mergeKnowledgeEntry(
+  id: string,
+  addSources: Array<{ title: string; url: string; publishedAt?: string }>,
+  promote: boolean,
+): Promise<void> {
+  await query(
+    `UPDATE knowledge_entries
+        SET sources = (
+              SELECT jsonb_agg(DISTINCT s)
+                FROM jsonb_array_elements(sources || $2::jsonb) s
+            ),
+            evidence_count = evidence_count + $3,
+            confidence = CASE
+              WHEN $4 AND confidence = 'Low' THEN 'Medium'
+              WHEN $4 AND confidence = 'Medium' THEN 'High'
+              ELSE confidence END,
+            updated_at = now()
+      WHERE id = $1`,
+    [id, JSON.stringify(addSources), addSources.length, promote],
+  )
+}
+
+/** Deactivates rather than deleting. There is no delete route for knowledge. */
+export async function setKnowledgeActive(
+  workspaceId: string,
+  id: string,
+  active: boolean,
+): Promise<KnowledgeEntryRow | null> {
+  return queryOne<KnowledgeEntryRow>(
+    `UPDATE knowledge_entries SET active = $3, updated_at = now()
+      WHERE workspace_id = $1 AND id = $2
+      RETURNING *, NULL::text AS hashtag_display`,
+    [workspaceId, id, active],
+  )
+}
+
+export async function setKnowledgeConfidence(
+  id: string,
+  confidence: 'High' | 'Medium' | 'Low',
+): Promise<void> {
+  await query(
+    'UPDATE knowledge_entries SET confidence = $2, updated_at = now() WHERE id = $1',
+    [id, confidence],
+  )
+}
+
+export interface KnowledgeBuildRow {
+  id: string
+  trigger: string
+  status: string
+  hashtags_researched: number
+  entries_written: number
+  entries_merged: number
+  sources_cited: number
+  research_source: 'live' | 'fixture'
+  started_at: string
+  finished_at: string | null
+  summary: Record<string, unknown>
+  error: string | null
+}
+
+export async function startKnowledgeBuild(
+  workspaceId: string,
+  trigger: 'cron' | 'manual' | 'jarvis',
+): Promise<KnowledgeBuildRow | null> {
+  return queryOne<KnowledgeBuildRow>(
+    `INSERT INTO knowledge_builds (workspace_id, trigger, status)
+     VALUES ($1,$2,'running') RETURNING *`,
+    [workspaceId, trigger],
+  )
+}
+
+export async function finishKnowledgeBuild(
+  id: string,
+  patch: {
+    status: 'completed' | 'failed'
+    hashtagsResearched: number
+    entriesWritten: number
+    entriesMerged: number
+    sourcesCited: number
+    researchSource: 'live' | 'fixture'
+    summary: Record<string, unknown>
+    error?: string
+  },
+): Promise<void> {
+  await query(
+    `UPDATE knowledge_builds SET
+       status = $2, hashtags_researched = $3, entries_written = $4,
+       entries_merged = $5, sources_cited = $6, research_source = $7,
+       summary = $8::jsonb, error = $9, finished_at = now()
+     WHERE id = $1`,
+    [
+      id,
+      patch.status,
+      patch.hashtagsResearched,
+      patch.entriesWritten,
+      patch.entriesMerged,
+      patch.sourcesCited,
+      patch.researchSource,
+      JSON.stringify(patch.summary),
+      patch.error ?? null,
+    ],
+  )
+}
+
+export async function listKnowledgeBuilds(
+  workspaceId: string,
+  limit = 20,
+): Promise<KnowledgeBuildRow[]> {
+  return query<KnowledgeBuildRow>(
+    `SELECT * FROM knowledge_builds WHERE workspace_id = $1
+      ORDER BY started_at DESC LIMIT $2`,
+    [workspaceId, limit],
+  )
+}
+
+export async function latestKnowledgeBuild(
+  workspaceId: string,
+): Promise<KnowledgeBuildRow | null> {
+  const rows = await listKnowledgeBuilds(workspaceId, 1)
+  return rows[0] ?? null
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   AGENT STATE, SKILLS AND RUNS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface AgentStateRow {
+  agent_id: AgentId
+  status: AgentRunStatus
+  current_task: string
+  last_run: string | null
+  processed: number
+  success_rate: number
+}
+
+export async function listAgentState(workspaceId: string): Promise<AgentStateRow[]> {
+  return query<AgentStateRow>(
+    `SELECT agent_id, status, current_task, last_run, processed, success_rate
+       FROM agent_state WHERE workspace_id = $1`,
+    [workspaceId],
+  )
+}
+
+export async function setAgentState(
+  workspaceId: string,
+  agentId: AgentId,
+  patch: {
+    status?: AgentRunStatus
+    currentTask?: string
+    lastRun?: boolean
+    processed?: number
+    successRate?: number
+  },
+): Promise<void> {
+  await query(
+    `INSERT INTO agent_state
+       (workspace_id, agent_id, status, current_task, last_run, processed, success_rate)
+     VALUES ($1,$2,COALESCE($3,'idle'),COALESCE($4,'Idle'),
+             CASE WHEN $5 THEN now() ELSE NULL END,
+             COALESCE($6,0), COALESCE($7,100))
+     ON CONFLICT (workspace_id, agent_id) DO UPDATE SET
+       status       = COALESCE($3, agent_state.status),
+       current_task = COALESCE($4, agent_state.current_task),
+       last_run     = CASE WHEN $5 THEN now() ELSE agent_state.last_run END,
+       processed    = COALESCE($6, agent_state.processed),
+       success_rate = COALESCE($7, agent_state.success_rate)`,
+    [
+      workspaceId,
+      agentId,
+      patch.status ?? null,
+      patch.currentTask ?? null,
+      patch.lastRun ?? false,
+      patch.processed ?? null,
+      patch.successRate ?? null,
+    ],
+  )
+}
+
+export interface SkillOverrideRow {
+  skill_id: string
+  agent_id: string
+  enabled: boolean
+  config: Record<string, unknown>
+  updated_at: string
+}
+
+export async function listSkillOverrides(
+  workspaceId: string,
+): Promise<Map<string, SkillOverrideRow>> {
+  const rows = await query<SkillOverrideRow>(
+    'SELECT skill_id, agent_id, enabled, config, updated_at FROM agent_skills WHERE workspace_id = $1',
+    [workspaceId],
+  )
+  return new Map(rows.map((r) => [r.skill_id, r]))
+}
+
+export async function upsertSkillOverride(
+  workspaceId: string,
+  skillId: string,
+  agentId: string,
+  patch: { enabled?: boolean; config?: Record<string, unknown> },
+): Promise<SkillOverrideRow | null> {
+  return queryOne<SkillOverrideRow>(
+    `INSERT INTO agent_skills (workspace_id, skill_id, agent_id, enabled, config)
+     VALUES ($1,$2,$3,COALESCE($4,true),COALESCE($5::jsonb,'{}'::jsonb))
+     ON CONFLICT (workspace_id, skill_id) DO UPDATE SET
+       enabled = COALESCE($4, agent_skills.enabled),
+       config  = COALESCE($5::jsonb, agent_skills.config),
+       updated_at = now()
+     RETURNING skill_id, agent_id, enabled, config, updated_at`,
+    [
+      workspaceId,
+      skillId,
+      agentId,
+      patch.enabled ?? null,
+      patch.config ? JSON.stringify(patch.config) : null,
+    ],
+  )
+}
+
+export async function deleteSkillOverride(
+  workspaceId: string,
+  skillId: string,
+): Promise<boolean> {
+  const rows = await query<{ skill_id: string }>(
+    'DELETE FROM agent_skills WHERE workspace_id = $1 AND skill_id = $2 RETURNING skill_id',
+    [workspaceId, skillId],
+  )
+  return rows.length > 0
+}
+
+/** Aggregated run statistics per skill, for the Studio cards. */
+export async function skillStats(
+  workspaceId: string,
+): Promise<Map<string, { runs: number; failures: number; avgMs: number }>> {
+  const rows = await query<{
+    skill_id: string
+    runs: string
+    failures: string
+    avg_ms: string | null
+  }>(
+    `SELECT skill_id,
+            count(*)::text AS runs,
+            count(*) FILTER (WHERE status = 'failed')::text AS failures,
+            round(avg(duration_ms))::text AS avg_ms
+       FROM skill_runs
+      WHERE workspace_id = $1
+      GROUP BY skill_id`,
+    [workspaceId],
+  )
+  return new Map(
+    rows.map((r) => [
+      r.skill_id,
+      {
+        runs: Number(r.runs),
+        failures: Number(r.failures),
+        avgMs: Number(r.avg_ms ?? 0),
+      },
+    ]),
+  )
+}
+
+export async function startPipelineRun(
+  workspaceId: string,
+  trigger: string,
+  turnId?: string,
+): Promise<{ id: string }> {
+  const row = await queryOne<{ id: string }>(
+    `INSERT INTO pipeline_runs (workspace_id, trigger, status, turn_id)
+     VALUES ($1,$2,'running',$3) RETURNING id`,
+    [workspaceId, trigger, turnId ?? null],
+  )
+  if (!row) throw new Error('Could not open a pipeline run')
+  return row
+}
+
+export async function finishPipelineRun(
+  id: string,
+  status: 'completed' | 'failed',
+  summary: Record<string, unknown>,
+): Promise<void> {
+  await query(
+    `UPDATE pipeline_runs SET status = $2, summary = $3::jsonb, finished_at = now()
+      WHERE id = $1`,
+    [id, status, JSON.stringify(summary)],
+  )
+}
+
+export async function countPipelineRuns(workspaceId: string): Promise<number> {
+  const row = await queryOne<{ n: string }>(
+    'SELECT count(*)::text AS n FROM pipeline_runs WHERE workspace_id = $1',
+    [workspaceId],
+  )
+  return Number(row?.n ?? 0)
+}
+
+export interface PipelineRunRow {
+  id: string
+  trigger: string
+  status: string
+  turn_id: string | null
+  started_at: string
+  finished_at: string | null
+  summary: Record<string, unknown>
+}
+
+export async function latestPipelineRun(
+  workspaceId: string,
+): Promise<PipelineRunRow | null> {
+  return queryOne<PipelineRunRow>(
+    `SELECT * FROM pipeline_runs WHERE workspace_id = $1
+      ORDER BY started_at DESC LIMIT 1`,
+    [workspaceId],
+  )
+}
+
+export async function startAgentRun(a: {
+  workspaceId: string
+  pipelineRunId: string | null
+  agentId: AgentId
+  trigger: string
+  turnId: string | null
+  inputCount: number
+}): Promise<{ id: string }> {
+  const row = await queryOne<{ id: string }>(
+    `INSERT INTO agent_runs
+       (workspace_id, pipeline_run_id, agent_id, status, trigger, turn_id, input_count)
+     VALUES ($1,$2,$3,'running',$4,$5,$6) RETURNING id`,
+    [a.workspaceId, a.pipelineRunId, a.agentId, a.trigger, a.turnId, a.inputCount],
+  )
+  if (!row) throw new Error('Could not open an agent run')
+  return row
+}
+
+export async function finishAgentRun(
+  id: string,
+  patch: {
+    status: 'completed' | 'failed'
+    durationMs: number
+    outputCount: number
+    error?: string
+  },
+): Promise<void> {
+  await query(
+    `UPDATE agent_runs SET status = $2, duration_ms = $3, output_count = $4,
+            error = $5, finished_at = now()
+      WHERE id = $1`,
+    [id, patch.status, patch.durationMs, patch.outputCount, patch.error ?? null],
+  )
+}
+
+export async function insertSkillRun(s: {
+  workspaceId: string
+  agentRunId: string
+  skillId: string
+  agentId: AgentId
+  status: SkillRunStatus
+  durationMs: number
+  configUsed: ResolvedConfig
+  note?: string
+}): Promise<void> {
+  await query(
+    `INSERT INTO skill_runs
+       (workspace_id, agent_run_id, skill_id, agent_id, status, duration_ms, config_used, note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,
+    [
+      s.workspaceId,
+      s.agentRunId,
+      s.skillId,
+      s.agentId,
+      s.status,
+      s.durationMs,
+      JSON.stringify(s.configUsed),
+      s.note ?? null,
+    ],
+  )
+}
+
+export interface AgentRunRow {
+  id: string
+  pipeline_run_id: string | null
+  agent_id: string
+  status: string
+  trigger: string
+  turn_id: string | null
+  started_at: string
+  finished_at: string | null
+  duration_ms: number | null
+  input_count: number
+  output_count: number
+  error: string | null
+}
+
+export async function listAgentRuns(
+  workspaceId: string,
+  limit = 40,
+): Promise<AgentRunRow[]> {
+  return query<AgentRunRow>(
+    `SELECT * FROM agent_runs WHERE workspace_id = $1
+      ORDER BY started_at DESC LIMIT $2`,
+    [workspaceId, limit],
+  )
+}
+
+export interface SkillRunRow {
+  id: string
+  agent_run_id: string
+  skill_id: string
+  agent_id: string
+  status: SkillRunStatus
+  duration_ms: number
+  config_used: ResolvedConfig
+  note: string | null
+  started_at: string
+}
+
+export async function listSkillRuns(
+  workspaceId: string,
+  limit = 300,
+): Promise<SkillRunRow[]> {
+  return query<SkillRunRow>(
+    `SELECT * FROM skill_runs WHERE workspace_id = $1
+      ORDER BY started_at DESC LIMIT $2`,
+    [workspaceId, limit],
+  )
+}
+
+/** The resolved config a past run actually used — the explainability path. */
+export async function skillRunsForRun(
+  workspaceId: string,
+  pipelineRunId: string,
+): Promise<SkillRunRow[]> {
+  return query<SkillRunRow>(
+    `SELECT sr.* FROM skill_runs sr
+       JOIN agent_runs ar ON ar.id = sr.agent_run_id
+      WHERE sr.workspace_id = $1 AND ar.pipeline_run_id = $2
+      ORDER BY sr.started_at ASC`,
+    [workspaceId, pipelineRunId],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ACTIVITY AND THE REVIEW QUEUE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface ActivityRow {
+  id: string
+  agent_id: string | null
+  message: string
+  status: ActivityStatus
+  entity_type: string | null
+  entity_id: string | null
+  created_at: string
+}
+
+export async function insertActivity(a: {
+  workspaceId: string
+  agentId: string | null
+  message: string
+  status: ActivityStatus
+  entityType?: string
+  entityId?: string
+}): Promise<void> {
+  await query(
+    `INSERT INTO activity_events
+       (workspace_id, agent_id, message, status, entity_type, entity_id)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [
+      a.workspaceId,
+      a.agentId,
+      a.message,
+      a.status,
+      a.entityType ?? null,
+      a.entityId ?? null,
+    ],
+  )
+}
+
+export async function listActivity(
+  workspaceId: string,
+  limit = 60,
+): Promise<ActivityRow[]> {
+  return query<ActivityRow>(
+    `SELECT * FROM activity_events WHERE workspace_id = $1
+      ORDER BY created_at DESC LIMIT $2`,
+    [workspaceId, limit],
+  )
+}
+
+export interface ReviewQueueRow {
+  id: string
+  kind: string
+  entity_id: string | null
+  reason: string
+  decision_requested: string
+  options: string[]
+  resolved: boolean
+  resolved_by: string | null
+  resolved_at: string | null
+  outcome: string | null
+  created_at: string
+  /** Joined for display, so the queue row is answerable without a second call. */
+  entity_title: string | null
+}
+
+export async function listReviewQueue(
+  workspaceId: string,
+  resolved = false,
+): Promise<ReviewQueueRow[]> {
+  return query<ReviewQueueRow>(
+    `SELECT rq.*,
+            COALESCE(si.title, '#' || h.display_tag, ke.title) AS entity_title
+       FROM review_queue rq
+       LEFT JOIN scraped_items si ON si.id = rq.entity_id AND rq.kind = 'scraped_item'
+       LEFT JOIN hashtags h ON h.id = rq.entity_id AND rq.kind = 'hashtag'
+       LEFT JOIN knowledge_entries ke ON ke.id = rq.entity_id AND rq.kind = 'knowledge_conflict'
+      WHERE rq.workspace_id = $1 AND rq.resolved = $2
+      ORDER BY rq.created_at ASC`,
+    [workspaceId, resolved],
+  )
+}
+
+export async function insertReviewQueueRow(r: {
+  workspaceId: string
+  kind: 'scraped_item' | 'hashtag' | 'knowledge_conflict'
+  entityId: string
+  reason: string
+  decisionRequested: string
+  options: string[]
+}): Promise<void> {
+  await query(
+    `INSERT INTO review_queue
+       (workspace_id, kind, entity_id, reason, decision_requested, options)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [r.workspaceId, r.kind, r.entityId, r.reason, r.decisionRequested, r.options],
+  )
+}
+
+export async function resolveReviewQueueRow(
+  workspaceId: string,
+  id: string,
+  outcome: string,
+  by: string,
+): Promise<ReviewQueueRow | null> {
+  return queryOne<ReviewQueueRow>(
+    `UPDATE review_queue
+        SET resolved = true, outcome = $3, resolved_by = $4, resolved_at = now()
+      WHERE workspace_id = $1 AND id = $2
+      RETURNING *, NULL::text AS entity_title`,
+    [workspaceId, id, outcome, by],
+  )
+}
+
+/** Closes the queue row attached to an entity, when its verdict is set directly. */
+export async function resolveQueueForEntity(
+  workspaceId: string,
+  entityId: string,
+  outcome: string,
+  by: string,
+): Promise<void> {
+  await query(
+    `UPDATE review_queue
+        SET resolved = true, outcome = $3, resolved_by = $4, resolved_at = now()
+      WHERE workspace_id = $1 AND entity_id = $2 AND resolved = false`,
+    [workspaceId, entityId, outcome, by],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LINEAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export async function insertLineage(e: {
+  workspaceId: string
+  fromType: string
+  fromId: string
+  toType: string
+  toId: string
+  agentId: string | null
+}): Promise<void> {
+  await query(
+    `INSERT INTO lineage_edges
+       (workspace_id, from_type, from_id, to_type, to_id, agent_id)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT DO NOTHING`,
+    [e.workspaceId, e.fromType, e.fromId, e.toType, e.toId, e.agentId],
+  )
+}
+
+export interface LineageEdge {
+  from_type: string
+  from_id: string
+  to_type: string
+  to_id: string
+  agent_id: string | null
+  depth: number
+  direction: 'forward' | 'backward'
+}
+
+/**
+ * Traces both directions from a node with a recursive CTE, capped at depth 8.
+ * Backward answers "where did this come from"; forward answers "what became of it".
+ */
+export async function traceLineage(
+  workspaceId: string,
+  type: string,
+  id: string,
+  maxDepth = 8,
+): Promise<LineageEdge[]> {
+  const forward = await query<LineageEdge>(
+    `WITH RECURSIVE walk AS (
+       SELECT from_type, from_id, to_type, to_id, agent_id, 1 AS depth
+         FROM lineage_edges
+        WHERE workspace_id = $1 AND from_type = $2 AND from_id = $3
+       UNION ALL
+       SELECT e.from_type, e.from_id, e.to_type, e.to_id, e.agent_id, w.depth + 1
+         FROM lineage_edges e
+         JOIN walk w ON e.from_type = w.to_type AND e.from_id = w.to_id
+        WHERE e.workspace_id = $1 AND w.depth < $4
+     )
+     SELECT DISTINCT *, 'forward'::text AS direction FROM walk ORDER BY depth`,
+    [workspaceId, type, id, maxDepth],
+  )
+
+  const backward = await query<LineageEdge>(
+    `WITH RECURSIVE walk AS (
+       SELECT from_type, from_id, to_type, to_id, agent_id, 1 AS depth
+         FROM lineage_edges
+        WHERE workspace_id = $1 AND to_type = $2 AND to_id = $3
+       UNION ALL
+       SELECT e.from_type, e.from_id, e.to_type, e.to_id, e.agent_id, w.depth + 1
+         FROM lineage_edges e
+         JOIN walk w ON e.to_type = w.from_type AND e.to_id = w.from_id
+        WHERE e.workspace_id = $1 AND w.depth < $4
+     )
+     SELECT DISTINCT *, 'backward'::text AS direction FROM walk ORDER BY depth`,
+    [workspaceId, type, id, maxDepth],
+  )
+
+  return [...backward, ...forward]
+}

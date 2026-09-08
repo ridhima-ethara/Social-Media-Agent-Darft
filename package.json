@@ -1,0 +1,53 @@
+{
+  "name": "ethara-socialai",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Ethara SocialAI — a twelve-agent social media operations platform with the JARVIS command plane",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:server": "npm --prefix server run dev",
+    "dev:full": "concurrently -n API,WEB -c magenta,cyan \"npm:dev:server\" \"npm:dev\"",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "oxlint .",
+    "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false || tsc -b",
+    "db:up": "docker compose up -d db",
+    "db:migrate": "npm --prefix server run db:migrate",
+    "db:seed": "npm --prefix server run db:seed",
+    "db:reset": "npm --prefix server run db:reset",
+    "setup": "npm install && npm --prefix server install && npm run db:up && node scripts/wait-for-db.mjs && npm run db:reset",
+    "agent:check": "tsx scripts/check-agents.ts",
+    "agent:new": "node scripts/new-agent.mjs",
+    "specs:build": "tsx scripts/build-specs.ts",
+    "verify": "tsx scripts/verify.ts"
+  },
+  "dependencies": {
+    "lucide-react": "0.548.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "3.10.1",
+    "zod": "3.25.76",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "22.18.13",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "5.2.0",
+    "concurrently": "9.2.4",
+    "oxlint": "1.82.0",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vite": "7.3.6"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
+  }
+}

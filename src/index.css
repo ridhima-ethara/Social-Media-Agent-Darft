@@ -1,0 +1,1482 @@
+@import 'tailwindcss';
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ETHARA SOCIALAI · DESIGN TOKENS
+   Every colour in the product is a token declared here. No component may
+   hard-code a colour. If no token fits, add one to BOTH themes.
+   Theme is a single attribute: <html data-theme="dark|light">.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@theme {
+  /* ── dark (default) ───────────────────────────────────────────────────── */
+  --color-page: #0b0e14;
+  --color-surface: #151a28;
+  --color-surface-2: #1c2235;
+  --color-surface-3: #232a40;
+  --color-line: rgba(238, 0, 238, 0.14);
+  --color-line-strong: rgba(122, 153, 209, 0.28);
+  --color-ink: #ffffff;
+  --color-ink-2: #c5cbe9;
+  --color-ink-3: #8a8fa5;
+  --color-accent: #7a99d1;
+  --color-accent-bright: #a7bfe8;
+  --color-magenta: #ee00ee;
+  --color-magenta-ink: #f27bf2;
+  --color-glow: rgba(238, 0, 238, 0.3);
+  --color-on-accent: #0b0e14;
+  --color-good: #0ca30c;
+  --color-warn: #fab219;
+  --color-serious: #ec835a;
+  --color-critical: #d03b3b;
+  --color-good-ink: #4ec94e;
+  --color-critical-ink: #ee7070;
+
+  /* ── chart series — theme-invariant, contrast-validated on BOTH surfaces ─ */
+  --color-series-li: #3987e5;
+  --color-series-ig: #d55181;
+  --color-series-x: #19a219;
+
+  /* ── JARVIS HUD ───────────────────────────────────────────────────────── */
+  --color-hud: rgba(122, 153, 209, 0.22);
+  --color-hud-strong: rgba(167, 191, 232, 0.42);
+  --color-hud-glow: rgba(238, 0, 238, 0.18);
+  --jarvis-ring-1: 40s;
+  --jarvis-ring-2: 26s;
+  --jarvis-ring-3: 9s;
+
+  /* ── motion ───────────────────────────────────────────────────────────── */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 180ms;
+  --dur-base: 260ms;
+  --dur-slow: 420ms;
+  --dur-cinematic: 900ms;
+
+  /* ── type ─────────────────────────────────────────────────────────────── */
+  --font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono',
+    monospace;
+}
+
+:root[data-theme='light'] {
+  --color-page: #f6f5fb;
+  --color-surface: #ffffff;
+  --color-surface-2: #f3f1f9;
+  --color-surface-3: #e9e6f3;
+  --color-line: rgba(192, 0, 192, 0.14);
+  --color-line-strong: rgba(83, 78, 125, 0.3);
+  --color-ink: #1b1930;
+  --color-ink-2: #4a4763;
+  --color-ink-3: #767390;
+  --color-accent: #5470c2;
+  --color-accent-bright: #3b56a8;
+  --color-magenta: #c000c0;
+  --color-magenta-ink: #a21caf;
+  --color-glow: rgba(192, 0, 192, 0.22);
+  --color-on-accent: #ffffff;
+  --color-good: #0a8f0a;
+  --color-warn: #b57a00;
+  --color-serious: #c25a2c;
+  --color-critical: #c02b2b;
+  --color-good-ink: #0f7a0f;
+  --color-critical-ink: #b42323;
+  --color-hud: rgba(84, 112, 194, 0.16);
+  --color-hud-strong: rgba(59, 86, 168, 0.34);
+  --color-hud-glow: rgba(192, 0, 192, 0.14);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BASE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+* {
+  border-color: var(--color-line);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden; /* the page never scrolls; panes scroll */
+}
+
+::selection {
+  background: var(--color-glow);
+  color: var(--color-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent-bright);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Scrollbars — themed, thin, unobtrusive */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UTILITIES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@utility card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+}
+
+@utility card-hover {
+  transition:
+    transform var(--dur-base) var(--ease-out-soft),
+    box-shadow var(--dur-base) var(--ease-out-soft),
+    border-color var(--dur-base) var(--ease-out-soft);
+
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px -12px var(--color-glow);
+    border-color: var(--color-line-strong);
+  }
+}
+
+@utility display {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+@utility glass {
+  background: color-mix(in srgb, var(--color-surface) 72%, transparent);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid var(--color-line);
+}
+
+@utility bg-live {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+@utility hud-bracket {
+  position: absolute;
+  width: 46px;
+  height: 46px;
+  border-color: var(--color-hud-strong);
+  pointer-events: none;
+}
+
+@utility scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-hud-strong) 18%,
+    var(--color-magenta) 50%,
+    var(--color-hud-strong) 82%,
+    transparent
+  );
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+@utility mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOTION VOCABULARY  §8.3
+   Every keyframe below is used by something. Nothing bounces. Nothing flashes.
+   No animation is faster than 120ms. No ambient loop is shorter than 8s.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Ambient / structural ─────────────────────────────────────────────────── */
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes stream-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -180% 0;
+  }
+  to {
+    background-position: 180% 0;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes drift-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(38px, -26px, 0) scale(1.06);
+  }
+}
+
+@keyframes drift-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.04);
+  }
+  50% {
+    transform: translate3d(-32px, 24px, 0) scale(1);
+  }
+}
+
+@keyframes drift-c {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(22px, 30px, 0) scale(1.08);
+  }
+}
+
+@keyframes grid-pan {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(40px, 40px, 0);
+  }
+}
+
+@keyframes scan-line {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.55;
+  }
+  92% {
+    opacity: 0.55;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+
+@keyframes scan-sweep {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.7;
+  }
+  80% {
+    opacity: 0.7;
+  }
+  100% {
+    transform: translateY(220%);
+    opacity: 0;
+  }
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@keyframes hud-bracket-draw {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ticker-flip {
+  0% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  45% {
+    transform: translateY(-70%);
+    opacity: 0;
+  }
+  55% {
+    transform: translateY(70%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* ── Status / telemetry ───────────────────────────────────────────────────── */
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.86);
+  }
+}
+
+@keyframes ping-slow {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+@keyframes ring-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ring-spin-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes progress-arc {
+  from {
+    stroke-dashoffset: var(--arc-len, 100);
+  }
+  to {
+    stroke-dashoffset: var(--arc-target, 0);
+  }
+}
+
+@keyframes check-fill {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes count-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes flip-digit {
+  0% {
+    transform: rotateX(0deg);
+  }
+  50% {
+    transform: rotateX(-90deg);
+  }
+  100% {
+    transform: rotateX(0deg);
+  }
+}
+
+@keyframes peak-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.15;
+  }
+}
+
+@keyframes chart-reveal {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ── Pipeline / graph ─────────────────────────────────────────────────────── */
+
+@keyframes flow-right {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes flow-down {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  to {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes nn-dashflow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+@keyframes nn-ping {
+  0% {
+    r: 3;
+    opacity: 0.85;
+  }
+  100% {
+    r: 15;
+    opacity: 0;
+  }
+}
+
+@keyframes nn-count {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes neural-twinkle {
+  0%,
+  100% {
+    opacity: 0.14;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes neural-flow {
+  from {
+    stroke-dashoffset: 40;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes neural-burst {
+  0% {
+    r: 2;
+    opacity: 0.95;
+  }
+  100% {
+    r: 20;
+    opacity: 0;
+  }
+}
+
+@keyframes neural-halo {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.16);
+  }
+}
+
+@keyframes neural-transit {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes edge-hot {
+  0%,
+  100% {
+    opacity: 0.55;
+    stroke-width: 1.5;
+  }
+  50% {
+    opacity: 1;
+    stroke-width: 2.6;
+  }
+}
+
+@keyframes bucket-land {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ── Brand / sign-in / boot ───────────────────────────────────────────────── */
+
+@keyframes mark-draw {
+  from {
+    stroke-dashoffset: 320;
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes mark-vanish {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.14);
+  }
+}
+
+@keyframes mark-fillin {
+  from {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes auth-settle {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes auth-orbit-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes auth-orbit-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes auth-orbit-spin-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes auth-letter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes auth-letter-ai {
+  from {
+    opacity: 0;
+    transform: scale(0.7);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes auth-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.25);
+  }
+}
+
+@keyframes auth-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes auth-field {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes auth-card-rise {
+  from {
+    opacity: 0;
+    transform: translateY(22px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes auth-card-beam {
+  0% {
+    transform: translateX(-120%);
+    opacity: 0;
+  }
+  40% {
+    opacity: 0.8;
+  }
+  100% {
+    transform: translateX(120%);
+    opacity: 0;
+  }
+}
+
+@keyframes auth-particle-rise {
+  0% {
+    transform: translateY(0) scale(0.7);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.65;
+  }
+  85% {
+    opacity: 0.5;
+  }
+  100% {
+    transform: translateY(-190px) scale(1.15);
+    opacity: 0;
+  }
+}
+
+@keyframes auth-mark-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-9px);
+  }
+}
+
+@keyframes auth-halo {
+  0%,
+  100% {
+    opacity: 0.34;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.72;
+    transform: scale(1.07);
+  }
+}
+
+@keyframes auth-glow-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.5;
+  }
+  50% {
+    transform: translate3d(26px, -20px, 0);
+    opacity: 0.85;
+  }
+}
+
+@keyframes auth-grid-pan {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(46px, 46px, 0);
+  }
+}
+
+@keyframes auth-signal-drift {
+  0% {
+    transform: translateX(-14%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.5;
+  }
+  80% {
+    opacity: 0.5;
+  }
+  100% {
+    transform: translateX(14%);
+    opacity: 0;
+  }
+}
+
+@keyframes auth-accent-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes auth-gradient {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes auth-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Boot / welcome ───────────────────────────────────────────────────────── */
+
+@keyframes boot-line {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes boot-stage-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes boot-ring {
+  from {
+    transform: scale(0.5);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+@keyframes boot-spark {
+  from {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  to {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+
+@keyframes boot-leave {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.06);
+  }
+}
+
+@keyframes flowbar-connector-in {
+  from {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes flowbar-ring {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  40% {
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+/* ── JARVIS — the expressive layer ────────────────────────────────────────── */
+
+@keyframes jarvis-ring-outer {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes jarvis-ring-mid {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes jarvis-ring-inner {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes jarvis-core-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+@keyframes jarvis-listen {
+  from {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0.95;
+    transform: scale(1.1);
+  }
+}
+
+@keyframes jarvis-think-sweep {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes jarvis-speak-pulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes jarvis-attention {
+  0%,
+  62%,
+  100% {
+    opacity: 0.4;
+  }
+  70%,
+  86% {
+    opacity: 1;
+  }
+  78% {
+    opacity: 0.4;
+  }
+}
+
+@keyframes jarvis-error-flash {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes jarvis-wave {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes jarvis-token-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes jarvis-plan-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes jarvis-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes jarvis-step-run {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes jarvis-step-done {
+  0% {
+    opacity: 0.35;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes jarvis-confirm-ttl {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: var(--ttl-len, 138);
+  }
+}
+
+@keyframes jarvis-bar-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes jarvis-notice-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ANIMATION CLASSES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.anim-fade-up {
+  animation: fade-up 350ms var(--ease-out-expo) both;
+}
+.anim-fade-in {
+  animation: fade-in 250ms var(--ease-out-soft) both;
+}
+.anim-pop-in {
+  animation: pop-in 400ms var(--ease-out-soft) both;
+}
+.anim-slide-in {
+  animation: slide-in-right 300ms var(--ease-out-expo) both;
+}
+.anim-stream-in {
+  animation: stream-in 450ms var(--ease-out-expo) both;
+}
+.anim-dialog-in {
+  animation: dialog-in var(--dur-slow) var(--ease-out-expo) both;
+}
+.anim-pulse-dot {
+  animation: pulse-dot 1.4s var(--ease-in-out-soft) infinite;
+}
+.anim-ping-slow {
+  animation: ping-slow 2.2s var(--ease-out-soft) infinite;
+}
+.anim-glow {
+  animation: glow-pulse 2.2s var(--ease-in-out-soft) infinite;
+}
+.anim-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-2) 25%,
+    var(--color-surface-3) 50%,
+    var(--color-surface-2) 75%
+  );
+  background-size: 220% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+.anim-count-up {
+  animation: count-up 400ms var(--ease-out-expo) both;
+}
+.anim-bucket-land {
+  animation: bucket-land 420ms var(--ease-out-soft);
+}
+.anim-neural-transit {
+  animation: neural-transit 900ms var(--ease-in-out-soft) infinite;
+}
+
+/* Staggered children — 30ms apart via --i, capped at 12 steps */
+.stagger-fade > * {
+  animation: fade-up 350ms var(--ease-out-expo) both;
+  animation-delay: calc(min(var(--i, 0), 12) * 30ms);
+}
+
+.chart-reveal {
+  animation: chart-reveal 1100ms var(--ease-out-expo) both;
+}
+
+.peak-pulse {
+  animation: peak-pulse 2.4s var(--ease-in-out-soft) infinite;
+}
+
+.ticker-flip {
+  animation: ticker-flip 120ms var(--ease-in-out-soft);
+}
+
+/* ── The JARVIS core: one class, seven states ─────────────────────────────── */
+
+.jarvis-core {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.jarvis-core .jc-ring-outer {
+  transform-origin: center;
+  animation: jarvis-ring-outer var(--jarvis-ring-1) linear infinite;
+  will-change: transform;
+}
+.jarvis-core .jc-ring-mid {
+  transform-origin: center;
+  animation: jarvis-ring-mid var(--jarvis-ring-2) linear infinite;
+  will-change: transform;
+}
+.jarvis-core .jc-ring-inner {
+  transform-origin: center;
+}
+.jarvis-core .jc-centre {
+  transform-origin: center;
+  animation: jarvis-core-breathe 4s var(--ease-in-out-soft) infinite;
+}
+.jarvis-core .jc-sweep {
+  display: none;
+  transform-origin: center;
+}
+.jarvis-core .jc-halo {
+  opacity: 0.3;
+  transform-origin: center;
+}
+
+/* dormant — the resting state */
+.jarvis-core[data-state='dormant'] {
+  opacity: 0.45;
+}
+
+/* listening — rings speed up, halo blooms, tick ring becomes a waveform */
+.jarvis-core[data-state='listening'] .jc-ring-outer {
+  animation-duration: 8s;
+}
+.jarvis-core[data-state='listening'] .jc-ring-mid {
+  animation-duration: 8s;
+}
+.jarvis-core[data-state='listening'] .jc-halo {
+  animation: jarvis-listen 400ms var(--ease-out-soft) both;
+  opacity: 0.95;
+}
+
+/* thinking — counter-spin at 2.2s + an orbiting scan highlight */
+.jarvis-core[data-state='thinking'] .jc-ring-outer,
+.jarvis-core[data-state='thinking'] .jc-ring-mid {
+  animation-duration: 2.2s;
+}
+.jarvis-core[data-state='thinking'] .jc-sweep {
+  display: block;
+  animation: jarvis-think-sweep 900ms linear infinite;
+}
+
+/* working — the outer ring becomes a progress arc */
+.jarvis-core[data-state='working'] .jc-ring-outer {
+  animation-duration: 6s;
+}
+.jarvis-core[data-state='working'] .jc-arc {
+  transition: stroke-dashoffset var(--dur-base) var(--ease-out-soft);
+}
+
+/* speaking — the centre pulses per narration token */
+.jarvis-core[data-state='speaking'] .jc-centre {
+  animation: jarvis-speak-pulse 140ms var(--ease-out-soft);
+}
+
+/* attention — a slow double blink */
+.jarvis-core[data-state='attention'] .jc-halo {
+  animation: jarvis-attention 3s var(--ease-in-out-soft) infinite;
+}
+
+/* error — one hard flash, then settle */
+.jarvis-core[data-state='error'] .jc-centre {
+  animation: jarvis-error-flash 180ms var(--ease-in-out-soft) 1;
+}
+
+.jarvis-wave-bar {
+  transform-origin: center bottom;
+  will-change: transform;
+}
+
+.jarvis-caret::after {
+  content: '';
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  margin-left: 2px;
+  background: var(--color-magenta-ink);
+  vertical-align: text-bottom;
+  animation: jarvis-token-caret 620ms steps(1) infinite;
+}
+
+.anim-jarvis-plan-in {
+  animation: jarvis-plan-in var(--dur-base) var(--ease-out-expo) both;
+}
+.anim-jarvis-step-in {
+  animation: jarvis-step-in var(--dur-base) var(--ease-out-expo) both;
+  animation-delay: calc(min(var(--i, 0), 12) * 30ms);
+}
+.anim-jarvis-bar-rise {
+  animation: jarvis-bar-rise 220ms var(--ease-out-expo) both;
+}
+.anim-jarvis-notice-in {
+  animation: jarvis-notice-in var(--dur-base) var(--ease-out-expo) both;
+}
+
+/* ── Ambient HUD ──────────────────────────────────────────────────────────── */
+
+.jarvis-hud .hud-bracket {
+  animation:
+    hud-bracket-draw 720ms var(--ease-out-expo) both,
+    glow-pulse 8s var(--ease-in-out-soft) infinite 720ms;
+}
+
+.jarvis-hud .hud-grid {
+  animation: grid-pan 60s linear infinite;
+  will-change: transform;
+}
+
+.jarvis-hud .hud-scan {
+  animation: scan-line 12s var(--ease-in-out-soft) infinite;
+  will-change: transform;
+}
+
+.drift-a {
+  animation: drift-a 32s var(--ease-in-out-soft) infinite;
+  will-change: transform;
+}
+.drift-b {
+  animation: drift-b 38s var(--ease-in-out-soft) infinite;
+  will-change: transform;
+}
+.drift-c {
+  animation: drift-c 26s var(--ease-in-out-soft) infinite;
+  will-change: transform;
+}
+.grid-pan {
+  animation: grid-pan 60s linear infinite;
+  will-change: transform;
+}
+
+/* ── Pipeline graph edges ─────────────────────────────────────────────────── */
+
+.edge-flow {
+  stroke-dasharray: 6 8;
+  animation: nn-dashflow 1.6s linear infinite;
+}
+.edge-hot {
+  animation: edge-hot 1.2s var(--ease-in-out-soft) infinite;
+}
+.node-halo {
+  animation: neural-halo 2.6s var(--ease-in-out-soft) infinite;
+}
+.twinkle {
+  animation: neural-twinkle 9s var(--ease-in-out-soft) infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REDUCED MOTION — REQUIRED, NOT OPTIONAL
+   Content must appear instantly and completely. Narration renders whole.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .jarvis-hud,
+  .scanline,
+  .bg-live {
+    display: none !important;
+  }
+}

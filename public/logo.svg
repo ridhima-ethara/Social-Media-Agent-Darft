@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 64" role="img" aria-label="Ethara.AI">
+  <defs>
+    <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8B2CF5" />
+      <stop offset="1" stop-color="#EE00EE" />
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="19" fill="none" stroke="url(#lg)" stroke-width="3.5" />
+  <circle cx="32" cy="32" r="11" fill="none" stroke="#7A99D1" stroke-width="2" opacity="0.75" />
+  <circle cx="32" cy="32" r="4.5" fill="url(#lg)" />
+  <text
+    x="66"
+    y="41"
+    font-family="Inter, system-ui, sans-serif"
+    font-size="24"
+    font-weight="600"
+    letter-spacing="-0.02em"
+    fill="#FFFFFF"
+  >
+    Ethara<tspan fill="#EE00EE">.AI</tspan>
+  </text>
+</svg>

@@ -1,0 +1,29 @@
+node_modules/
+dist/
+dist-ssr/
+build/
+
+# env
+.env
+.env.local
+.env.*.local
+server/.env
+
+# logs
+*.log
+npm-debug.log*
+logs/
+
+# editor/os
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# build artifacts
+*.tsbuildinfo
+.cache/
+
+# misc
+coverage/
+.turbo/
