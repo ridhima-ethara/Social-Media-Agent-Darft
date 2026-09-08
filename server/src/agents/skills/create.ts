@@ -1,0 +1,678 @@
+/**
+ * THE CAPTION CREATOR AGENT — stage `create`
+ * and THE REVIEW AGENT — stage `create`
+ *
+ * The caption agent writes platform copy grounded in the Knowledge Base. Gemini
+ * writes it when configured; a deterministic template writer does when not. The
+ * output shape is identical either way, and the artefact records which ran.
+ *
+ * Whatever produced the text, `enforceBrandVoice()` runs unconditionally as the
+ * final step: forbidden language replaced, every emoji stripped, the hashtag
+ * block clamped to 3–5 topic-derived tags. No knob raises that ceiling.
+ *
+ * The review agent applies human instructions — and a human instruction always
+ * outranks a brand guideline. The edit is applied AND the finding is raised
+ * alongside it. Rule 20: the checker reports; it never rewrites behind the
+ * operator's back.
+ */
+
+import { BRAND, checkBrandCompliance, deriveHashtags, enforceBrandVoice } from '../../../../shared/brand-voice'
+import type { Platform } from '../../../../shared/agent-contract'
+import { config } from '../../config'
+import {
+  gcpText,
+  rewriteTemplateCaption,
+  temperatureFromPercent,
+  withFallback,
+  writeTemplateCaption,
+} from '../../integrations'
+import { insertKnowledgeEntry, listKnowledge, listPosts } from '../../db/repo'
+import { clampChars, clampWords, PLATFORM_LABEL, similarity } from '../corpus'
+import { registerSkill } from '../runtime'
+import { retrieveKnowledge, toGroundingEntry } from './research'
+import type { CaptionPayload, GroundingEntry, ReviewPayload } from './index'
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 1 · generation.caption.mode
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.mode', (payload, ctx) => {
+  const requested = ctx.str('mode', 'Auto')
+  const preferModel = ctx.bool('preferModel', true)
+
+  let writingMode = requested
+  if (requested === 'Auto') {
+    // The recommended format decides, so the mode never contradicts the plan.
+    if (payload.format === 'Carousel') writingMode = 'Carousel script'
+    else if (payload.platform === 'x') writingMode = 'Short'
+    else writingMode = 'Long-form'
+  }
+
+  const modelReady = preferModel && gcpText.isConfigured()
+  ctx.log(
+    `Writing mode: ${writingMode} · ${modelReady ? `${config.gcp.textModel} will write it` : 'the deterministic template writer will write it'}`,
+  )
+
+  return { writingMode }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 2 · generation.caption.voice
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.voice', async (payload, ctx) => {
+  const maxEntries = ctx.num('maxEntries', 6)
+  const requireGrounding = ctx.bool('requireGrounding', false)
+  const minEntryConfidence = ctx.num('minEntryConfidence', 0)
+
+  // The same retrieval path every other agent uses.
+  const query = [payload.title, payload.sourceTopic, payload.hashtag ?? '', payload.angle]
+    .filter(Boolean)
+    .join(' ')
+
+  const rows = await retrieveKnowledge(ctx.workspaceId, {
+    query,
+    maxResults: maxEntries,
+    includeInactive: false,
+    ...(minEntryConfidence > 0 ? { minConfidence: minEntryConfidence } : {}),
+  })
+
+  const grounding: GroundingEntry[] = rows.map(toGroundingEntry)
+
+  if (grounding.length === 0 && requireGrounding) {
+    throw new Error(
+      `No Knowledge Base entry matches “${payload.sourceTopic}” and grounding is required. Run a knowledge build, or switch off “Require grounding”.`,
+    )
+  }
+
+  // The voice instruction is assembled from the brand definition plus the active
+  // brand entries, so switching a brand entry off genuinely stops it influencing
+  // generation.
+  const brandEntries = await listKnowledge(ctx.workspaceId, {
+    activeOnly: true,
+    category: 'Brand Voice',
+    limit: 12,
+  })
+
+  const voiceInstruction = [
+    `You write for ${BRAND.name}: ${BRAND.positioning}.`,
+    `Voice: ${BRAND.voiceWords.join(', ')}.`,
+    `Structure the post as: ${BRAND.captionStructure.join(' → ')}.`,
+    `Emoji budget is ${BRAND.emojiBudget}. Hashtags: ${BRAND.hashtags.min}–${BRAND.hashtags.max}, topic-derived only.`,
+    `The hook is at most ${BRAND.hookMaxWords} words and makes a claim rather than teasing one.`,
+    ...brandEntries.map((e) => `${e.title}: ${e.content}`),
+  ].join('\n')
+
+  ctx.log(
+    grounding.length === 0
+      ? 'No matching Knowledge Base entry — writing from the brand definition alone'
+      : `Grounded in ${grounding.length} entr${grounding.length === 1 ? 'y' : 'ies'}: ${grounding.map((g) => g.title).slice(0, 2).join('; ')}${grounding.length > 2 ? '…' : ''}`,
+  )
+
+  return { grounding, voiceInstruction }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 3 · generation.caption.hook
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const CLICKBAIT = /\b(you won'?t believe|this changes everything|secret|hack|shocking|nobody talks about|the truth about)\b/i
+
+registerSkill<CaptionPayload>('generation.caption.hook', (payload, ctx) => {
+  const maxWords = ctx.num('maxWords', 18)
+  const style = ctx.str('style', 'Declarative')
+  const banClickbait = ctx.bool('banClickbait', true)
+
+  const subject = payload.title
+  const topic = payload.sourceTopic
+
+  const patterns: Record<string, () => string> = {
+    Declarative: () => subject.replace(/\.$/, ''),
+    Question: () => `What actually changes when ${topic.toLowerCase()} stops being a research problem?`,
+    Contrarian: () => `${subject.replace(/\.$/, '')} — and the usual explanation for it is wrong.`,
+    Observation: () => `Something shifted in ${topic.toLowerCase()} this month, and the benchmarks show it.`,
+  }
+
+  let hook = clampWords((patterns[style] ?? patterns.Declarative)!(), maxWords)
+
+  if (banClickbait && CLICKBAIT.test(hook)) {
+    hook = clampWords(subject.replace(/\.$/, ''), maxWords)
+    ctx.log(`The ${style} hook read as clickbait, so it fell back to the declarative form`)
+  }
+
+  return { hook }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 4 · generation.caption.problem
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.problem', (payload, ctx) => {
+  const maxSentences = ctx.num('maxSentences', 3)
+  const quantify = ctx.bool('quantify', true)
+
+  const grounding = payload.grounding ?? []
+  const figure = quantify ? firstFigure(grounding) : null
+
+  const sentences: string[] = [
+    `Most teams treat ${payload.sourceTopic.toLowerCase()} as a tuning exercise.`,
+    'It is a measurement problem first: what you reward is what you get, and the reward is usually a proxy for the thing you actually wanted.',
+  ]
+
+  if (figure) {
+    sentences.push(`The gap shows up in the numbers — ${figure}.`)
+  } else {
+    sentences.push('The gap only shows up once the model is in front of real traffic.')
+  }
+
+  const problem = sentences.slice(0, Math.max(1, maxSentences)).join(' ')
+  ctx.log(quantify && figure ? 'Problem statement carries a figure from the grounding' : 'Problem statement written without a figure')
+
+  return { problem }
+})
+
+function firstFigure(grounding: GroundingEntry[]): string | null {
+  for (const entry of grounding) {
+    const match = entry.content.match(/[^.]*\d+(?:\.\d+)?%?[^.]*\./)
+    if (match) return match[0].trim().replace(/\.$/, '')
+  }
+  return null
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 5 · generation.caption.explanation — THE MODEL CALL
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, ctx) => {
+  const temperature = ctx.num('temperature', 60)
+  const maxOutputTokens = ctx.num('maxOutputTokens', 2048)
+  const layers = ctx.num('layers', 3)
+  const citeGrounding = ctx.bool('citeGrounding', true)
+
+  const grounding = payload.grounding ?? []
+  const systemInstruction = [
+    payload.voiceInstruction ?? '',
+    citeGrounding && grounding.length > 0
+      ? `Ground every claim in these entries and do not invent figures:\n${grounding
+          .map((g) => `· ${g.title} (${g.confidence} confidence): ${g.content}`)
+          .join('\n')}`
+      : 'You have no retrieved evidence. Make no numeric claims.',
+    payload.hashtag ? `The originating hashtag is #${payload.hashtag}.` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  const prompt = [
+    `Write the mechanism section of a ${payload.writingMode ?? 'Long-form'} ${PLATFORM_LABEL[payload.platform]} post.`,
+    `Hook already written: "${payload.hook ?? ''}"`,
+    `Problem already stated: "${payload.problem ?? ''}"`,
+    `Angle: ${payload.angle}`,
+    `Audience: ${payload.audience}`,
+    `Write exactly ${layers} short paragraphs that explain how it works and what it implies. No hook, no close, no hashtags.`,
+  ].join('\n')
+
+  const outcome = await withFallback(
+    gcpText,
+    {
+      systemInstruction,
+      prompt,
+      temperature: temperatureFromPercent(temperature),
+      maxOutputTokens,
+    },
+    () =>
+      // The template writer produces a whole caption; the mechanism layers are
+      // lifted out of it so the shape matches the live path exactly.
+      extractLayers(
+        writeTemplateCaption({
+          title: payload.title,
+          description: payload.description,
+          topic: payload.sourceTopic,
+          angle: payload.angle,
+          audience: payload.audience,
+          grounding: grounding.map((g) => ({ title: g.title, content: g.content })),
+          hookStyle: 'Declarative',
+          hookMaxWords: BRAND.hookMaxWords,
+          layers,
+          closeStyle: 'Implication',
+        }),
+        layers,
+      ),
+    (reason) => {
+      ctx.emit('activity', `Caption written by the template writer — ${reason}`, {
+        status: 'warn',
+        reason,
+      })
+    },
+  )
+
+  const explanation = outcome.value.trim()
+
+  ctx.log(
+    `${layers}-layer explanation written by ${outcome.source === 'live' ? config.gcp.textModel : 'the deterministic template writer'}`,
+  )
+
+  return {
+    explanation,
+    captionSource: outcome.source,
+    captionModel: outcome.source === 'live' ? config.gcp.textModel : 'ethara-template-writer',
+    ...(outcome.fallbackReason === undefined ? {} : { captionFallbackReason: outcome.fallbackReason }),
+  }
+})
+
+/** Pulls the middle paragraphs out of a whole template caption. */
+function extractLayers(caption: string, layers: number): string {
+  const paragraphs = caption.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)
+  const middle = paragraphs.slice(1, Math.max(2, paragraphs.length - 1))
+  const chosen = middle.length >= layers ? middle.slice(0, layers) : middle
+  return (chosen.length > 0 ? chosen : paragraphs).join('\n\n')
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 6 · generation.caption.close
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.close', (payload, ctx) => {
+  const closeStyle = ctx.str('closeStyle', 'Implication')
+  const bannedCta = ctx.bool('bannedCta', true)
+
+  const closes: Record<string, string> = {
+    Implication: `The implication for anyone shipping ${payload.sourceTopic.toLowerCase()}: measure the behaviour you actually want, then reward it. Everything else is downstream of that.`,
+    'Open question': `The open question is which of these results survive contact with production traffic. We are running that experiment now.`,
+    'Forward look': `The next twelve months of ${payload.sourceTopic.toLowerCase()} will be decided by evaluation, not by model size.`,
+    None: '',
+  }
+
+  let close = closes[closeStyle] ?? closes.Implication ?? ''
+
+  if (bannedCta && /\b(comment below|dm me|link in bio|sign up|book a demo|follow for more)\b/i.test(close)) {
+    close = closes.Implication ?? ''
+    ctx.log('The close contained a call to action, which rule 5 forbids — replaced with the implication form')
+  }
+
+  return { close }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 7 · generation.caption.hashtags
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.hashtags', (payload, ctx) => {
+  const requested = ctx.num('count', 4)
+  const useSourceHashtag = ctx.bool('useSourceHashtag', true)
+
+  // The brand range is the ceiling and the floor. The knob narrows within it;
+  // it cannot escape it.
+  const count = Math.min(Math.max(requested, BRAND.hashtags.min), BRAND.hashtags.max)
+
+  const derived = deriveHashtags(`${payload.sourceTopic} ${payload.title}`, count)
+  const tags = [...derived]
+
+  if (useSourceHashtag && payload.hashtag) {
+    const source = `#${payload.hashtag.replace(/^#/, '')}`
+    if (!tags.some((t) => t.toLowerCase() === source.toLowerCase())) {
+      tags.unshift(source)
+      if (tags.length > count) tags.length = count
+    }
+  }
+
+  ctx.log(`${tags.length} hashtag(s): ${tags.join(' ')}`)
+
+  return { hashtagBlock: tags.join(' ') }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 8 · generation.caption.adapt — AND THE UNCONDITIONAL BRAND PASS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.adapt', (payload, ctx) => {
+  const limits: Record<Platform, number> = {
+    linkedin: ctx.num('linkedinMaxChars', 2400),
+    instagram: ctx.num('instagramMaxChars', 1600),
+    x: ctx.num('xMaxChars', 280),
+  }
+  const preserveLineBreaks = ctx.bool('preserveLineBreaks', true)
+
+  const parts = [payload.hook, payload.problem, payload.explanation, payload.close].filter(
+    (p): p is string => typeof p === 'string' && p.trim().length > 0,
+  )
+
+  let body = preserveLineBreaks ? parts.join('\n\n') : parts.join(' ')
+  const limit = limits[payload.platform]
+
+  if (payload.platform === 'x') {
+    // X is a different medium, not a truncated LinkedIn post: the hook plus one
+    // load-bearing sentence, and the hashtag block has to fit inside the limit.
+    const tags = payload.hashtagBlock ?? ''
+    const room = Math.max(60, limit - tags.length - 2)
+    const lead = [payload.hook, firstSentence(payload.explanation ?? payload.problem ?? '')]
+      .filter(Boolean)
+      .join(' ')
+    body = `${clampChars(lead, room).trim()}${tags ? `\n${tags}` : ''}`
+  } else {
+    const withTags = payload.hashtagBlock ? `${body}\n\n${payload.hashtagBlock}` : body
+    body = withTags.length <= limit ? withTags : `${clampChars(body, limit - (payload.hashtagBlock?.length ?? 0) - 4)}\n\n${payload.hashtagBlock ?? ''}`
+  }
+
+  // Unconditional. Whatever wrote the text, this is the last thing that touches
+  // it before it is stored.
+  const enforced = enforceBrandVoice(body.trim(), `${payload.sourceTopic} ${payload.title}`)
+
+  if (enforced.changed) {
+    ctx.log(
+      `Brand voice enforced (rule${enforced.rulesApplied.length === 1 ? '' : 's'} ${enforced.rulesApplied.join(', ')}): ${enforced.notes.slice(0, 3).join('; ')}`,
+    )
+  }
+
+  return {
+    caption: enforced.text,
+    captionBody: body.trim(),
+    brandNotes: enforced.notes,
+  }
+})
+
+function firstSentence(text: string): string {
+  return (text.split(/(?<=[.!?])\s/)[0] ?? text).trim()
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 9 · generation.caption.variants
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.variants', (payload, ctx) => {
+  const count = ctx.num('count', 2)
+  const minDivergence = ctx.num('minDivergence', 25) / 100
+
+  const base = payload.caption ?? ''
+  if (base.length === 0) return { variants: [] }
+
+  const paragraphs = base.split(/\n{2,}/).filter(Boolean)
+  const candidates: string[] = []
+
+  // Variant 1 — lead with the evidence rather than the claim.
+  if (paragraphs.length >= 3) {
+    const reordered = [paragraphs[1], paragraphs[0], ...paragraphs.slice(2)].filter(Boolean)
+    candidates.push(reordered.join('\n\n'))
+  }
+
+  // Variant 2 — the compressed read: hook, mechanism, close.
+  if (paragraphs.length >= 4) {
+    candidates.push(
+      [paragraphs[0], paragraphs[2], paragraphs[paragraphs.length - 1]].filter(Boolean).join('\n\n'),
+    )
+  }
+
+  const variants = candidates
+    .filter((candidate) => 1 - similarity(candidate, base) >= minDivergence)
+    .slice(0, Math.max(0, count))
+
+  ctx.log(
+    variants.length === 0
+      ? `No variant diverged by the required ${Math.round(minDivergence * 100)}%, so none were kept`
+      : `${variants.length} variant(s) kept above ${Math.round(minDivergence * 100)}% divergence`,
+  )
+
+  return { variants }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 10 · generation.caption.sourceLink
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('generation.caption.sourceLink', (payload, ctx) => {
+  if (!ctx.bool('enabled', true)) return {}
+
+  const placement = ctx.str('placement', 'End of post')
+  const grounding = payload.grounding ?? []
+  const source = grounding.flatMap((g) => g.sources)[0]
+
+  if (!source) {
+    ctx.log('No cited source on the grounding entries, so no citation was attached')
+    return { citation: '' }
+  }
+
+  const citation = `Source: ${source.title} — ${source.url}`
+  let caption = payload.caption ?? ''
+
+  if (placement === 'End of post') {
+    caption = `${caption}\n\n${citation}`
+  } else if (placement === 'Inline') {
+    // Inline means after the evidence paragraph, not glued to the hook.
+    const paragraphs = caption.split(/\n{2,}/)
+    const insertAt = Math.min(2, Math.max(1, paragraphs.length - 1))
+    paragraphs.splice(insertAt, 0, `(${citation})`)
+    caption = paragraphs.join('\n\n')
+  }
+  // 'First comment' leaves the caption alone and carries the citation separately.
+
+  ctx.log(`Citation placement: ${placement}`)
+
+  return { caption, citation }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW 1 · review.instruction.apply
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) => {
+  const humanOverridesBrand = ctx.bool('humanOverridesBrand', true)
+  const maxInstructionChars = ctx.num('maxInstructionChars', 600)
+  const preserveHistory = ctx.bool('preserveRevisionHistory', true)
+
+  const instruction = clampChars(payload.instruction ?? '', maxInstructionChars)
+  if (instruction.trim().length === 0) {
+    return { revisedBody: payload.body, appliedNote: 'No instruction given', conflictNotes: [] }
+  }
+
+  const outcome = await withFallback(
+    gcpText,
+    {
+      systemInstruction: [
+        `You are revising a ${PLATFORM_LABEL[payload.platform]} post for ${BRAND.name}.`,
+        `Voice: ${BRAND.voiceWords.join(', ')}. Emoji budget ${BRAND.emojiBudget}.`,
+        'Apply the operator’s instruction exactly. Do not add a call to action. Do not add emoji.',
+        'Return only the revised post.',
+      ].join('\n'),
+      prompt: `Instruction: ${instruction}\n\nCurrent post:\n${payload.body}`,
+      temperature: 0.4,
+      maxOutputTokens: 2048,
+      fast: true,
+    },
+    () => rewriteTemplateCaption(payload.body, instruction).text,
+  )
+
+  const revisedBody = outcome.value.trim()
+
+  // The human instruction has been applied. Now the finding is raised alongside
+  // it — never instead of it, and never silently resolved.
+  const conflictNotes: string[] = []
+  if (humanOverridesBrand) {
+    const check = checkBrandCompliance({
+      caption: revisedBody,
+      platform: payload.platform,
+      topic: payload.sourceTopic,
+      ...(payload.imageHeadline === undefined ? {} : { visualHeadline: payload.imageHeadline }),
+      ...(payload.altText === undefined ? {} : { visualAltText: payload.altText }),
+    })
+    for (const violation of check.violations) {
+      conflictNotes.push(
+        `Rule ${violation.rule} · ${violation.title}: ${violation.detail} Your instruction was applied anyway — a human instruction outranks a brand guideline — and this is raised so you can decide.`,
+      )
+    }
+  }
+
+  const applied = rewriteTemplateCaption(payload.body, instruction).applied
+  const appliedNote =
+    applied.length > 0
+      ? applied
+      : outcome.source === 'live'
+        ? `Applied “${clampWords(instruction, 12)}” with ${config.gcp.fastTextModel}`
+        : `Applied “${clampWords(instruction, 12)}”`
+
+  ctx.log(
+    `${appliedNote}${conflictNotes.length > 0 ? ` · ${conflictNotes.length} brand finding(s) raised alongside it` : ''}${preserveHistory ? ' · previous revision preserved' : ''}`,
+  )
+
+  return {
+    revisedBody,
+    appliedNote,
+    conflictNotes,
+    revisionSource: outcome.source,
+    revisionModel: outcome.source === 'live' ? config.gcp.fastTextModel : 'ethara-template-writer',
+  }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW 2 · review.compliance.check
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<ReviewPayload>('review.compliance.check', async (payload, ctx) => {
+  const offerCorrection = ctx.bool('offerCorrection', true)
+  const similarityCap = ctx.num('similarityCap', 70)
+  const failOnSensitive = ctx.bool('failOnSensitive', true)
+
+  const body = payload.revisedBody ?? payload.body
+
+  const grounding = await retrieveKnowledge(ctx.workspaceId, {
+    query: `${payload.title} ${payload.sourceTopic}`,
+    maxResults: 8,
+    includeInactive: false,
+  })
+
+  // The similarity cap is measured against what this account has actually
+  // published, never against a generic corpus.
+  const published = await listPosts(ctx.workspaceId, { platform: payload.platform, limit: 40 })
+  const publishedCaptions = published.map((p) => p.content)
+  const closest = publishedCaptions
+    .map((c) => ({ c, score: similarity(c, body) }))
+    .sort((a, b) => b.score - a.score)[0]
+  if (closest && closest.score * 100 >= similarityCap) {
+    ctx.log(
+      `This draft is ${Math.round(closest.score * 100)}% similar to a post already published, over the ${similarityCap}% cap`,
+    )
+  }
+
+  const compliance = checkBrandCompliance({
+    caption: body,
+    platform: payload.platform,
+    topic: payload.sourceTopic,
+    groundingEntries: grounding.map((g) => ({ title: g.title, content: g.content })),
+    publishedCaptions,
+    ...(payload.imageHeadline === undefined ? {} : { visualHeadline: payload.imageHeadline }),
+    ...(payload.altText === undefined ? {} : { visualAltText: payload.altText }),
+    ...(payload.canvas === undefined ? {} : { visualCanvas: String(payload.canvas) }),
+  })
+
+  // Rule 20: the checker reports and offers. It does not rewrite.
+  const withOffer: typeof compliance = offerCorrection
+    ? compliance
+    : { ...compliance, corrected_version: undefined }
+
+  if (compliance.verdict === 'NEEDS_INTERNAL_APPROVAL' && failOnSensitive) {
+    ctx.emit(
+      'activity',
+      `“${payload.title}” touches a sensitive topic and needs internal approval before it can go further`,
+      { status: 'warn', verdict: compliance.verdict },
+    )
+  }
+
+  ctx.log(
+    `Brand check: ${compliance.verdict}${compliance.violations.length > 0 ? ` · rule${compliance.violations.length === 1 ? '' : 's'} ${compliance.violations.map((v) => v.rule).join(', ')}` : ' · no violations'}`,
+  )
+
+  return { compliance: withOffer }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW 3 · review.preference.extract
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<ReviewPayload>('review.preference.extract', async (payload, ctx) => {
+  const askBeforeSaving = ctx.bool('askBeforeSaving', true)
+  const minOccurrences = ctx.num('minOccurrences', 2)
+  const threshold = ctx.num('similarityThreshold', 60) / 100
+
+  const instruction = payload.instruction ?? ''
+  if (instruction.trim().length === 0) return { preference: null }
+
+  const history = await listKnowledge(ctx.workspaceId, {
+    activeOnly: true,
+    category: 'User Feedback',
+    limit: 80,
+  })
+
+  const similarPast = history.filter((row) => similarity(row.content, instruction) >= threshold)
+  const occurrences = similarPast.length + 1
+
+  if (occurrences < minOccurrences) {
+    ctx.log(
+      `“${clampWords(instruction, 8)}” has been asked ${occurrences} time(s); a preference is offered at ${minOccurrences}`,
+    )
+    return { preference: null }
+  }
+
+  const preference = {
+    title: `Preference: ${clampWords(instruction, 8)}`,
+    content: `The operator has asked for this ${occurrences} times: “${instruction}”. Apply it by default on ${PLATFORM_LABEL[payload.platform]} posts about ${payload.sourceTopic}.`,
+    category: 'User Feedback',
+  }
+
+  if (!askBeforeSaving) {
+    // Explicitly permitted to save without asking; still recorded as learned,
+    // never as brand.
+    await insertKnowledgeEntry({
+      workspaceId: ctx.workspaceId,
+      title: preference.title,
+      category: preference.category,
+      content: preference.content,
+      source: 'Review Agent · extracted preference',
+      sources: [],
+      hashtagId: null,
+      confidence: 'Medium',
+      origin: 'learned',
+      buildId: null,
+      tags: ['preference'],
+    })
+    ctx.log(`Preference saved automatically after ${occurrences} occurrences`)
+    return { preference: null }
+  }
+
+  ctx.log(`Preference offered after ${occurrences} occurrences — awaiting the operator's answer`)
+  return { preference }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW 4 · review.diff.summarize
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<ReviewPayload>('review.diff.summarize', (payload, ctx) => {
+  const maxChars = ctx.num('maxChars', 180)
+
+  const before = payload.body
+  const after = payload.revisedBody ?? payload.body
+
+  if (before === after) return { diffSummary: 'Nothing changed.' }
+
+  const beforeWords = before.split(/\s+/).length
+  const afterWords = after.split(/\s+/).length
+  const delta = afterWords - beforeWords
+  const overlap = Math.round(similarity(before, after) * 100)
+
+  const parts: string[] = []
+  parts.push(
+    delta === 0
+      ? 'Same length'
+      : delta < 0
+        ? `${Math.abs(delta)} words shorter`
+        : `${delta} words longer`,
+  )
+  parts.push(`${overlap}% of the wording survived`)
+
+  const beforeParas = before.split(/\n{2,}/).length
+  const afterParas = after.split(/\n{2,}/).length
+  if (beforeParas !== afterParas) {
+    parts.push(`${beforeParas} paragraphs became ${afterParas}`)
+  }
+
+  const summary = `${parts.join('; ')}.`
+  return { diffSummary: summary.length > maxChars ? `${summary.slice(0, maxChars - 1)}…` : summary }
+})

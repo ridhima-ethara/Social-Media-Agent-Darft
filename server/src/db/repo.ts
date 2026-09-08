@@ -1741,3 +1741,429 @@ export async function traceLineage(
 
   return [...backward, ...forward]
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PIPELINE PERSISTENCE
+   The write side of a discovery run. Every one of these is an UPSERT keyed on
+   something stable, so a re-run links to what already exists rather than
+   duplicating it — and nothing is ever deleted to make room.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface ScrapedItemInsert {
+  keywordId: string | null
+  externalId: string
+  title: string
+  snippet: string
+  url: string
+  sourceName: string
+  sourceType: string
+  authorName: string
+  authorHeadline: string
+  authorFollowers: number
+  hashtags: string[]
+  engagement: number
+  reactions: number
+  comments: number
+  reposts: number
+  relevance: number
+  credibility: string
+  freshness: number
+  isDuplicate: boolean
+  validation: ValidationVerdict
+  verdictReason: string
+  captureSource: 'live' | 'fixture'
+  postedAt: string
+}
+
+/**
+ * Writes the scraped corpus and returns `externalId → row id`, which is what the
+ * duplicate links and the lineage edges are resolved against.
+ */
+export async function persistScrapedItems(
+  workspaceId: string,
+  runId: string,
+  items: ScrapedItemInsert[],
+): Promise<Map<string, string>> {
+  const idByExternal = new Map<string, string>()
+  if (items.length === 0) return idByExternal
+
+  const sourceRows = await listSources(workspaceId)
+  const sourceIdByName = new Map(sourceRows.map((s) => [s.name, s.id]))
+
+  for (const item of items) {
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO scraped_items (
+         workspace_id, source_id, keyword_id, run_id, external_id, title, snippet, url,
+         source_name, source_type, author_name, author_headline, author_followers,
+         hashtags, engagement, reactions, comments, reposts,
+         relevance, credibility, freshness, is_duplicate,
+         validation, verdict_reason, capture_source, posted_at, validated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8,
+         $9, $10, $11, $12, $13,
+         $14, $15, $16, $17, $18,
+         $19, $20, $21, $22,
+         $23, $24, $25, $26,
+         CASE WHEN $23 = 'pending' THEN NULL ELSE now() END
+       )
+       ON CONFLICT (workspace_id, external_id) DO UPDATE SET
+         run_id = EXCLUDED.run_id,
+         engagement = EXCLUDED.engagement,
+         reactions = EXCLUDED.reactions,
+         comments = EXCLUDED.comments,
+         reposts = EXCLUDED.reposts,
+         relevance = EXCLUDED.relevance,
+         credibility = EXCLUDED.credibility,
+         freshness = EXCLUDED.freshness,
+         is_duplicate = EXCLUDED.is_duplicate,
+         validation = EXCLUDED.validation,
+         verdict_reason = EXCLUDED.verdict_reason,
+         capture_source = EXCLUDED.capture_source,
+         validated_at = CASE WHEN EXCLUDED.validation = 'pending' THEN NULL ELSE now() END
+       RETURNING id`,
+      [
+        workspaceId,
+        sourceIdByName.get(item.sourceName) ?? null,
+        item.keywordId,
+        runId,
+        item.externalId,
+        item.title,
+        item.snippet,
+        item.url,
+        item.sourceName,
+        item.sourceType,
+        item.authorName,
+        item.authorHeadline,
+        item.authorFollowers,
+        item.hashtags,
+        item.engagement,
+        item.reactions,
+        item.comments,
+        item.reposts,
+        item.relevance,
+        item.credibility,
+        item.freshness,
+        item.isDuplicate,
+        item.validation,
+        item.verdictReason,
+        item.captureSource,
+        item.postedAt,
+      ],
+    )
+    if (row) idByExternal.set(item.externalId, row.id)
+  }
+
+  return idByExternal
+}
+
+/** Links a duplicate to its original. The duplicate row itself stays. */
+export async function linkDuplicateItem(id: string, duplicateOfId: string): Promise<void> {
+  await query(`UPDATE scraped_items SET duplicate_of_id = $2 WHERE id = $1`, [id, duplicateOfId])
+}
+
+export interface HashtagInsert {
+  tag: string
+  displayTag: string
+  keywordId: string | null
+  postCount: number
+  totalEngagement: number
+  engagementPerPost: number
+  relevance: number
+  credibility: string
+  freshness: number
+  hashtagScore: number
+  rank: number | null
+  validation: ValidationVerdict
+  verdictReason: string
+  inTopSet: boolean
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/** Writes the hashtag candidates and returns `tag → row id`. */
+export async function persistHashtagCandidates(
+  workspaceId: string,
+  runId: string,
+  candidates: HashtagInsert[],
+): Promise<Map<string, string>> {
+  const idByTag = new Map<string, string>()
+
+  for (const c of candidates) {
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO hashtags (
+         workspace_id, tag, display_tag, keyword_id, run_id,
+         post_count, total_engagement, engagement_per_post,
+         relevance, credibility, freshness, hashtag_score, rank,
+         validation, verdict_reason, in_top_set,
+         first_seen_at, last_seen_at, validated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5,
+         $6, $7, $8,
+         $9, $10, $11, $12, $13,
+         $14, $15, $16,
+         $17, $18,
+         CASE WHEN $14 = 'pending' THEN NULL ELSE now() END
+       )
+       ON CONFLICT (workspace_id, tag, run_id) DO UPDATE SET
+         display_tag = EXCLUDED.display_tag,
+         keyword_id = COALESCE(EXCLUDED.keyword_id, hashtags.keyword_id),
+         post_count = EXCLUDED.post_count,
+         total_engagement = EXCLUDED.total_engagement,
+         engagement_per_post = EXCLUDED.engagement_per_post,
+         relevance = EXCLUDED.relevance,
+         credibility = EXCLUDED.credibility,
+         freshness = EXCLUDED.freshness,
+         hashtag_score = EXCLUDED.hashtag_score,
+         rank = EXCLUDED.rank,
+         validation = EXCLUDED.validation,
+         verdict_reason = EXCLUDED.verdict_reason,
+         in_top_set = EXCLUDED.in_top_set,
+         last_seen_at = EXCLUDED.last_seen_at,
+         validated_at = CASE WHEN EXCLUDED.validation = 'pending' THEN NULL ELSE now() END
+       RETURNING id`,
+      [
+        workspaceId,
+        c.tag,
+        c.displayTag,
+        c.keywordId,
+        runId,
+        c.postCount,
+        c.totalEngagement,
+        c.engagementPerPost,
+        c.relevance,
+        c.credibility,
+        c.freshness,
+        c.hashtagScore,
+        c.rank,
+        c.validation,
+        c.verdictReason,
+        c.inTopSet,
+        c.firstSeenAt,
+        c.lastSeenAt,
+      ],
+    )
+    if (row) idByTag.set(c.tag, row.id)
+  }
+
+  return idByTag
+}
+
+export async function linkDuplicateHashtag(id: string, duplicateOfId: string): Promise<void> {
+  await query(`UPDATE hashtags SET duplicate_of_id = $2 WHERE id = $1`, [id, duplicateOfId])
+}
+
+/**
+ * Marks the consolidated top set. The previous set is cleared first so exactly
+ * one generation of `in_top_set` is live at a time — the rows themselves remain.
+ */
+export async function replaceTopHashtagSet(
+  workspaceId: string,
+  ids: string[],
+): Promise<void> {
+  await query(`UPDATE hashtags SET in_top_set = false WHERE workspace_id = $1 AND in_top_set`, [
+    workspaceId,
+  ])
+  if (ids.length === 0) return
+  await query(`UPDATE hashtags SET in_top_set = true WHERE id = ANY($1::uuid[])`, [ids])
+}
+
+export interface IdeaInsert {
+  sourceItemId: string | null
+  hashtagId: string | null
+  title: string
+  description: string
+  sourceTopic: string
+  platform: Platform
+  altPlatforms: Array<{ platform: Platform; score: number }>
+  scheduledDate: string
+  scheduledTime: string
+  confidence: number
+  priorityScore: number
+  platformRank: number | null
+  calendarSlot: CalendarSlot
+  status: IdeaStatus
+  analysis: Record<string, unknown>
+  isNewTrend: boolean
+}
+
+/**
+ * Writes the planned ideas, de-duplicating on `(source_item_id, platform)` so a
+ * repeat run updates the placement rather than stacking a second copy.
+ */
+export async function persistIdeas(
+  workspaceId: string,
+  ideas: IdeaInsert[],
+): Promise<Array<{ id: string; title: string; created: boolean }>> {
+  const out: Array<{ id: string; title: string; created: boolean }> = []
+
+  for (const idea of ideas) {
+    const existing = idea.sourceItemId
+      ? await queryOne<{ id: string }>(
+          `SELECT id FROM content_ideas
+            WHERE workspace_id = $1 AND source_item_id = $2 AND platform = $3
+            LIMIT 1`,
+          [workspaceId, idea.sourceItemId, idea.platform],
+        )
+      : await queryOne<{ id: string }>(
+          `SELECT id FROM content_ideas
+            WHERE workspace_id = $1 AND lower(title) = lower($2) AND platform = $3
+            LIMIT 1`,
+          [workspaceId, idea.title, idea.platform],
+        )
+
+    if (existing) {
+      await query(
+        `UPDATE content_ideas
+            SET scheduled_date = $2, scheduled_time = $3, confidence = $4,
+                priority_score = $5, platform_rank = $6, calendar_slot = $7,
+                alt_platforms = $8::jsonb, analysis = $9::jsonb,
+                is_new_trend = $10, updated_at = now()
+          WHERE id = $1`,
+        [
+          existing.id,
+          idea.scheduledDate,
+          idea.scheduledTime,
+          idea.confidence,
+          idea.priorityScore,
+          idea.platformRank,
+          idea.calendarSlot,
+          JSON.stringify(idea.altPlatforms),
+          JSON.stringify(idea.analysis),
+          idea.isNewTrend,
+        ],
+      )
+      out.push({ id: existing.id, title: idea.title, created: false })
+      continue
+    }
+
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO content_ideas (
+         workspace_id, source_item_id, hashtag_id, title, description, source_topic,
+         platform, alt_platforms, scheduled_date, scheduled_time,
+         confidence, priority_score, platform_rank, calendar_slot, status,
+         analysis, is_new_trend
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6,
+         $7, $8::jsonb, $9, $10,
+         $11, $12, $13, $14, $15,
+         $16::jsonb, $17
+       )
+       RETURNING id`,
+      [
+        workspaceId,
+        idea.sourceItemId,
+        idea.hashtagId,
+        idea.title,
+        idea.description,
+        idea.sourceTopic,
+        idea.platform,
+        JSON.stringify(idea.altPlatforms),
+        idea.scheduledDate,
+        idea.scheduledTime,
+        idea.confidence,
+        idea.priorityScore,
+        idea.platformRank,
+        idea.calendarSlot,
+        idea.status,
+        JSON.stringify(idea.analysis),
+        idea.isNewTrend,
+      ],
+    )
+    if (row) out.push({ id: row.id, title: idea.title, created: true })
+  }
+
+  return out
+}
+
+/** Appends one entry to an idea's feedback history. Never overwrites. */
+export async function appendIdeaFeedback(
+  workspaceId: string,
+  id: string,
+  entry: Record<string, unknown>,
+): Promise<void> {
+  await query(
+    `UPDATE content_ideas
+        SET feedback = COALESCE(feedback, '[]'::jsonb) || $3::jsonb,
+            updated_at = now()
+      WHERE workspace_id = $1 AND id = $2`,
+    [workspaceId, id, JSON.stringify([{ ...entry, at: new Date().toISOString() }])],
+  )
+}
+
+/** Records the Marketing approval — the first of the two required signatures. */
+export async function setMarketingApproval(
+  workspaceId: string,
+  id: string,
+  by: string,
+): Promise<IdeaRow | null> {
+  await query(
+    `UPDATE content_ideas
+        SET marketing_approved_by = $3,
+            marketing_approved_at = now(),
+            status = 'pending_leadership',
+            updated_at = now()
+      WHERE workspace_id = $1 AND id = $2`,
+    [workspaceId, id, by],
+  )
+  return getIdea(workspaceId, id)
+}
+
+/** Records the Leadership decision. A rejection cannot be written without a reason. */
+export async function setLeadershipDecision(
+  workspaceId: string,
+  id: string,
+  decision: 'approved' | 'rejected',
+  by: string,
+  reason: string,
+): Promise<IdeaRow | null> {
+  if (decision === 'rejected' && reason.trim().length === 0) {
+    throw new Error('A rejection needs a reason — it is what the agents learn from.')
+  }
+
+  await query(
+    `UPDATE content_ideas
+        SET leadership_decision = $3::jsonb,
+            status = $4,
+            updated_at = now()
+      WHERE workspace_id = $1 AND id = $2`,
+    [
+      workspaceId,
+      id,
+      JSON.stringify({ decision, by, reason, at: new Date().toISOString() }),
+      decision === 'approved' ? 'approved' : 'rejected',
+    ],
+  )
+  return getIdea(workspaceId, id)
+}
+
+/** Deletes nothing: an idea is withdrawn by status, and its history survives. */
+export async function withdrawIdea(workspaceId: string, id: string): Promise<boolean> {
+  const rows = await query(
+    `UPDATE content_ideas
+        SET status = 'rejected',
+            leadership_decision = COALESCE(leadership_decision, '{}'::jsonb) ||
+              jsonb_build_object('decision','withdrawn','reason','Removed from the calendar by the operator','at', now()),
+            calendar_slot = 'suggestion',
+            updated_at = now()
+      WHERE workspace_id = $1 AND id = $2
+      RETURNING id`,
+    [workspaceId, id],
+  )
+  return rows.length > 0
+}
+
+/** Every published caption on a platform, for the similarity cap. */
+export async function publishedCaptions(
+  workspaceId: string,
+  platform: Platform,
+  limit = 40,
+): Promise<string[]> {
+  const rows = await query<{ content: string }>(
+    `SELECT content FROM posts
+      WHERE workspace_id = $1 AND platform = $2
+      ORDER BY published_at DESC NULLS LAST
+      LIMIT $3`,
+    [workspaceId, platform, limit],
+  )
+  return rows.map((r) => r.content)
+}

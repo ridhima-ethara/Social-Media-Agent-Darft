@@ -156,7 +156,10 @@ CREATE INDEX IF NOT EXISTS scraped_items_workspace_scraped_idx
   ON scraped_items (workspace_id, scraped_at DESC);
 CREATE INDEX IF NOT EXISTS scraped_items_workspace_validation_idx
   ON scraped_items (workspace_id, validation);
-CREATE INDEX IF NOT EXISTS scraped_items_external_idx
+-- Unique, not merely indexed: a re-run must UPDATE the item it already captured
+-- rather than stack a second copy. This is the conflict target `persistScrapedItems`
+-- upserts on.
+CREATE UNIQUE INDEX IF NOT EXISTS scraped_items_workspace_external_key
   ON scraped_items (workspace_id, external_id);
 
 -- ── content_ideas ──────────────────────────────────────────────────────────
