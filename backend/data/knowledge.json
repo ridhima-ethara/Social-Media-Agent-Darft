@@ -17,7 +17,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "research",
     "created_at": "2026-09-09T06:34:15.070280+00:00"
@@ -40,7 +40,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "research",
     "created_at": "2026-09-09T06:34:15.070016+00:00"
@@ -63,7 +63,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "research",
     "created_at": "2026-09-09T06:34:15.069723+00:00"
@@ -91,7 +91,7 @@
       }
     ],
     "confidence": "High",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "research",
     "created_at": "2026-09-09T06:34:15.069559+00:00"
@@ -114,7 +114,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "learned",
     "created_at": "2026-09-09T06:34:15.069321+00:00"
@@ -137,7 +137,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "learned",
     "created_at": "2026-09-09T06:34:15.069072+00:00"
@@ -160,7 +160,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "learned",
     "created_at": "2026-09-09T06:34:15.068865+00:00"
@@ -183,7 +183,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "learned",
     "created_at": "2026-09-09T06:34:15.068683+00:00"
@@ -206,7 +206,7 @@
       }
     ],
     "confidence": "Medium",
-    "evidence_count": 1,
+    "evidence_count": 2,
     "active": true,
     "origin": "learned",
     "created_at": "2026-09-09T06:34:15.068528+00:00"
@@ -217,8 +217,8 @@
     "category": "Compliance Rule",
     "content": "The brand checker reports and offers; it never rewrites behind the operator's back. A human instruction always outranks a brand guideline \u2014 apply it and raise the finding alongside it.",
     "sources": [],
-    "confidence": "High",
-    "evidence_count": 1,
+    "confidence": "Low",
+    "evidence_count": 2,
     "active": true,
     "origin": "brand",
     "created_at": "2026-09-09T06:34:15.068394+00:00"
@@ -229,8 +229,8 @@
     "category": "Compliance Rule",
     "content": "Never mention unannounced funding, partnerships, customers, hires, unpublished figures, legal positions or competitor comparisons. Any hit forces internal approval.",
     "sources": [],
-    "confidence": "High",
-    "evidence_count": 1,
+    "confidence": "Low",
+    "evidence_count": 2,
     "active": true,
     "origin": "brand",
     "created_at": "2026-09-09T06:34:15.068318+00:00"
@@ -241,8 +241,8 @@
     "category": "Brand Guideline",
     "content": "Hook, Context, Problem, Reframe, Mechanism, Evidence, Implication, Ethara connection, Close. Which stages appear depends on platform depth; the order never changes.",
     "sources": [],
-    "confidence": "High",
-    "evidence_count": 1,
+    "confidence": "Low",
+    "evidence_count": 2,
     "active": true,
     "origin": "brand",
     "created_at": "2026-09-09T06:34:15.068205+00:00"
@@ -253,8 +253,8 @@
     "category": "Brand Guideline",
     "content": "Three to five topic-derived hashtags on every platform. Generic reach-bait tags are excluded by rule, not by score.",
     "sources": [],
-    "confidence": "High",
-    "evidence_count": 1,
+    "confidence": "Low",
+    "evidence_count": 2,
     "active": true,
     "origin": "brand",
     "created_at": "2026-09-09T06:34:15.068100+00:00"
@@ -265,8 +265,8 @@
     "category": "Brand Guideline",
     "content": "No emoji on any platform. The budget is zero and no setting raises it. Enforcement strips rather than warns.",
     "sources": [],
-    "confidence": "High",
-    "evidence_count": 1,
+    "confidence": "Low",
+    "evidence_count": 2,
     "active": true,
     "origin": "brand",
     "created_at": "2026-09-09T06:34:15.068018+00:00"
@@ -277,8 +277,8 @@
     "category": "Brand Voice",
     "content": "Research-credible, anti-hype, confident, declarative, plain natural English. Every claim carries the number it rests on.",
     "sources": [],
-    "confidence": "High",
-    "evidence_count": 1,
+    "confidence": "Low",
+    "evidence_count": 2,
     "active": true,
     "origin": "brand",
     "created_at": "2026-09-09T06:34:15.067887+00:00"
@@ -289,8 +289,8 @@
     "category": "Brand Voice",
     "content": "Ethara is a frontier AI research lab, not a startup pitching a product. Write as a lab publishing its method, not a vendor announcing a feature.",
     "sources": [],
-    "confidence": "High",
-    "evidence_count": 1,
+    "confidence": "Low",
+    "evidence_count": 2,
     "active": true,
     "origin": "brand",
     "created_at": "2026-09-09T06:34:15.067469+00:00"

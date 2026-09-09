@@ -158,6 +158,73 @@ def _fetch_hackernews(keyword: str, max_items: int, window_days: int) -> list[Ra
     return posts
 
 
+def _crawl4ai_configured() -> bool:
+    """
+    crawl4ai needs no key, so presence of the package is the whole test. It is
+    checked by import rather than by env var because there is no env var that
+    would make an absent package work.
+    """
+    try:
+        import crawl4ai  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _fetch_crawl4ai(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
+    """
+    The open web, via crawl4ai. Keyless: it searches, then reads the results.
+
+    ON THE ENGAGEMENT FIELDS. A web page has no reaction count. `RawPost`
+    defaults the trio to 0 and this function leaves them there rather than
+    inventing plausible numbers — `source_name` records that the capture came
+    from a website, so nothing downstream reads those zeros as a performance
+    reading (constraint 2 — N/A is never 0).
+
+    `window_days` is accepted for signature parity with the other sources and
+    is not honoured: a search engine decides its own recency, and pretending to
+    filter on a date the page may not state would be a fabricated constraint.
+    """
+    import asyncio
+
+    from .crawl import crawl_keywords
+
+    pages = int(os.environ.get("CRAWL4AI_MAX_PAGES_PER_KEYWORD", "6"))
+    chars = int(os.environ.get("CRAWL4AI_MAX_CHARS_PER_PAGE", "6000"))
+    engines = [
+        e.strip().lower()
+        for e in os.environ.get("CRAWL4AI_SEARCH_ENGINES", "duckduckgo,bing").split(",")
+        if e.strip()
+    ]
+
+    result = asyncio.run(
+        crawl_keywords(
+            [keyword],
+            engines=engines,
+            max_pages=min(max_items, pages),
+            max_chars=chars,
+            delay_ms=int(os.environ.get("CRAWL4AI_DELAY_MS", "400")),
+        )
+    )
+
+    posts: list[RawPost] = []
+    for row in result.get("posts", []):
+        posts.append(RawPost(
+            external_id=row["externalId"],
+            text=row["text"],
+            url=row["url"],
+            author_name=row.get("authorName") or row.get("siteName", ""),
+            author_headline=row.get("siteName", ""),
+            # The page's own stated date when it has one, the capture time
+            # otherwise — never one dressed as the other.
+            posted_at=row.get("publishedAt") or row.get("capturedAt", ""),
+            hashtags=row.get("hashtags") or extract_hashtags(row["text"]),
+            keyword=keyword,
+            source_name=f"crawl4ai · {row.get('siteName', 'web')}",
+        ))
+    return posts
+
+
 def _fetch_fixtures(keyword: str, max_items: int) -> list[RawPost]:
     """The bundled corpus. A supported configuration, not a stub."""
     if not FIXTURES.exists():
@@ -171,9 +238,24 @@ def _fetch_fixtures(keyword: str, max_items: int) -> list[RawPost]:
 
 SOURCES = {
     "linkedin": (_fetch_apify, "Apify · LinkedIn", "APIFY_API_TOKEN"),
+    "crawl4ai": (_fetch_crawl4ai, "crawl4ai · open web", ""),
     "reddit": (_fetch_reddit, "Reddit", ""),
     "hackernews": (_fetch_hackernews, "Hacker News", ""),
 }
+
+#: Sources whose availability is not an env var. A keyless source can still be
+#: unavailable — crawl4ai needs its package and its browser — and reporting it
+#: as ready because no key is missing would be a lie of omission.
+PROBES: dict[str, Any] = {
+    "crawl4ai": _crawl4ai_configured,
+}
+
+
+def _source_ready(key: str, env_key: str) -> bool:
+    if env_key and not os.environ.get(env_key):
+        return False
+    probe = PROBES.get(key)
+    return True if probe is None else bool(probe())
 
 
 # ── The tools ──────────────────────────────────────────────────────────────
@@ -187,12 +269,18 @@ def available_sources() -> dict[str, Any]:
     """
     rows = []
     for key, (_, label, env_key) in SOURCES.items():
-        configured = not env_key or bool(os.environ.get(env_key))
+        configured = _source_ready(key, env_key)
+        if configured:
+            reason = "Ready."
+        elif env_key:
+            reason = f"{env_key} is not set"
+        else:
+            reason = f"the {key} package is not installed"
         rows.append({
             "id": key,
             "label": label,
             "configured": configured,
-            "reason": "Ready." if configured else f"{env_key} is not set",
+            "reason": reason,
             "env_key": env_key,
         })
     live = [r["id"] for r in rows if r["configured"]]
@@ -217,7 +305,7 @@ def fetch_posts(keywords: list[str], max_items: int = 50, window_days: int = 14)
 
     for keyword in keywords:
         for key, (fetch, label, env_key) in SOURCES.items():
-            if env_key and not os.environ.get(env_key):
+            if not _source_ready(key, env_key):
                 continue
             try:
                 posts = fetch(keyword, max_items, window_days)

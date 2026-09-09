@@ -15,6 +15,7 @@ import type { Platform } from '../../../../shared/agent-contract'
 import { PLATFORMS } from '../../../../shared/agent-contract'
 import { similarity } from '../../../../shared/brand-voice'
 import { listIdeas, listPosts } from '../../db/repo'
+import { textAdapter, textModelId } from '../../integrations'
 import {
   addDays,
   clamp,
@@ -38,10 +39,11 @@ import type { PipelinePayload, PlannedIdea } from '../skills/index'
    1 · calendar.idea.form
    ═══════════════════════════════════════════════════════════════════════════ */
 
-registerSkill<PipelinePayload>('calendar.idea.form', (payload, ctx) => {
+registerSkill<PipelinePayload>('calendar.idea.form', async (payload, ctx) => {
   const maxIdeas = ctx.num('maxIdeasPerRun', 16)
   const titleMaxWords = ctx.num('titleMaxWords', 12)
   const markNewTrends = ctx.bool('markNewTrends', true)
+  const preferModel = ctx.bool('preferModel', true)
 
   const opportunities = (payload.opportunities ?? []).slice(0, Math.max(1, maxIdeas))
 
@@ -71,6 +73,25 @@ registerSkill<PipelinePayload>('calendar.idea.form', (payload, ctx) => {
     conflicts: [],
   }))
 
+  // The phrasing pass. Everything the calendar DECIDES — confidence, platform,
+  // date, time, rank — is computed above and below this point and is untouched
+  // by it. The model is asked only to say the same thing better.
+  const phrasing = await phraseIdeas(ideas, { enabled: preferModel, titleMaxWords })
+
+  if (phrasing.applied > 0) {
+    ctx.log(`${phrasing.applied} of ${ideas.length} idea(s) phrased by ${phrasing.model}`)
+  }
+  for (const rejection of phrasing.rejections) {
+    // Rule 6: a rejected rewrite names the evidence that rejected it.
+    ctx.emit('activity', rejection, { status: 'warn' })
+  }
+  if (phrasing.fallbackReason !== undefined) {
+    ctx.emit('activity', `Idea titles left as formed — ${phrasing.fallbackReason}`, {
+      status: 'warn',
+      reason: phrasing.fallbackReason,
+    })
+  }
+
   for (const idea of ideas) {
     ctx.emit('idea.created', idea.title, {
       key: idea.key,
@@ -85,8 +106,211 @@ registerSkill<PipelinePayload>('calendar.idea.form', (payload, ctx) => {
       (markNewTrends ? ` · ${ideas.filter((i) => i.isNewTrend).length} from a newly trending keyword` : ''),
   )
 
-  return { ideas }
+  return { ideas, ideaPhrasingSource: phrasing.source, ideaPhrasingModel: phrasing.model }
 })
+
+/* ── The phrasing pass ─────────────────────────────────────────────────────── */
+
+interface PhrasingOutcome {
+  applied: number
+  source: 'live' | 'fixture'
+  model: string
+  fallbackReason?: string
+  rejections: string[]
+}
+
+/**
+ * Rewrites idea titles and descriptions in place, and ONLY where the rewrite
+ * is safe to accept.
+ *
+ * Two properties are enforced rather than requested:
+ *
+ *  · A rewrite that introduces a digit the source material does not contain is
+ *    rejected outright (constraint 3 — never fabricate evidence). Asking a
+ *    model not to invent figures is a request; checking is an enforcement.
+ *  · The title-length knob is applied after the rewrite, so the operator's
+ *    ceiling holds whatever the model returned.
+ *
+ * A failure here is never fatal: the deterministically-formed titles are
+ * already in place, so the worst case is that they stay.
+ */
+async function phraseIdeas(
+  ideas: PlannedIdea[],
+  opts: { enabled: boolean; titleMaxWords: number },
+): Promise<PhrasingOutcome> {
+  const rejections: string[] = []
+  const writer = textAdapter()
+
+  if (!opts.enabled) {
+    return { applied: 0, source: 'fixture', model: 'ethara-template-writer', rejections }
+  }
+  if (!writer.isConfigured()) {
+    return {
+      applied: 0,
+      source: 'fixture',
+      model: 'ethara-template-writer',
+      fallbackReason: writer.unavailableReason(),
+      rejections,
+    }
+  }
+  if (ideas.length === 0) {
+    return { applied: 0, source: 'fixture', model: 'ethara-template-writer', rejections }
+  }
+
+  // One call for the whole batch: sixteen round trips to a local model would
+  // dominate the stage's wall clock for no gain in quality.
+  const brief = ideas
+    .map((idea, index) =>
+      [
+        `${index + 1}. key=${idea.key}`,
+        `   topic: ${idea.sourceTopic}`,
+        `   angle: ${idea.angle}`,
+        `   audience: ${idea.audience}`,
+        `   format: ${idea.format}`,
+        `   current title: ${idea.title}`,
+        `   current description: ${idea.description}`,
+      ].join('\n'),
+    )
+    .join('\n\n')
+
+  let raw: string
+  try {
+    raw = await writer.run({
+      systemInstruction: [
+        'You phrase content-calendar ideas for a frontier AI research lab.',
+        'Rewrite each title as a specific, declarative headline — no colons, no questions, no buzzwords, no emoji.',
+        'Rewrite each description as one or two plain sentences saying what the post will argue.',
+        'Introduce NO new facts, NO new numbers, NO dates and NO named entities that are not already present in the material you are given.',
+        'Return ONLY a JSON array of objects with the keys "key", "title" and "description". No prose, no code fence.',
+      ].join('\n'),
+      prompt: brief,
+      temperature: 0.3,
+      maxOutputTokens: 2048,
+    })
+  } catch (error) {
+    return {
+      applied: 0,
+      source: 'fixture',
+      model: 'ethara-template-writer',
+      fallbackReason:
+        error instanceof Error ? error.message : 'the text model failed to phrase the ideas',
+      rejections,
+    }
+  }
+
+  const rows = parseIdeaRows(raw)
+  if (rows === null) {
+    return {
+      applied: 0,
+      source: 'fixture',
+      model: 'ethara-template-writer',
+      fallbackReason: 'the text model did not return a readable JSON array',
+      rejections,
+    }
+  }
+
+  let applied = 0
+  for (const row of rows) {
+    const idea = ideas.find((i) => i.key === row.key)
+    if (!idea) continue
+
+    // The digits the model is allowed to use are exactly the digits already in
+    // the evidence for this idea.
+    const permitted = `${idea.title} ${idea.description} ${idea.sourceTopic} ${idea.angle} ${idea.audience}`
+
+    const nextTitle = row.title.trim()
+    const nextDescription = row.description.trim()
+
+    if (nextTitle.length >= 8 && nextTitle.length <= 200) {
+      const invented = inventedFigures(permitted, nextTitle)
+      if (invented.length > 0) {
+        rejections.push(
+          `Title rewrite for “${idea.title}” rejected: it introduced ${invented.join(', ')}, which is not in the evidence.`,
+        )
+      } else {
+        idea.title = clampWords(nextTitle, opts.titleMaxWords)
+        applied += 1
+      }
+    }
+
+    if (nextDescription.length >= 20 && nextDescription.length <= 800) {
+      const invented = inventedFigures(permitted, nextDescription)
+      if (invented.length > 0) {
+        rejections.push(
+          `Description rewrite for “${idea.title}” rejected: it introduced ${invented.join(', ')}, which is not in the evidence.`,
+        )
+      } else {
+        idea.description = nextDescription
+      }
+    }
+  }
+
+  return {
+    applied,
+    source: applied > 0 ? 'live' : 'fixture',
+    model: applied > 0 ? textModelId() : 'ethara-template-writer',
+    rejections,
+  }
+}
+
+interface IdeaRow {
+  key: string
+  title: string
+  description: string
+}
+
+/** Tolerant JSON extraction — a model may wrap the array in a fence or prose. */
+function parseIdeaRows(raw: string): IdeaRow[] | null {
+  const start = raw.indexOf('[')
+  const end = raw.lastIndexOf(']')
+  if (start === -1 || end <= start) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1))
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed)) return null
+
+  const rows: IdeaRow[] = []
+  for (const entry of parsed) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
+    if (
+      typeof record.key === 'string' &&
+      typeof record.title === 'string' &&
+      typeof record.description === 'string'
+    ) {
+      rows.push({ key: record.key, title: record.title, description: record.description })
+    }
+  }
+  return rows
+}
+
+/**
+ * The numbers present in `candidate` but absent from `source`.
+ *
+ * Deliberately compares number-like tokens rather than characters, so "10" in
+ * the source does not license "2010" in the rewrite. Percentages and decimals
+ * are captured as written, because "40" and "40%" are different claims.
+ */
+export function inventedFigures(source: string, candidate: string): string[] {
+  const tokensIn = (text: string): Set<string> => {
+    const found = new Set<string>()
+    for (const match of text.matchAll(/\d+(?:[.,]\d+)*\s*%?/g)) {
+      found.add(match[0].replace(/\s+/g, '').toLowerCase())
+    }
+    return found
+  }
+
+  const permitted = tokensIn(source)
+  const invented: string[] = []
+  for (const token of tokensIn(candidate)) {
+    if (!permitted.has(token)) invented.push(token)
+  }
+  return invented.slice(0, 4)
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    2 · calendar.idea.dedupe

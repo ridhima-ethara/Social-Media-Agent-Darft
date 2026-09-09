@@ -21,7 +21,7 @@ import { TOOL_BY_ID } from '../../../shared/tool-registry'
 import { AGENT_BY_ID } from '../../../shared/agent-registry'
 import type { AgentId } from '../../../shared/agent-contract'
 import { config } from '../config'
-import { gcpText } from '../integrations'
+import { textAdapter } from '../integrations'
 import type { SituationSnapshot } from './context'
 import type { Plan } from './planner'
 import type { StepOutcome } from './dispatch'
@@ -146,7 +146,8 @@ export async function narrateResult(input: FinalNarrationInput): Promise<{
 }> {
   const template = narrateResultTemplate(input)
 
-  const modelReady = config.assistant.provider === 'gcp' && gcpText.isConfigured()
+  const narrator = textAdapter()
+  const modelReady = config.assistant.provider !== 'deterministic' && narrator.isConfigured()
   if (!modelReady) {
     return {
       text: template,
@@ -156,7 +157,7 @@ export async function narrateResult(input: FinalNarrationInput): Promise<{
   }
 
   try {
-    const raw = await gcpText.run({
+    const raw = await narrator.run({
       systemInstruction: buildNarratorSystemPrompt(input.options.verbosity),
       prompt: [
         `The operator asked: ${input.plan.intent.restated}`,

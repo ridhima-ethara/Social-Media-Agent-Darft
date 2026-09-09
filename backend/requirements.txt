@@ -1,0 +1,26 @@
+# The Python tier's dependencies, pinned.
+#
+# Pinned rather than ranged because a run must be replayable from
+# `skill_runs.config_used`, and a floating dependency quietly breaks that.
+#
+# Install:
+#   python3.12 -m venv backend/.venv
+#   backend/.venv/bin/pip install -r backend/requirements.txt
+#   backend/.venv/bin/python -m playwright install chromium
+
+# ── Core ────────────────────────────────────────────────────────────────────
+# The knob registry and every schema are pydantic models.
+pydantic==2.13.5
+
+# ── Scraping ────────────────────────────────────────────────────────────────
+# Keyless open-web capture. Drives a real browser, so `playwright install
+# chromium` is a required second step — the wheel alone will not crawl.
+crawl4ai==0.9.3
+
+# ── Models ──────────────────────────────────────────────────────────────────
+# Ollama needs nothing: `core/llm.py` talks to it over urllib from the standard
+# library, deliberately, so a local model adds no dependency at all.
+#
+# anthropic is optional. It is imported lazily inside `run_loop`, and its
+# absence degrades to the deterministic pipeline rather than failing.
+anthropic==1.4.0

@@ -19,6 +19,7 @@ import {
 } from '../../../../../shared/image-models'
 import { withRetry } from '../../../integrations/adapter'
 import { renderBrandSvg, svgToDataUri } from './brand-svg'
+import { flux2KleinPainter } from './flux2-klein'
 import { imagenPainter } from './gcp-imagen'
 import type { BackgroundPainter, RenderRequest, RenderResult } from './types'
 import { zImagePainter } from './z-image-turbo'
@@ -30,6 +31,7 @@ export { renderBrandSvg, svgToDataUri } from './brand-svg'
 const PAINTERS: Partial<Record<ImageModelId, BackgroundPainter>> = {
   'gcp-imagen': imagenPainter,
   'z-image-turbo': zImagePainter,
+  'flux2-klein': flux2KleinPainter,
 }
 
 /** Which models are reachable right now — what the model menu renders. */

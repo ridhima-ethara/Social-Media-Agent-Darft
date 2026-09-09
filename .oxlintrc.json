@@ -20,6 +20,8 @@
     "node_modules",
     "server/node_modules",
     "specs",
-    "*.md"
+    "*.md",
+    "**/.venv",
+    ".mflux-venv"
   ]
 }

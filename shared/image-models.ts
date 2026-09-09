@@ -11,7 +11,7 @@
 
 import type { Platform } from './agent-contract'
 
-export type ImageModelId = 'brand-svg' | 'gcp-imagen' | 'z-image-turbo'
+export type ImageModelId = 'brand-svg' | 'gcp-imagen' | 'z-image-turbo' | 'flux2-klein'
 
 export interface ImageModelSpec {
   id: ImageModelId
@@ -57,6 +57,20 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     typicalMs: 6500,
   },
   {
+    id: 'flux2-klein',
+    label: 'FLUX.2 Klein',
+    vendor: 'Black Forest Labs (local)',
+    summary:
+      'Open-weight background painter running entirely on this machine. Distilled to four steps, so it is quick for a diffusion model, and nothing leaves the host.',
+    licence: 'Apache-2.0 (4B) · non-commercial (9B) · local weights',
+    // The Ollama transport is preferred; MFLUX_PYTHON is what actually paints
+    // today, because Ollama will not serve image models over HTTP yet.
+    envKey: 'MFLUX_PYTHON',
+    paintsBackground: true,
+    drawsBrandLayerLocally: true,
+    typicalMs: 14000,
+  },
+  {
     id: 'z-image-turbo',
     label: 'Z-Image Turbo',
     vendor: 'Tongyi MAI',
@@ -73,6 +87,17 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
 export const IMAGE_MODEL_BY_ID: Record<ImageModelId, ImageModelSpec> = Object.fromEntries(
   IMAGE_MODELS.map((m) => [m.id, m]),
 ) as Record<ImageModelId, ImageModelSpec>
+
+/**
+ * The catalogue as a zod-ready tuple.
+ *
+ * Every schema and knob that accepts a model id reads this rather than
+ * restating the list. Adding a painter to `IMAGE_MODELS` is then the whole
+ * change — a hand-maintained copy elsewhere is a copy that will disagree, and
+ * the way it disagrees is that the new model is silently rejected at the API
+ * boundary while appearing in the menu.
+ */
+export const IMAGE_MODEL_IDS = IMAGE_MODELS.map((m) => m.id) as [ImageModelId, ...ImageModelId[]]
 
 export const DEFAULT_IMAGE_MODEL: ImageModelId = 'brand-svg'
 

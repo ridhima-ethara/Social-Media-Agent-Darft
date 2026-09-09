@@ -6,8 +6,12 @@
  */
 
 import { BRAND, checkBrandCompliance } from '../../../../shared/brand-voice'
-import { config } from '../../config'
-import { gcpText, rewriteTemplateCaption, withFallback } from '../../integrations'
+import {
+  rewriteTemplateCaption,
+  textAdapter,
+  textModelId,
+  withFallback,
+} from '../../integrations'
 import { insertKnowledgeEntry, listKnowledge, listPosts } from '../../db/repo'
 import { clampChars, clampWords, PLATFORM_LABEL, similarity } from '../corpus'
 import { registerSkill } from '../runtime'
@@ -30,7 +34,8 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
   }
 
   const outcome = await withFallback(
-    gcpText,
+    // Whichever text provider is bound — the rewrite does not care which.
+    textAdapter(),
     {
       systemInstruction: [
         `You are revising a ${PLATFORM_LABEL[payload.platform]} post for ${BRAND.name}.`,
@@ -71,7 +76,7 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
     applied.length > 0
       ? applied
       : outcome.source === 'live'
-        ? `Applied “${clampWords(instruction, 12)}” with ${config.gcp.fastTextModel}`
+        ? `Applied “${clampWords(instruction, 12)}” with ${textModelId(true)}`
         : `Applied “${clampWords(instruction, 12)}”`
 
   ctx.log(
@@ -83,7 +88,7 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
     appliedNote,
     conflictNotes,
     revisionSource: outcome.source,
-    revisionModel: outcome.source === 'live' ? config.gcp.fastTextModel : 'ethara-template-writer',
+    revisionModel: outcome.source === 'live' ? textModelId(true) : 'ethara-template-writer',
   }
 })
 

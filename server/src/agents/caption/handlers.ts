@@ -7,8 +7,13 @@
 
 import { BRAND, deriveHashtags, enforceBrandVoice } from '../../../../shared/brand-voice'
 import type { Platform } from '../../../../shared/agent-contract'
-import { config } from '../../config'
-import { gcpText, temperatureFromPercent, withFallback, writeTemplateCaption } from '../../integrations'
+import {
+  temperatureFromPercent,
+  textAdapter,
+  textModelId,
+  withFallback,
+  writeTemplateCaption,
+} from '../../integrations'
 import { listKnowledge } from '../../db/repo'
 import { clampChars, clampWords, PLATFORM_LABEL, similarity } from '../corpus'
 import { registerSkill } from '../runtime'
@@ -32,9 +37,12 @@ registerSkill<CaptionPayload>('generation.caption.mode', (payload, ctx) => {
     else writingMode = 'Long-form'
   }
 
-  const modelReady = preferModel && gcpText.isConfigured()
+  // Whichever provider is bound right now — local or hosted. The agent does
+  // not know which, and should not.
+  const writer = textAdapter()
+  const modelReady = preferModel && writer.isConfigured()
   ctx.log(
-    `Writing mode: ${writingMode} · ${modelReady ? `${config.gcp.textModel} will write it` : 'the deterministic template writer will write it'}`,
+    `Writing mode: ${writingMode} · ${modelReady ? `${textModelId()} will write it` : 'the deterministic template writer will write it'}`,
   )
 
   return { writingMode }
@@ -196,7 +204,7 @@ registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, 
   ].join('\n')
 
   const outcome = await withFallback(
-    gcpText,
+    textAdapter(),
     {
       systemInstruction,
       prompt,
@@ -232,13 +240,13 @@ registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, 
   const explanation = outcome.value.trim()
 
   ctx.log(
-    `${layers}-layer explanation written by ${outcome.source === 'live' ? config.gcp.textModel : 'the deterministic template writer'}`,
+    `${layers}-layer explanation written by ${outcome.source === 'live' ? textModelId() : 'the deterministic template writer'}`,
   )
 
   return {
     explanation,
     captionSource: outcome.source,
-    captionModel: outcome.source === 'live' ? config.gcp.textModel : 'ethara-template-writer',
+    captionModel: outcome.source === 'live' ? textModelId() : 'ethara-template-writer',
     ...(outcome.fallbackReason === undefined ? {} : { captionFallbackReason: outcome.fallbackReason }),
   }
 })

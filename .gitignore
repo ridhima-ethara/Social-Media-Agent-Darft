@@ -28,6 +28,15 @@ logs/
 coverage/
 .turbo/
 
+# ── Python tiers are LOCAL ENVIRONMENTS ──────────────────────────────────────
+# backend/.venv holds the agent runtime and crawl4ai; .mflux-venv holds the MLX
+# image stack. Both are recreated from backend/requirements.txt and the README,
+# and both are far too large to version.
+backend/.venv/
+.mflux-venv/
+__pycache__/
+*.pyc
+
 # ── Runtime skills are a BUILD ARTIFACT ──────────────────────────────────────
 # packages/skills/ is the versioned source of truth. scripts/build-skills.ts
 # copies it here at build time, and the runtime process runs with cwd set to

@@ -1,25 +1,50 @@
 """
 THE MODEL CLIENT
 
-One reasoning path, two bindings: Claude when `ANTHROPIC_API_KEY` is set, and a
-deterministic fallback when it is not. Falling back changes which
-implementation is bound, never which code path runs — so nothing downstream
-branches on which one answered.
+One reasoning path, three bindings:
 
-The fallback is not a stub. It runs the agent's tools in their declared order
-and returns the same shape, which is what keeps the product fully explorable
-with an empty environment.
+  · Ollama / Qwen3      when `OLLAMA_BASE_URL` is set — local, no key, no egress
+  · Claude              when `ANTHROPIC_API_KEY` is set
+  · the deterministic pipeline when neither is
+
+Falling back changes which implementation is bound, never which code path runs
+— so nothing downstream branches on which one answered. `run_loop` and
+`Reasoning` are the contract, and all three bindings honour it exactly.
+
+The deterministic path is not a stub. It runs the agent's tools in their
+declared order and returns the same shape, which is what keeps the product
+fully explorable with an empty environment.
+
+WHY OLLAMA FIRST WHEN BOTH ARE AVAILABLE
+A local model costs nothing per call and keeps scraped evidence on the machine
+that scraped it. `AGENT_MODEL_PROVIDER` overrides the preference explicitly for
+anyone who wants the hosted model.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "4096"))
+
+# ── Ollama ──────────────────────────────────────────────────────────────────
+# No default for the base URL, deliberately: a default would make
+# `_ollama_configured()` answer True on a machine with no daemon, and the agent
+# would report a live model while silently running the fallback.
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "qwen3:14b")
+OLLAMA_TIMEOUT_S = int(os.environ.get("OLLAMA_TIMEOUT_MS", "180000")) // 1000
+OLLAMA_CONTEXT_TOKENS = int(os.environ.get("OLLAMA_CONTEXT_TOKENS", "16384"))
+
+#: `auto` prefers the local model. `ollama` / `anthropic` pin one.
+#: `deterministic` disables both.
+PROVIDER = os.environ.get("AGENT_MODEL_PROVIDER", "auto").strip().lower()
 
 
 @dataclass
@@ -33,6 +58,17 @@ class ToolSpec:
 
     def to_anthropic(self) -> dict[str, Any]:
         return {"name": self.name, "description": self.description, "input_schema": self.input_schema}
+
+    def to_ollama(self) -> dict[str, Any]:
+        """Ollama follows the OpenAI function-calling envelope."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
 
 
 @dataclass
@@ -55,12 +91,56 @@ class Reasoning:
     fallback_reason: str | None = None
 
 
-def is_configured() -> bool:
+def _anthropic_configured() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def _ollama_configured() -> bool:
+    return bool(OLLAMA_BASE_URL)
+
+
+def active_provider() -> str:
+    """
+    Which binding will actually serve, resolved the same way every time.
+
+    Returned rather than inferred by callers, because "which model produced
+    this" is the first question asked about any agent output.
+    """
+    if PROVIDER == "deterministic":
+        return "deterministic"
+    if PROVIDER == "ollama":
+        return "ollama" if _ollama_configured() else "deterministic"
+    if PROVIDER == "anthropic":
+        return "anthropic" if _anthropic_configured() else "deterministic"
+    if _ollama_configured():
+        return "ollama"
+    if _anthropic_configured():
+        return "anthropic"
+    return "deterministic"
+
+
+def active_model() -> str:
+    """The model id of the active binding, for the artefact stamp."""
+    provider = active_provider()
+    if provider == "ollama":
+        return OLLAMA_MODEL
+    if provider == "anthropic":
+        return MODEL
+    return "ethara-deterministic-pipeline"
+
+
+def is_configured() -> bool:
+    return active_provider() != "deterministic"
+
+
 def unavailable_reason() -> str:
-    return "ANTHROPIC_API_KEY is not set"
+    if PROVIDER == "deterministic":
+        return "AGENT_MODEL_PROVIDER is deterministic"
+    if PROVIDER == "ollama":
+        return "OLLAMA_BASE_URL is not set"
+    if PROVIDER == "anthropic":
+        return "ANTHROPIC_API_KEY is not set"
+    return "neither OLLAMA_BASE_URL nor ANTHROPIC_API_KEY is set"
 
 
 def run_loop(
@@ -76,9 +156,156 @@ def run_loop(
     Every tool result is fed back verbatim. The model never sees a tool it does
     not hold — the allowlist is enforced here, not merely described in a prompt.
     """
-    if not is_configured():
-        return _deterministic(tools, unavailable_reason())
+    provider = active_provider()
 
+    if provider == "ollama":
+        return _run_ollama(system, task, tools, max_turns)
+    if provider == "anthropic":
+        return _run_anthropic(system, task, tools, max_turns)
+    return _deterministic(tools, unavailable_reason())
+
+
+# ── Binding 1 · Ollama (local) ───────────────────────────────────────────────
+
+
+def _ollama_post(path: str, body: dict[str, Any]) -> dict[str, Any]:
+    """
+    One HTTP path for this binding, on the standard library.
+
+    urllib rather than requests because the backend declares as few
+    dependencies as it can get away with, and this is one POST.
+    """
+    request = urllib.request.Request(
+        f"{OLLAMA_BASE_URL}{path}",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_S) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:240]
+        raise RuntimeError(f"Ollama returned HTTP {error.code} — {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"no Ollama daemon answered at {OLLAMA_BASE_URL} — is `ollama serve` running? ({error.reason})"
+        ) from error
+
+
+def _strip_reasoning(text: str) -> str:
+    """
+    Removes a leading reasoning block if one is emitted despite `think: false`.
+    Only a block that OPENS the response is stripped, so prose that happens to
+    contain the word is untouched.
+    """
+    import re
+
+    return re.sub(r"^\s*<(think|thinking)>.*?</\1>\s*", "", text, flags=re.S | re.I).strip()
+
+
+def _run_ollama(system: str, task: str, tools: list[ToolSpec], max_turns: int) -> Reasoning:
+    """
+    The same loop as the Claude binding, in Ollama's envelope.
+
+    Qwen3 is a hybrid-reasoning model; thinking is disabled because the agent
+    wants the answer and the tool calls, not the deliberation.
+    """
+    by_name = {tool.name: tool for tool in tools}
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": task},
+    ]
+    turns: list[Turn] = []
+    payload: dict[str, Any] = {}
+
+    try:
+        for _ in range(max_turns):
+            response = _ollama_post(
+                "/api/chat",
+                {
+                    "model": OLLAMA_MODEL,
+                    "messages": messages,
+                    "tools": [t.to_ollama() for t in tools],
+                    "stream": False,
+                    "think": False,
+                    "options": {"temperature": 0.4, "num_ctx": OLLAMA_CONTEXT_TOKENS},
+                },
+            )
+
+            message = response.get("message") or {}
+            calls = message.get("tool_calls") or []
+
+            if not calls:
+                return Reasoning(
+                    text=_strip_reasoning(message.get("content") or ""),
+                    turns=turns,
+                    payload=payload,
+                    used_model=True,
+                )
+
+            messages.append(message)
+
+            for call in calls:
+                function = call.get("function") or {}
+                name = function.get("name", "")
+                arguments = function.get("arguments") or {}
+                # Ollama sometimes hands arguments back as a JSON string.
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+
+                tool = by_name.get(name)
+                if tool is None:
+                    # Refused, and the refusal is reported rather than hidden.
+                    messages.append({
+                        "role": "tool",
+                        "tool_name": name,
+                        "content": f"{name} is not a tool you hold. Your Boundaries forbid it.",
+                    })
+                    continue
+
+                try:
+                    output = tool.handler(**arguments)
+                except Exception as error:  # noqa: BLE001 — reported, never swallowed
+                    messages.append({
+                        "role": "tool",
+                        "tool_name": name,
+                        "content": f"{name} failed: {error}",
+                    })
+                    continue
+
+                if isinstance(output, dict):
+                    payload.update(output)
+                turns.append(Turn(tool=name, arguments=dict(arguments), result_summary=_summarise(output)))
+                messages.append({
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": json.dumps(output, default=str)[:8000],
+                })
+
+        return Reasoning(
+            text="Reached the turn cap before finishing.",
+            turns=turns,
+            payload=payload,
+            used_model=True,
+            fallback_reason=f"stopped after {max_turns} turns",
+        )
+
+    except Exception as error:  # noqa: BLE001 — fail in the open, stamped
+        fallback = _deterministic(tools, f"the local model call failed: {error}")
+        fallback.turns = turns + fallback.turns
+        return fallback
+
+
+# ── Binding 2 · Anthropic ────────────────────────────────────────────────────
+
+
+def _run_anthropic(system: str, task: str, tools: list[ToolSpec], max_turns: int) -> Reasoning:
     try:
         import anthropic
     except ImportError:

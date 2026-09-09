@@ -25,7 +25,7 @@ import {
 } from '../../shared/agent-registry'
 import { TOOLS, TOOL_SUMMARY, matchTools, TOOL_BY_ID } from '../../shared/tool-registry'
 import { BRAND, BRAND_RULES } from '../../shared/brand-voice'
-import { IMAGE_MODELS } from '../../shared/image-models'
+import { IMAGE_MODELS, IMAGE_MODEL_IDS } from '../../shared/image-models'
 import { config, integrationStatuses } from './config'
 import { databaseReachable } from './db/pool'
 import {
@@ -156,8 +156,28 @@ export function createApiRouter(): Router {
       tools: TOOL_SUMMARY,
       integrations: {
         apify: { configured: statuses.apify.configured, reason: statuses.apify.reason },
+        crawl4ai: { configured: statuses.crawl4ai.configured, reason: statuses.crawl4ai.reason },
         parallel: { configured: statuses.parallel.configured, reason: statuses.parallel.reason },
         gcp: { configured: statuses.gcp.configured, reason: statuses.gcp.reason },
+        ollama: {
+          configured: statuses.ollama.configured,
+          reason: statuses.ollama.reason,
+          textModel: statuses.ollama.textModel,
+          imageModel: statuses.ollama.imageModel,
+        },
+        mflux: {
+          configured: statuses.mflux.configured,
+          reason: statuses.mflux.reason,
+          model: statuses.mflux.model,
+        },
+        // WHICH provider writes, not merely whether one can. An operator
+        // reading this should not have to work out the precedence themselves.
+        text: {
+          provider: statuses.text.provider,
+          resolved: statuses.text.resolved,
+          configured: statuses.text.configured,
+          reason: statuses.text.reason,
+        },
         assistant: {
           provider: config.assistant.provider,
           configured: statuses.assistant.configured,
@@ -706,7 +726,7 @@ export function createApiRouter(): Router {
       const body = parseBody(
         z.object({
           platform: platformSchema,
-          model: z.enum(['brand-svg', 'gcp-imagen', 'z-image-turbo']).optional(),
+          model: z.enum(IMAGE_MODEL_IDS).optional(),
           prompt: z.string().optional(),
           instruction: z.string().optional(),
         }),

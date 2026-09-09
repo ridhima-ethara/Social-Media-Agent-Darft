@@ -13,6 +13,8 @@
 import { z } from 'zod'
 import type { AgentId } from './agent-contract'
 import { PLATFORMS, VALIDATION_VERDICTS } from './agent-contract'
+// The catalogue, not a copy of it — see IMAGE_MODEL_IDS.
+import { IMAGE_MODEL_IDS } from './image-models'
 
 /**
  * safe         — may be called freely, including speculatively while composing
@@ -600,7 +602,7 @@ export const TOOLS: ToolSpec[] = [
         id: z.string().optional(),
         title: z.string().optional(),
         platform: platformEnum.optional(),
-        model: z.enum(['brand-svg', 'gcp-imagen', 'z-image-turbo']).optional(),
+        model: z.enum(IMAGE_MODEL_IDS).optional(),
         instruction: z.string().optional().describe('How to change the creative'),
       })
       .strict(),

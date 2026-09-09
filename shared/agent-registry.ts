@@ -15,6 +15,7 @@
  * Skill ids are STORAGE KEYS. They are never renamed.
  */
 
+import { IMAGE_MODEL_IDS } from './image-models'
 import {
   type AgentId,
   type AgentSpec,
@@ -1056,6 +1057,8 @@ const CALENDAR_SKILLS: SkillSpec[] = [
         { min: 4, max: 24, step: 1 }),
       bool('markNewTrends', 'Flag new trends', true,
         'Marks ideas that came from a newly-trending keyword, which the calendar shows as a NEW TREND pill.'),
+      bool('preferModel', 'Let the model phrase the idea', true,
+        'When a text model is reachable, it rewrites each idea title and description into calendar-ready copy. Scoring, platform choice and slot placement stay deterministic either way, and a rewrite that introduces a figure the evidence does not contain is rejected.'),
     ],
   },
   {
@@ -1535,7 +1538,7 @@ const IMAGE_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     critical: true,
     config: [
-      enumField('model', 'Image model', ['brand-svg', 'gcp-imagen', 'z-image-turbo'], 'brand-svg',
+      enumField('model', 'Image model', [...IMAGE_MODEL_IDS], 'brand-svg',
         'Which model paints the background. The brand renderer needs no service and never fails, which is why it is the default.'),
       num('timeoutMs', 'Render timeout', 60000,
         'How long to wait for the model before falling back to the local renderer.',

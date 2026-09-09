@@ -71,9 +71,26 @@ function has(key: string): boolean {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export type PublishMode = 'demo' | 'live'
-export type AssistantProvider = 'gcp' | 'deterministic'
+export type AssistantProvider = 'gcp' | 'ollama' | 'deterministic'
+
+/**
+ * Which vendor serves text generation.
+ * `auto` prefers a configured local model over a cloud one — see `textAdapter()`.
+ */
+export type TextProvider = 'auto' | 'ollama' | 'gcp'
 
 export const config = {
+  /**
+   * Provider selection for text generation, read by `textAdapter()`.
+   * Lives at the top level rather than inside a vendor section because it is
+   * the choice BETWEEN vendors, and putting it under one of them would imply
+   * that vendor is privileged.
+   */
+  get textProvider(): TextProvider {
+    const raw = str('TEXT_MODEL_PROVIDER', 'auto').toLowerCase()
+    return raw === 'ollama' || raw === 'gcp' ? raw : 'auto'
+  },
+
   /* ── Core ───────────────────────────────────────────────────────────────── */
   core: {
     get databaseUrl(): string {
@@ -104,7 +121,8 @@ export const config = {
      * narrator: slightly blunter, fully working, every tool still reachable.
      */
     get provider(): AssistantProvider {
-      return str('ASSISTANT_MODEL_PROVIDER').toLowerCase() === 'gcp' ? 'gcp' : 'deterministic'
+      const raw = str('ASSISTANT_MODEL_PROVIDER').toLowerCase()
+      return raw === 'gcp' || raw === 'ollama' ? raw : 'deterministic'
     },
     get plannerModel(): string {
       return str('ASSISTANT_PLANNER_MODEL', 'gemini-2.5-pro')
@@ -252,6 +270,115 @@ export const config = {
     },
   },
 
+  /* ── Local models · Ollama ──────────────────────────────────────────────── */
+  ollama: {
+    /**
+     * No default. A default would make `configured` answer true on a machine
+     * with no daemon, and /health would claim live when nothing is listening.
+     * The example value is in `.env.example`, where it is opt-in.
+     */
+    get baseUrl(): string {
+      return str('OLLAMA_BASE_URL').replace(/\/+$/, '')
+    },
+    /** Content generation, calendar reasoning, review rewrites, the planner. */
+    get textModel(): string {
+      return str('OLLAMA_TEXT_MODEL', 'qwen3:14b')
+    },
+    /** Short, cheap calls — narration and single rewrites. */
+    get fastTextModel(): string {
+      return str('OLLAMA_FAST_TEXT_MODEL', 'qwen3:14b')
+    },
+    /** Background painting. Empty disables the Ollama image transport. */
+    get imageModel(): string {
+      return str('OLLAMA_IMAGE_MODEL', 'x/flux2-klein:9b')
+    },
+    /** Local generation is slower per token than a hosted API; budget for it. */
+    get timeoutMs(): number {
+      return int('OLLAMA_TIMEOUT_MS', 180000)
+    },
+    get imageTimeoutMs(): number {
+      return int('OLLAMA_IMAGE_TIMEOUT_MS', 600000)
+    },
+    /** Qwen3-14B ships a 40 960-token window; leave headroom under it. */
+    get contextTokens(): number {
+      return int('OLLAMA_CONTEXT_TOKENS', 16384)
+    },
+    get configured(): boolean {
+      return has('OLLAMA_BASE_URL')
+    },
+  },
+
+  /* ── Local background painter · mflux (FLUX.2 Klein on MLX) ─────────────── */
+  mflux: {
+    /**
+     * The Python interpreter of the venv that has `mflux` installed, and the
+     * model name to hand it. Present because Ollama 0.33.3 will not serve
+     * image models over HTTP; this is the transport that actually paints.
+     */
+    get python(): string {
+      return str('MFLUX_PYTHON')
+    },
+    get model(): string {
+      return str('MFLUX_MODEL', 'flux2-klein-9b')
+    },
+    /** Klein is distilled — few steps is the point of it. */
+    get steps(): number {
+      return int('MFLUX_STEPS', 4)
+    },
+    /** Fixed by default so the same brief renders the same background twice. */
+    get seed(): number {
+      return int('MFLUX_SEED', 42)
+    },
+    get quantize(): number {
+      return int('MFLUX_QUANTIZE', 8)
+    },
+    get timeoutMs(): number {
+      return int('MFLUX_TIMEOUT_MS', 900000)
+    },
+    get configured(): boolean {
+      return has('MFLUX_PYTHON')
+    },
+  },
+
+  /* ── Scraping · crawl4ai ────────────────────────────────────────────────── */
+  crawl4ai: {
+    /**
+     * crawl4ai runs as a Python sidecar rather than a service, because the
+     * browser it drives is a local process, not an endpoint. The script is
+     * addressed by interpreter + path for the same reason the agent bridge is
+     * (`api.ts`): the process boundary is the interface.
+     */
+    get python(): string {
+      return str('CRAWL4AI_PYTHON')
+    },
+    /** Where a keyword search starts. Comma-separated, resolved at call time. */
+    get searchEngines(): string[] {
+      return str('CRAWL4AI_SEARCH_ENGINES', 'duckduckgo,bing')
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s !== '')
+    },
+    get maxPagesPerKeyword(): number {
+      return int('CRAWL4AI_MAX_PAGES_PER_KEYWORD', 8)
+    },
+    get maxCharsPerPage(): number {
+      return int('CRAWL4AI_MAX_CHARS_PER_PAGE', 6000)
+    },
+    get timeoutMs(): number {
+      return int('CRAWL4AI_TIMEOUT_MS', 180000)
+    },
+    /** Politeness. A scraper that hammers a host is a scraper that gets blocked. */
+    get delayMs(): number {
+      return int('CRAWL4AI_DELAY_MS', 400)
+    },
+    get headless(): boolean {
+      return flag('CRAWL4AI_HEADLESS', true)
+    },
+    get configured(): boolean {
+      return has('CRAWL4AI_PYTHON')
+    },
+  },
+
   /* ── Optional secondary image renderer ──────────────────────────────────── */
   zImage: {
     get endpoint(): string {
@@ -292,24 +419,76 @@ export function integrationStatuses(): {
   apify: IntegrationStatus
   parallel: IntegrationStatus
   gcp: IntegrationStatus
+  ollama: IntegrationStatus & { textModel: string; imageModel: string }
+  mflux: IntegrationStatus & { model: string }
+  crawl4ai: IntegrationStatus
   zImage: IntegrationStatus
+  text: IntegrationStatus & { provider: TextProvider; resolved: 'ollama' | 'gcp' | 'template' }
   assistant: IntegrationStatus & { provider: AssistantProvider }
 } {
   const gcpConfigured = config.gcp.configured
-  const assistantGcp = config.assistant.provider === 'gcp'
+  const ollamaConfigured = config.ollama.configured
+
+  // Which implementation `textAdapter()` will actually bind. Reported rather
+  // than inferred, because "which model wrote this" is the first question an
+  // operator asks about a caption.
+  const resolved: 'ollama' | 'gcp' | 'template' =
+    config.textProvider === 'ollama'
+      ? ollamaConfigured
+        ? 'ollama'
+        : 'template'
+      : config.textProvider === 'gcp'
+        ? gcpConfigured
+          ? 'gcp'
+          : 'template'
+        : ollamaConfigured
+          ? 'ollama'
+          : gcpConfigured
+            ? 'gcp'
+            : 'template'
+
+  const assistantProvider = config.assistant.provider
+  const assistantConfigured =
+    (assistantProvider === 'gcp' && gcpConfigured) ||
+    (assistantProvider === 'ollama' && ollamaConfigured)
+
   return {
     apify: statusFor(config.apify.configured, 'APIFY_API_TOKEN'),
     parallel: statusFor(config.parallel.configured, 'PARALLEL_API_KEY'),
     gcp: statusFor(gcpConfigured, 'GCP_API_KEY'),
+    ollama: {
+      ...statusFor(ollamaConfigured, 'OLLAMA_BASE_URL'),
+      textModel: config.ollama.textModel,
+      imageModel: config.ollama.imageModel,
+    },
+    mflux: {
+      ...statusFor(config.mflux.configured, 'MFLUX_PYTHON'),
+      model: config.mflux.model,
+    },
+    crawl4ai: statusFor(config.crawl4ai.configured, 'CRAWL4AI_PYTHON'),
     zImage: statusFor(config.zImage.configured, 'Z_IMAGE_ENDPOINT'),
+    text: {
+      provider: config.textProvider,
+      resolved,
+      configured: resolved !== 'template',
+      reason:
+        resolved === 'ollama'
+          ? `Local model — ${config.ollama.textModel} on ${config.ollama.baseUrl}`
+          : resolved === 'gcp'
+            ? `Hosted model — ${config.gcp.textModel}`
+            : 'No text provider configured — running on the deterministic template writer',
+    },
     assistant: {
-      provider: config.assistant.provider,
-      configured: assistantGcp && gcpConfigured,
-      reason: !assistantGcp
-        ? 'ASSISTANT_MODEL_PROVIDER is not set to gcp — running on the deterministic parser and template narrator'
-        : gcpConfigured
-          ? 'Configured'
-          : 'ASSISTANT_MODEL_PROVIDER is gcp but GCP_API_KEY is not set — falling back to the deterministic parser',
+      provider: assistantProvider,
+      configured: assistantConfigured,
+      reason:
+        assistantProvider === 'deterministic'
+          ? 'ASSISTANT_MODEL_PROVIDER is not set to gcp or ollama — running on the deterministic parser and template narrator'
+          : assistantConfigured
+            ? 'Configured'
+            : `ASSISTANT_MODEL_PROVIDER is ${assistantProvider} but ${
+                assistantProvider === 'ollama' ? 'OLLAMA_BASE_URL' : 'GCP_API_KEY'
+              } is not set — falling back to the deterministic parser`,
     },
   }
 }
@@ -329,7 +508,11 @@ export function describeConfiguration(): string[] {
     `workspace   ${config.core.workspaceSlug}`,
     `publish     ${config.core.publishMode}`,
     `timezone    ${config.core.tz}`,
-    `assistant      ${s.assistant.provider}${s.assistant.configured ? '' : ' (deterministic fallback)'}`,
+    `assistant   ${s.assistant.provider}${s.assistant.configured ? '' : ' (deterministic fallback)'}`,
+    `text        ${s.text.resolved}${s.text.resolved === 'template' ? '' : ` · ${s.text.resolved === 'ollama' ? config.ollama.textModel : config.gcp.textModel}`}`,
+    `ollama      ${s.ollama.configured ? `live · ${config.ollama.baseUrl}` : 'not configured'}`,
+    `mflux       ${s.mflux.configured ? `live · ${s.mflux.model}` : 'not configured'}`,
+    `crawl4ai    ${s.crawl4ai.configured ? 'live' : 'not configured'}`,
     `apify       ${s.apify.configured ? 'live' : 'fixtures'}`,
     `parallel    ${s.parallel.configured ? 'live' : 'fixtures'}`,
     `gcp         ${s.gcp.configured ? 'live' : 'template writer'}`,

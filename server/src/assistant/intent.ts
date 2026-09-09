@@ -24,7 +24,7 @@ import type { Platform } from '../../../shared/agent-contract'
 import { PLATFORMS } from '../../../shared/agent-contract'
 import { similarity } from '../../../shared/brand-voice'
 import { config } from '../config'
-import { gcpText } from '../integrations'
+import { textAdapter } from '../integrations'
 import { findIdeasByTitle, listKeywords } from '../db/repo'
 import { addDays, isoDate, nearestPostingTime, startOfWeek } from '../agents/corpus'
 import type { SituationSnapshot } from './context'
@@ -65,8 +65,11 @@ export interface ParseOptions {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export async function parseIntent(opts: ParseOptions): Promise<Intent> {
+  // The planner runs on whichever provider the operator named — Gemini or a
+  // local Qwen3 — and on the deterministic grammar when neither is reachable.
+  const planner = textAdapter()
   const modelReady =
-    opts.useModel && config.assistant.provider === 'gcp' && gcpText.isConfigured()
+    opts.useModel && config.assistant.provider !== 'deterministic' && planner.isConfigured()
 
   if (modelReady) {
     try {
@@ -84,8 +87,8 @@ export async function parseIntent(opts: ParseOptions): Promise<Intent> {
   const grammar = parseWithGrammar(opts)
   if (!modelReady && opts.useModel) {
     grammar.parserReason =
-      config.assistant.provider === 'gcp'
-        ? `ASSISTANT_MODEL_PROVIDER is gcp but ${gcpText.unavailableReason()}`
+      config.assistant.provider !== 'deterministic'
+        ? `ASSISTANT_MODEL_PROVIDER is ${config.assistant.provider} but ${planner.unavailableReason()}`
         : 'ASSISTANT_MODEL_PROVIDER is not set, so the deterministic parser is in use.'
   }
   return enrich(grammar, opts)
@@ -131,7 +134,7 @@ function describeArgs(tool: ToolSpec): string {
 }
 
 async function parseWithModel(opts: ParseOptions): Promise<Intent | null> {
-  const raw = await gcpText.run({
+  const raw = await textAdapter().run({
     systemInstruction: buildParserSystemPrompt(opts.snapshot),
     prompt: opts.utterance,
     temperature: 0,

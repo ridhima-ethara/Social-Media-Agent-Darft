@@ -59,14 +59,37 @@ export {
   type TemplateWriterInput,
 } from './gcp-llm'
 
+export {
+  ollamaImage,
+  ollamaText,
+  stripReasoning,
+  textAdapter,
+  textModelId,
+  type OllamaTextInput,
+} from './ollama'
+
+export { crawl4aiSearch, type Crawl4aiSearchInput } from './crawl4ai'
+
 import { describeAdapter, type AdapterReport } from './adapter'
 import { apifyHashtagFeed, apifyPostSearch, apifyProfilePosts } from './apify'
+import { crawl4aiSearch } from './crawl4ai'
 import { gcpImage, gcpText } from './gcp-llm'
+import { ollamaImage, ollamaText } from './ollama'
 import { parallelResearch } from './parallel'
 
 /** Every adapter in the product, for a single reachability sweep. */
 export function allAdapters() {
-  return [apifyPostSearch, apifyHashtagFeed, apifyProfilePosts, parallelResearch, gcpText, gcpImage]
+  return [
+    apifyPostSearch,
+    apifyHashtagFeed,
+    apifyProfilePosts,
+    crawl4aiSearch,
+    parallelResearch,
+    gcpText,
+    gcpImage,
+    ollamaText,
+    ollamaImage,
+  ]
 }
 
 export interface IntegrationReport {

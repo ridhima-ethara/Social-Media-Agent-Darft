@@ -15,12 +15,14 @@ import { synonymsFor } from '../../../../shared/keywords'
 import type { SkillContext } from '../../../../shared/agent-contract'
 import { config } from '../../config'
 import {
+  AdapterError,
   apifyFixtureCompetitorPosts,
   apifyFixtureHashtagFeed,
   apifyFixturePosts,
   apifyHashtagFeed,
   apifyPostSearch,
   apifyProfilePosts,
+  crawl4aiSearch,
   extractHashtagsFromText,
   mapWithConcurrency,
   withFallback,
@@ -115,21 +117,31 @@ registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) 
 
   const unreachable = configured ? [] : [apifyPostSearch.label]
 
+  // Tier 2 of the capture chain. Reported here rather than discovered at fetch
+  // time, so the operator knows before the run starts what will actually answer.
+  const webConfigured = crawl4aiSearch.isConfigured()
+
   if (!configured) {
     const reason = apifyPostSearch.unavailableReason()
-    // Fail in the open: name the reason, switch the run to fixtures, carry on.
-    ctx.emit('activity', `Apify is not configured — ${reason}. Running on the bundled LinkedIn corpus.`, {
-      status: 'warn',
-      mode,
-      reason,
-    })
-    if (failIfNoSource) {
+    // Fail in the open: name the reason, name what will answer instead, carry on.
+    ctx.emit(
+      'activity',
+      webConfigured
+        ? `Apify is not configured — ${reason}. Falling through to ${crawl4aiSearch.label} for live keyword capture.`
+        : `Apify is not configured — ${reason}. Running on the bundled LinkedIn corpus.`,
+      { status: 'warn', mode, reason, fallsTo: webConfigured ? crawl4aiSearch.id : 'fixtures' },
+    )
+    if (failIfNoSource && !webConfigured) {
       throw new Error(
         `No live source available — ${reason}. Switch off "Fail when no source is reachable" to run on the bundled corpus.`,
       )
     }
   } else {
     ctx.log(`Apify reachable · ${config.apify.postsActor}`)
+  }
+
+  if (webConfigured) {
+    ctx.log(`crawl4ai reachable · ${config.crawl4ai.searchEngines.join(', ')}`)
   }
 
   return { mode, sources, unreachable }
@@ -160,7 +172,18 @@ function toScrapedPost(
     reactions: raw.reactions,
     comments: raw.comments,
     reposts: raw.reposts,
-    hashtags: raw.hashtags.length > 0 ? raw.hashtags : extractHashtagsFromText(raw.text),
+    // Deriving tags from the body is a SOCIAL affordance: in a LinkedIn post a
+    // `#token` is a hashtag the author chose, and Apify sometimes omits the
+    // array even though the text has them. On a web page a `#token` is a URL
+    // fragment — Wikipedia's footnote and section anchors — and treating those
+    // as audience vocabulary put `#cite_note` into a caption. So the fallback
+    // applies to social sources only; a website that reports no tags has none.
+    hashtags:
+      raw.hashtags.length > 0
+        ? raw.hashtags
+        : sourceType === 'Social'
+          ? extractHashtagsFromText(raw.text)
+          : [],
     keyword: raw.keyword,
     keywordId,
     sourceName: raw.sourceName,
@@ -203,6 +226,37 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
       keyword: keyword.term,
     })
 
+    // Tier 2 of the capture chain. When Apify cannot serve this keyword,
+    // crawl4ai reads the open web for it before the bundled corpus is
+    // considered — real evidence beats believable evidence, and law 9 asks the
+    // degraded path to still be useful rather than merely non-fatal.
+    let webServed = false
+    let webReason: string | undefined
+
+    async function captureFromWebOrCorpus(): Promise<RawPost[]> {
+      if (!crawl4aiSearch.isConfigured()) {
+        return apifyFixturePosts(keyword.term, maxItems, runOffset, now)
+      }
+      try {
+        const rows = await crawl4aiSearch.run({
+          keyword: keyword.term,
+          // The operator's per-keyword cap still applies, bounded by the
+          // crawler's own page ceiling — fifty browser page-loads per keyword
+          // is not a reasonable default for a local machine.
+          maxItems: Math.min(maxItems, config.crawl4ai.maxPagesPerKeyword),
+          maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+        })
+        webServed = true
+        return rows
+      } catch (error) {
+        webReason =
+          error instanceof AdapterError
+            ? error.toReason()
+            : `crawl4ai failed — ${error instanceof Error ? error.message : String(error)}`
+        return apifyFixturePosts(keyword.term, maxItems, runOffset, now)
+      }
+    }
+
     // withRetry lives inside the adapter's run for the live path; the retries
     // knob is threaded through so the operator's number is the one that applies.
     const outcome = await withFallback(
@@ -223,17 +277,39 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
         },
       },
       { keyword: keyword.term, maxItems, datePosted, sortBy, minAuthorFollowers },
-      () => apifyFixturePosts(keyword.term, maxItems, runOffset, now),
+      captureFromWebOrCorpus,
       (reason) => {
         if (!fallbackReasons.includes(reason)) fallbackReasons.push(reason)
       },
     )
 
-    if (outcome.source === 'live') anyLive = true
+    if (webReason !== undefined && !fallbackReasons.includes(webReason)) {
+      fallbackReasons.push(webReason)
+    }
 
-    const kept = outcome.value.filter((p) => p.authorFollowers >= minAuthorFollowers)
+    // A crawled page IS live capture, so it is stamped as such. It is not a
+    // social artefact, so it is typed 'Website' and scored on provenance
+    // rather than on engagement it cannot have.
+    const keywordCapture: 'live' | 'fixture' =
+      outcome.source === 'live' || webServed ? 'live' : 'fixture'
+    const sourceType = webServed ? 'Website' : 'Social'
+
+    if (keywordCapture === 'live') anyLive = true
+
+    // The follower floor is a LinkedIn quality bar. Applying it to websites
+    // would silently discard every crawled page, because a website has no
+    // followers — the absence of a number is not a low number.
+    const kept =
+      sourceType === 'Social'
+        ? outcome.value.filter((p) => p.authorFollowers >= minAuthorFollowers)
+        : outcome.value
+
+    const recordReason = webServed
+      ? `${outcome.fallbackReason ?? 'Apify did not serve this keyword'} — captured from the open web with crawl4ai instead`
+      : outcome.fallbackReason
+
     const posts = kept.map((raw) =>
-      toScrapedPost(raw, keyword.id, outcome.source, outcome.fallbackReason, 'Social'),
+      toScrapedPost(raw, keyword.id, keywordCapture, recordReason, sourceType),
     )
 
     for (const post of posts) {
@@ -246,12 +322,21 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
       })
     }
 
-    ctx.emit('activity', `${keyword.term}: ${posts.length} posts`, {
-      status: 'ok',
-      keyword: keyword.term,
-      count: posts.length,
-      source: outcome.source,
-    })
+    ctx.emit(
+      'activity',
+      webServed
+        ? `${keyword.term}: ${posts.length} pages from the open web (crawl4ai)`
+        : `${keyword.term}: ${posts.length} posts`,
+      {
+        status: 'ok',
+        keyword: keyword.term,
+        count: posts.length,
+        source: keywordCapture,
+        // Names WHICH implementation answered, not just whether one did — rule
+        // 6 wants the evidence behind the decision, and "live" alone hides it.
+        via: webServed ? crawl4aiSearch.label : apifyPostSearch.label,
+      },
+    )
 
     return posts
   })
