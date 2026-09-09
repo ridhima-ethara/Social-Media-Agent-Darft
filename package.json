@@ -22,9 +22,12 @@
     "setup": "npm install && npm --prefix server install && npm run db:up && node scripts/wait-for-db.mjs && npm run db:reset",
     "agent:check": "tsx scripts/check-agents.ts",
     "agent:new": "node scripts/new-agent.mjs",
-    "specs:build": "tsx scripts/build-specs.ts",
     "build-skills": "tsx scripts/build-skills.ts",
     "connectors": "tsx scripts/check-connectors.ts",
+    "agents": "backend/.venv/bin/python backend/api.py agents",
+    "agents:run": "backend/.venv/bin/python backend/workflows/social_media_workflow.py",
+    "agents:seed": "backend/.venv/bin/python backend/seed_brain.py",
+    "agents:brain": "backend/.venv/bin/python backend/api.py brain",
     "apify:probe": "tsx server/scripts/apify-probe.ts",
     "verify": "tsx scripts/verify.ts"
   },

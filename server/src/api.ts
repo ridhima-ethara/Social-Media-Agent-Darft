@@ -8,6 +8,8 @@
  * `GET /state` is the aggregate read that hydrates the whole UI in one call.
  */
 
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
 import express, { type Request, type Response, type Router } from 'express'
 import { z } from 'zod'
 
@@ -98,7 +100,7 @@ import {
   renderIdeaImage,
   runDiscoveryPipeline,
 } from './orchestrator'
-import { bus, recentEvents, subscribe, toSseFrame, REPLAY_SIZE } from './events'
+import { bus, publish, recentEvents, subscribe, toSseFrame, REPLAY_SIZE } from './events'
 import { PLATFORM_LABEL } from './agents/corpus'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1041,6 +1043,149 @@ export function createApiRouter(): Router {
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
     }
+  })
+
+  /* ── THE PYTHON AGENT BACKEND ────────────────────────────────────────────
+     The agents live in `backend/`, one folder each. This spawns the workflow
+     and streams its NDJSON events straight through as SSE, so the UI sees each
+     agent start and finish in real time. There is no second HTTP server and no
+     shared runtime — the process boundary is the interface. */
+
+  const PY = join(process.cwd(), '..', 'backend', '.venv', 'bin', 'python')
+  const AGENT_API = join(process.cwd(), '..', 'backend', 'api.py')
+
+  /** Runs one backend command and parses its NDJSON. Never throws on bad output. */
+  function runAgentCommand(args: string[], timeoutMs = 300_000): Promise<Record<string, unknown>[]> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(PY, [AGENT_API, ...args], { cwd: join(process.cwd(), '..') })
+      const frames: Record<string, unknown>[] = []
+      let stderr = ''
+      let buffer = ''
+
+      const timer = setTimeout(() => {
+        child.kill()
+        reject(new Error(`The agent backend did not finish within ${timeoutMs}ms.`))
+      }, timeoutMs)
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString()
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            frames.push(JSON.parse(line) as Record<string, unknown>)
+          } catch {
+            // A malformed line costs one frame, never the run.
+          }
+        }
+      })
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString()
+      })
+      child.on('error', (error) => {
+        clearTimeout(timer)
+        reject(new Error(`Could not start the agent backend: ${error.message}. Is backend/.venv present?`))
+      })
+      child.on('close', () => {
+        clearTimeout(timer)
+        if (frames.length === 0 && stderr) reject(new Error(stderr.trim().split('\n').slice(-3).join(' ')))
+        else resolve(frames)
+      })
+    })
+  }
+
+  /** The roster, its contracts and every declared knob. */
+  api.get(
+    '/agents',
+    route(async () => {
+      const frames = await runAgentCommand(['agents'], 30_000)
+      return frames.find((f) => f.event === 'agents') ?? { error: 'The backend returned no roster.' }
+    }),
+  )
+
+  /** The Knowledge Base — the brain every agent reads before it acts. */
+  api.get(
+    '/agents/brain',
+    route(async () => {
+      const frames = await runAgentCommand(['brain'], 30_000)
+      return frames.find((f) => f.event === 'brain') ?? { entries: [], stats: {} }
+    }),
+  )
+
+  /**
+   * Runs the workflow, streaming each agent's start and finish as SSE.
+   *
+   * Every frame is also mirrored onto the global event bus, so the Run Console
+   * and the Orchestration screen light up without subscribing separately.
+   */
+  api.post('/agents/run', async (req, res) => {
+    const body = parseBody(
+      z.object({
+        keywords: z.array(z.string().min(2)).min(1),
+        overrides: z.record(z.record(z.union([z.string(), z.number(), z.boolean()]))).optional(),
+        stopAfter: z.string().optional(),
+      }),
+      req.body,
+    )
+
+    openStream(res)
+
+    const args = ['run', '--keywords', body.keywords.join(',')]
+    if (body.overrides) args.push('--overrides', JSON.stringify(body.overrides))
+    if (body.stopAfter) args.push('--stop-after', body.stopAfter)
+
+    const child = spawn(PY, [AGENT_API, ...args], { cwd: join(process.cwd(), '..') })
+    let buffer = ''
+    let finished = false
+
+    const forward = (frame: Record<string, unknown>): void => {
+      res.write(`event: ${String(frame.event)}\ndata: ${JSON.stringify(frame)}\n\n`)
+      const event = String(frame.event)
+      if (event === 'agent.started' || event === 'agent.finished') {
+        publish({
+          type: event === 'agent.started' ? 'agent.started' : 'agent.finished',
+          agentId: String(frame.agent_id ?? ''),
+          message: String(frame.summary ?? frame.name ?? ''),
+        })
+      }
+    }
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString()
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          forward(JSON.parse(line) as Record<string, unknown>)
+        } catch {
+          // A malformed line costs one frame, never the stream.
+        }
+      }
+    })
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      res.write(`event: stderr\ndata: ${JSON.stringify({ message: chunk.toString() })}\n\n`)
+    })
+
+    child.on('error', (error) => {
+      res.write(`event: error\ndata: ${JSON.stringify({ message: `Could not start the agent backend: ${error.message}` })}\n\n`)
+      res.end()
+    })
+
+    child.on('close', (code) => {
+      finished = true
+      res.write(`event: end\ndata: ${JSON.stringify({ code })}\n\n`)
+      res.end()
+    })
+
+    // The kill guard belongs on the RESPONSE, not the request: `req` closes as
+    // soon as the POST body has been read, which would kill the child before it
+    // had produced a single frame. Only an operator disconnecting should stop it.
+    res.on('close', () => {
+      if (!finished) child.kill()
+    })
   })
 
   api.get(

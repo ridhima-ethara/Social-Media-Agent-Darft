@@ -22,7 +22,6 @@ import {
   AGENTS,
   REGISTRY_SUMMARY,
   SKILLS,
-  SKILLS_BY_AGENT,
   STAGES,
   CRITICAL_SKILL_IDS,
   validateRegistry,
@@ -121,33 +120,6 @@ if (!existsSync(toolDir)) {
     }
   }
   if (missing === 0) pass(`all ${TOOLS.length} tools have a registered handler`)
-}
-
-/* ── 5 · Spec sections ─────────────────────────────────────────────────────── */
-section('Spec coverage')
-
-const specDir = join(ROOT, 'specs/agents')
-if (!existsSync(specDir)) {
-  warn('specs/agents', 'Directory does not exist yet — expected before phase P11 completes.')
-} else {
-  const files = readdirSync(specDir)
-  let missingSpecs = 0
-  for (const agent of AGENTS) {
-    const expected = `${agent.id}-agent.md`
-    if (!files.includes(expected)) {
-      fail(agent.id, `Missing specs/agents/${expected}.`)
-      missingSpecs += 1
-      continue
-    }
-    const body = readFileSync(join(specDir, expected), 'utf8')
-    for (const skill of SKILLS_BY_AGENT[agent.id] ?? []) {
-      if (!body.includes(skill.id)) {
-        fail(skill.id, `Not documented in specs/agents/${expected}.`)
-        missingSpecs += 1
-      }
-    }
-  }
-  if (missingSpecs === 0) pass(`all 12 agents and ${SKILLS.length} skills documented in specs/`)
 }
 
 /* ── 6 · Critical skill handlers ───────────────────────────────────────────── */

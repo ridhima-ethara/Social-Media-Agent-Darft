@@ -13,7 +13,7 @@ import { execSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AGENTS, REGISTRY_SUMMARY, SKILLS, defaultSkillConfig } from '../shared/agent-registry'
+import { REGISTRY_SUMMARY, SKILLS, defaultSkillConfig } from '../shared/agent-registry'
 import { TOOLS, validateToolRegistry } from '../shared/tool-registry'
 import { validateRegistry } from '../shared/agent-registry'
 import { BRAND } from '../shared/brand-voice'
@@ -144,7 +144,9 @@ const required = [
   'src/data/demo.ts',
   'src/lib/assistant.ts',
   'src/lib/voice.ts',
-  'specs/architecture.md',
+  'backend/api.py',
+  'backend/core/brain.py',
+  'backend/workflows/social_media_workflow.py',
 ]
 
 for (const path of required) {
@@ -163,12 +165,22 @@ const missingPages = PAGES.filter((name) => !pageFiles.includes(`${name}.tsx`))
 if (missingPages.length === 0) pass(`all ${PAGES.length} screen modules present`)
 else for (const name of missingPages) fail(`screen missing: src/pages/${name}.tsx`)
 
-for (const agent of AGENTS) {
-  const path = join(ROOT, 'specs/agents', `${agent.id}-agent.md`)
-  if (!existsSync(path)) fail(`spec missing: specs/agents/${agent.id}-agent.md`)
+const AGENT_FOLDERS = [
+  'research_agent', 'validation_agent', 'calendar_agent',
+  'content_agent', 'publishing_agent', 'analytics_agent',
+]
+const AGENT_FILES = ['agent.py', 'prompt.md', 'instructions.md', 'tools.md', 'schema.py']
+let folderProblems = 0
+for (const folder of AGENT_FOLDERS) {
+  for (const file of AGENT_FILES) {
+    if (!existsSync(join(ROOT, 'backend/agents', folder, file))) {
+      fail(`backend/agents/${folder}/${file} is missing`)
+      folderProblems += 1
+    }
+  }
 }
-if (AGENTS.every((a) => existsSync(join(ROOT, 'specs/agents', `${a.id}-agent.md`)))) {
-  pass(`all ${AGENTS.length} agent specs generated`)
+if (folderProblems === 0) {
+  pass(`all ${AGENT_FOLDERS.length} agent folders carry ${AGENT_FILES.join(' · ')}`)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

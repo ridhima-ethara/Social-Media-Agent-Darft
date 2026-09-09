@@ -1,0 +1,23 @@
+{
+  "started_at": "2026-09-09T06:34:25.625587+00:00",
+  "finished_at": "2026-09-09T06:34:29.742259+00:00",
+  "agents_run": 6,
+  "status": "completed",
+  "duration_ms": 4114,
+  "used_model": false,
+  "injection_attempts": 0,
+  "narrative": [
+    "Research Agent: Captured 55 posts across 4 keywords from reddit, hackernews, and harvested 2 hashtag candidates. 1 source(s) were unreachable: Reddit: HTTP Error 403: Blocked.",
+    "Validation Agent: 3 keywords are trending. agentic AI leads at 90 \u2014 50 posts carrying 388 engagement (100/100 against the strongest keyword this run, 100/100 on volume). Growth could not be computed \u2014 there are no prior runs in this batch to compare against. Verdicts: 6 validated, 0 for review, 0 duplicate, 0 rejected.",
+    "Calendar Agent: 3 ideas took a calendar slot (facebook 1, linkedin 2) and 0 went to suggestions with their ranks intact, against a cap of 10 per platform.",
+    "Content Agent: Caption written and grounded in 6 Knowledge Base entries. Brand voice: REVISE \u2014 1 violation(s) across 1 failing dimension(s). Similarity 0 against published captions, below the cap.",
+    "Publishing Agent: Not published. Marketing and Leadership approval is missing. Nothing publishes without both.",
+    "Analytics Agent: Measured 1 metric(s) against a 4-post trailing baseline. 0 outside their own band. Nothing moved outside its own trailing band. No change is warranted on this evidence. Unreported: reach (4 of 4 posts unreported); impressions (4 of 4 posts unreported); likes (4 of 4 posts unreported); shares (4 of 4 posts unreported)."
+  ],
+  "posts_captured": 55,
+  "keywords_trending": 3,
+  "hashtags_consolidated": 2,
+  "ideas_on_calendar": 3,
+  "ideas_in_suggestions": 0,
+  "published": false
+}
