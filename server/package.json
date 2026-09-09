@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Ethara SocialAI API — agent runtime, orchestrator and the JARVIS command plane",
+  "description": "Ethara SocialAI API — agent runtime, orchestrator and the command plane",
   "engines": {
     "node": ">=22"
   },

@@ -1,8 +1,8 @@
 /**
  * THE ORCHESTRATOR
  *
- * The ONLY module that sequences agents. Cron, the REST API and JARVIS all arrive
- * here, so a JARVIS-triggered run is indistinguishable from a scheduled one in
+ * The ONLY module that sequences agents. Cron, the REST API and Ethara all arrive
+ * here, so an operator-triggered run is indistinguishable from a scheduled one in
  * telemetry. There is no second execution path.
  *
  * Sequencing is derived from the registry's `handsOffTo` graph, never hardcoded
@@ -70,12 +70,12 @@ import { PLATFORM_LABEL } from './agents/corpus'
    TRIGGERS
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export type Trigger = 'cron' | 'manual' | 'jarvis' | 'api'
+export type Trigger = 'cron' | 'manual' | 'assistant' | 'api'
 
 export interface OrchestratorContext {
   workspaceId: string
   trigger: Trigger
-  /** The JARVIS turn that caused this, recorded on every row it produces. */
+  /** The command plane turn that caused this, recorded on every row it produces. */
   turnId?: string | null
   paceMs?: number
   configOverrides?: Record<string, Record<string, unknown>>
@@ -409,6 +409,9 @@ async function persistVerdicts(
       inTopSet: c.inTopSet,
       firstSeenAt: c.firstSeenAt,
       lastSeenAt: c.lastSeenAt,
+      feedUrl: c.feedUrl,
+      topPostUrl: c.topPostUrl,
+      topPostTitle: c.topPostTitle,
     })),
   )
 
@@ -454,6 +457,9 @@ async function persistKeywordSignals(
       rank: trend.rank,
       isTrending: trend.isTrending,
       trendReason: trend.trendReason,
+      searchUrl: trend.searchUrl,
+      topPostUrl: trend.topPostUrl,
+      topPostTitle: trend.topPostTitle,
     })
   }
 }
@@ -563,11 +569,11 @@ async function persistPlannedIdeas(
     if (turnId) {
       await insertLineage({
         workspaceId,
-        fromType: 'jarvis_turn',
+        fromType: 'assistant_turn',
         fromId: turnId,
         toType: 'content_idea',
         toId: record.id,
-        agentId: 'jarvis',
+        agentId: 'assistant',
       })
     }
   }
@@ -596,8 +602,8 @@ export async function buildKnowledge(
   ctx: OrchestratorContext & { hashtagCount?: number; forceRefresh?: boolean },
 ): Promise<KnowledgeBuildResult> {
   const { workspaceId, turnId = null, paceMs = 0 } = ctx
-  const trigger: 'cron' | 'manual' | 'jarvis' =
-    ctx.trigger === 'cron' ? 'cron' : ctx.trigger === 'jarvis' ? 'jarvis' : 'manual'
+  const trigger: 'cron' | 'manual' | 'assistant' =
+    ctx.trigger === 'cron' ? 'cron' : ctx.trigger === 'assistant' ? 'assistant' : 'manual'
 
   const build = await startKnowledgeBuild(workspaceId, trigger)
   if (!build) throw new Error('Could not open a knowledge build.')
@@ -1200,11 +1206,11 @@ export async function publishIdea(
   if (turnId) {
     await insertLineage({
       workspaceId,
-      fromType: 'jarvis_turn',
+      fromType: 'assistant_turn',
       fromId: turnId,
       toType: 'post',
       toId: postId,
-      agentId: 'jarvis',
+      agentId: 'assistant',
     })
   }
 
@@ -1287,7 +1293,7 @@ export function successorsOf(agentId: AgentId): AgentId[] {
   return AGENT_BY_ID[agentId]?.handsOffTo ?? []
 }
 
-/** A quick read of what a run produced, for the console and JARVIS. */
+/** A quick read of what a run produced, for the console and Ethara. */
 export async function pipelineSnapshot(workspaceId: string): Promise<{
   keywords: number
   trending: number

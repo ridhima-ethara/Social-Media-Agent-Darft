@@ -37,17 +37,17 @@ export const PIPELINE_EVENT_TYPES = [
   'knowledge.build.started',
   'knowledge.build.finished',
   'activity',
-  'jarvis.command.received',
-  'jarvis.plan.composed',
-  'jarvis.confirm.required',
-  'jarvis.confirm.resolved',
-  'jarvis.step.started',
-  'jarvis.step.finished',
-  'jarvis.step.failed',
-  'jarvis.token',
-  'jarvis.command.finished',
-  'jarvis.command.cancelled',
-  'jarvis.notice',
+  'assistant.command.received',
+  'assistant.plan.composed',
+  'assistant.confirm.required',
+  'assistant.confirm.resolved',
+  'assistant.step.started',
+  'assistant.step.finished',
+  'assistant.step.failed',
+  'assistant.token',
+  'assistant.command.finished',
+  'assistant.command.cancelled',
+  'assistant.notice',
 ] as const
 
 export type PipelineEventType = (typeof PIPELINE_EVENT_TYPES)[number]
@@ -170,7 +170,7 @@ export function toSseFrame(event: PipelineEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`
 }
 
-/** A named SSE frame, for the per-command JARVIS stream. */
+/** A named SSE frame, for the per-command Ethara stream. */
 export function toNamedSseFrame(name: string, payload: unknown): string {
   return `event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`
 }

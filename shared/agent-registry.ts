@@ -39,8 +39,8 @@ export const STAGES: StageSpec[] = [
   {
     id: 'command',
     name: 'Command',
-    summary: 'The operator speaks; JARVIS plans, confirms, dispatches and narrates.',
-    agents: ['jarvis'],
+    summary: 'The operator speaks; Ethara plans, confirms, dispatches and narrates.',
+    agents: ['assistant'],
   },
   {
     id: 'discover',
@@ -91,8 +91,8 @@ export const STAGE_BY_ID: Record<StageId, StageSpec> = Object.fromEntries(
 
 export const AGENTS: AgentSpec[] = [
   {
-    id: 'jarvis',
-    name: 'JARVIS',
+    id: 'assistant',
+    name: 'Ethara Command',
     stage: 'command',
     role: 'The command plane',
     description:
@@ -262,15 +262,15 @@ export const AGENT_BY_ID: Record<AgentId, AgentSpec> = Object.fromEntries(
    Declared agent by agent, in execution order.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** ── 0 · JARVIS · 12 skills ─────────────────────────────────────────────── */
-const JARVIS_SKILLS: SkillSpec[] = [
+/** ── 0 · Ethara · 12 skills ─────────────────────────────────────────────── */
+const ASSISTANT_SKILLS: SkillSpec[] = [
   {
-    id: 'jarvis.context.assemble',
-    agentId: 'jarvis',
+    id: 'assistant.context.assemble',
+    agentId: 'assistant',
     section: 'Perception',
     name: 'Assemble situational snapshot',
     summary:
-      'Builds the snapshot JARVIS reasons over: counts, queues, agent states, this week\u2019s calendar, the last run summary, the operator\u2019s role and the recent conversation turns.',
+      'Builds the snapshot Ethara reasons over: counts, queues, agent states, this week\u2019s calendar, the last run summary, the operator\u2019s role and the recent conversation turns.',
     inputs: ['Workspace state', 'Conversation history'],
     outputs: ['SituationSnapshot'],
     order: 1,
@@ -278,18 +278,18 @@ const JARVIS_SKILLS: SkillSpec[] = [
     critical: true,
     config: [
       num('historyTurns', 'Conversation turns to carry', 12,
-        'How much of the conversation JARVIS re-reads before answering. Higher values make pronouns and follow-ups resolve better, at the cost of a longer prompt.',
+        'How much of the conversation Ethara re-reads before answering. Higher values make pronouns and follow-ups resolve better, at the cost of a longer prompt.',
         { min: 0, max: 40, step: 1 }),
       bool('includeKnowledge', 'Include Knowledge Base summary', true,
-        'Whether the snapshot carries a digest of active Knowledge Base entries, so JARVIS can answer grounded questions without a separate lookup.'),
+        'Whether the snapshot carries a digest of active Knowledge Base entries, so Ethara can answer grounded questions without a separate lookup.'),
       num('maxSnapshotChars', 'Snapshot size limit', 6000,
         'Hard ceiling on the assembled snapshot. Oldest and least relevant material is dropped first when the limit is reached.',
         { min: 1000, max: 24000, step: 500, unit: 'chars' }),
     ],
   },
   {
-    id: 'jarvis.intent.parse',
-    agentId: 'jarvis',
+    id: 'assistant.intent.parse',
+    agentId: 'assistant',
     section: 'Reasoning',
     name: 'Parse intent',
     summary:
@@ -301,9 +301,9 @@ const JARVIS_SKILLS: SkillSpec[] = [
     critical: true,
     config: [
       pct('clarifyThreshold', 'Ask for clarification below', 55,
-        'Below this confidence JARVIS asks one short clarifying question with the two most likely readings, rather than guessing.'),
+        'Below this confidence Ethara asks one short clarifying question with the two most likely readings, rather than guessing.'),
       pct('minConfidence', 'Minimum usable confidence', 35,
-        'Below this, JARVIS treats the utterance as unrecognised rather than offering candidate readings.'),
+        'Below this, Ethara treats the utterance as unrecognised rather than offering candidate readings.'),
       bool('useModel', 'Use the reasoning model when available', true,
         'Off forces the deterministic grammar parser even when a model provider is configured. Useful for reproducing a past run exactly.'),
       bool('synonymsEnabled', 'Expand synonyms', true,
@@ -311,8 +311,8 @@ const JARVIS_SKILLS: SkillSpec[] = [
     ],
   },
   {
-    id: 'jarvis.plan.compose',
-    agentId: 'jarvis',
+    id: 'assistant.plan.compose',
+    agentId: 'assistant',
     section: 'Reasoning',
     name: 'Compose plan',
     summary:
@@ -324,7 +324,7 @@ const JARVIS_SKILLS: SkillSpec[] = [
     critical: true,
     config: [
       num('maxSteps', 'Maximum steps in a plan', 8,
-        'The step ceiling. A request needing more than this is split, and JARVIS says so rather than silently truncating.',
+        'The step ceiling. A request needing more than this is split, and Ethara says so rather than silently truncating.',
         { min: 1, max: 20, step: 1 }),
       bool('readBeforeWrite', 'Read before write', true,
         'Any plan that changes something begins with the safe reads it needs to be correct. Turning this off makes plans shorter and less reliable.'),
@@ -333,8 +333,8 @@ const JARVIS_SKILLS: SkillSpec[] = [
     ],
   },
   {
-    id: 'jarvis.confirm.gate',
-    agentId: 'jarvis',
+    id: 'assistant.confirm.gate',
+    agentId: 'assistant',
     section: 'Execution',
     name: 'Confirmation gate',
     summary:
@@ -346,15 +346,15 @@ const JARVIS_SKILLS: SkillSpec[] = [
     critical: true,
     config: [
       num('ttlSeconds', 'Confirmation validity', 180,
-        'How long a confirmation stays valid. After this the token is refused and JARVIS re-plans from scratch, so an approval can never be replayed later.',
+        'How long a confirmation stays valid. After this the token is refused and Ethara re-plans from scratch, so an approval can never be replayed later.',
         { min: 30, max: 900, step: 10, unit: 's' }),
       bool('alsoConfirmMutating', 'Also confirm reversible changes', false,
-        'On, JARVIS asks before any change at all, not only irreversible ones. Safer and considerably slower.'),
+        'On, Ethara asks before any change at all, not only irreversible ones. Safer and considerably slower.'),
     ],
   },
   {
-    id: 'jarvis.tool.dispatch',
-    agentId: 'jarvis',
+    id: 'assistant.tool.dispatch',
+    agentId: 'assistant',
     section: 'Execution',
     name: 'Dispatch tools',
     summary:
@@ -369,19 +369,19 @@ const JARVIS_SKILLS: SkillSpec[] = [
         'How long a single tool call may run before it is abandoned and reported as failed.',
         { min: 5000, max: 600000, step: 1000, unit: 'ms' }),
       bool('haltOnStepFailure', 'Stop the plan on a failed step', true,
-        'On, a failure halts the plan and JARVIS reports what already stands. Off, it continues, which risks acting on incomplete reads.'),
+        'On, a failure halts the plan and Ethara reports what already stands. Off, it continues, which risks acting on incomplete reads.'),
       num('maxParallelSafeReads', 'Parallel safe reads', 3,
         'How many read-only steps may run at once. Only safe tools are ever parallelised; changes are always sequential.',
         { min: 1, max: 8, step: 1 }),
     ],
   },
   {
-    id: 'jarvis.narrate.stream',
-    agentId: 'jarvis',
+    id: 'assistant.narrate.stream',
+    agentId: 'assistant',
     section: 'Expression',
     name: 'Narrate',
     summary:
-      'Renders the plan and every result as JARVIS speech in the declared persona, streamed token by token.',
+      'Renders the plan and every result as Ethara speech in the declared persona, streamed token by token.',
     inputs: ['Plan', 'Step results', 'Persona'],
     outputs: ['Narration tokens'],
     order: 6,
@@ -393,13 +393,13 @@ const JARVIS_SKILLS: SkillSpec[] = [
       bool('speakSummaryOnly', 'Speak the summary sentence only', true,
         'Voice output reads just the first sentence. Off reads the whole narration aloud, which is rarely wanted.'),
       num('tokenDelayMs', 'Token pacing', 18,
-        'The delay between narration tokens. Purely cosmetic — it makes JARVIS read as thinking rather than pasting.',
+        'The delay between narration tokens. Purely cosmetic — it makes Ethara read as thinking rather than pasting.',
         { min: 0, max: 80, step: 1, unit: 'ms' }),
     ],
   },
   {
-    id: 'jarvis.result.verify',
-    agentId: 'jarvis',
+    id: 'assistant.result.verify',
+    agentId: 'assistant',
     section: 'Execution',
     name: 'Verify results',
     summary:
@@ -410,18 +410,18 @@ const JARVIS_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     config: [
       bool('enabled', 'Verify postconditions', true,
-        'Off, JARVIS reports what the tool returned without confirming it landed. Not recommended.'),
+        'Off, Ethara reports what the tool returned without confirming it landed. Not recommended.'),
       bool('strict', 'Treat a mismatch as a failure', false,
         'On, a postcondition mismatch fails the step outright. Off, it is reported alongside the result and the plan continues.'),
     ],
   },
   {
-    id: 'jarvis.memory.write',
-    agentId: 'jarvis',
+    id: 'assistant.memory.write',
+    agentId: 'assistant',
     section: 'Memory',
     name: 'Write memory',
     summary:
-      'Persists the turn with its plan and steps, and extracts a durable preference when the operator corrects JARVIS on the same thing repeatedly.',
+      'Persists the turn with its plan and steps, and extracts a durable preference when the operator corrects Ethara on the same thing repeatedly.',
     inputs: ['Turn', 'Steps', 'Corrections'],
     outputs: ['Conversation turn', 'Candidate preference'],
     order: 8,
@@ -429,15 +429,15 @@ const JARVIS_SKILLS: SkillSpec[] = [
     critical: true,
     config: [
       num('learnAfterCorrections', 'Corrections before learning', 2,
-        'How many times the operator must correct the same thing before JARVIS offers to remember it. One is eager; three rarely fires.',
+        'How many times the operator must correct the same thing before Ethara offers to remember it. One is eager; three rarely fires.',
         { min: 1, max: 6, step: 1 }),
       bool('askBeforeSaving', 'Ask before saving a preference', true,
-        'On, JARVIS offers and waits. Off, it writes the preference to the Knowledge Base itself and reports that it did.'),
+        'On, Ethara offers and waits. Off, it writes the preference to the Knowledge Base itself and reports that it did.'),
     ],
   },
   {
-    id: 'jarvis.brief.compose',
-    agentId: 'jarvis',
+    id: 'assistant.brief.compose',
+    agentId: 'assistant',
     section: 'Ambient',
     name: 'Compose briefing',
     summary:
@@ -451,12 +451,12 @@ const JARVIS_SKILLS: SkillSpec[] = [
         'How many changes the briefing names. Three fits a sentence; more reads as a list and gets skimmed.',
         { min: 1, max: 6, step: 1 }),
       bool('includeRecommendation', 'Include a recommendation', true,
-        'Whether the briefing ends with one thing JARVIS would do, offered as a single action.'),
+        'Whether the briefing ends with one thing Ethara would do, offered as a single action.'),
     ],
   },
   {
-    id: 'jarvis.anomaly.watch',
-    agentId: 'jarvis',
+    id: 'assistant.anomaly.watch',
+    agentId: 'assistant',
     section: 'Ambient',
     name: 'Watch for anomalies',
     summary:
@@ -467,22 +467,22 @@ const JARVIS_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     config: [
       num('anomalySigma', 'Anomaly sensitivity', 1.5,
-        'How far a metric must sit from its own trailing average before JARVIS mentions it, in standard deviations. Lower speaks up more often.',
+        'How far a metric must sit from its own trailing average before Ethara mentions it, in standard deviations. Lower speaks up more often.',
         { min: 0.5, max: 4, step: 0.1, unit: 'σ' }),
       num('queueAgeMinutes', 'Review queue patience', 30,
-        'How long items may wait on a verdict before JARVIS raises it.',
+        'How long items may wait on a verdict before Ethara raises it.',
         { min: 5, max: 480, step: 5, unit: 'min' }),
       num('approvalAgeHours', 'Leadership patience', 6,
-        'How long a post may sit with Leadership before JARVIS mentions it.',
+        'How long a post may sit with Leadership before Ethara mentions it.',
         { min: 1, max: 72, step: 1, unit: 'h' }),
       num('minPerWeek', 'Minimum posts per platform per week', 3,
-        'Below this, JARVIS flags the platform as a calendar gap.',
+        'Below this, Ethara flags the platform as a calendar gap.',
         { min: 0, max: 14, step: 1 }),
     ],
   },
   {
-    id: 'jarvis.voice.transcribe',
-    agentId: 'jarvis',
+    id: 'assistant.voice.transcribe',
+    agentId: 'assistant',
     section: 'Expression',
     name: 'Shape voice output',
     summary:
@@ -500,20 +500,20 @@ const JARVIS_SKILLS: SkillSpec[] = [
     ],
   },
   {
-    id: 'jarvis.handoff.route',
-    agentId: 'jarvis',
+    id: 'assistant.handoff.route',
+    agentId: 'assistant',
     section: 'Execution',
     name: 'Route to the owning agent',
     summary:
-      'Routes a plan step into the owning agent\u2019s runtime, so a JARVIS-triggered run is indistinguishable from a scheduled one in telemetry.',
+      'Routes a plan step into the owning agent\u2019s runtime, so an operator-triggered run is indistinguishable from a scheduled one in telemetry.',
     inputs: ['Tool call', 'Owning agent id'],
     outputs: ['Agent run'],
     order: 12,
     enabledByDefault: true,
     critical: true,
     config: [
-      text('recordAsTrigger', 'Trigger label', 'jarvis',
-        'What appears in the trigger column of the run record. Changing it makes JARVIS-initiated runs look like something else in the console.'),
+      text('recordAsTrigger', 'Trigger label', 'assistant',
+        'What appears in the trigger column of the run record. Changing it makes operator-initiated runs look like something else in the console.'),
     ],
   },
 ]
@@ -1119,7 +1119,7 @@ const CALENDAR_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     critical: true,
     config: [
-      enumField('primaryPlatform', 'Tie-break toward', ['linkedin', 'instagram', 'x'], 'linkedin',
+      enumField('primaryPlatform', 'Tie-break toward', ['linkedin', 'instagram', 'x', 'facebook'], 'linkedin',
         'Which platform wins when two score equally. LinkedIn is where this audience actually is.'),
       pct('alternateThreshold', 'Alternate threshold', 55,
         'A platform scoring at or above this is offered as an alternate in the review panel.'),
@@ -1390,6 +1390,9 @@ const CAPTION_SKILLS: SkillSpec[] = [
       num('xMaxChars', 'X length limit', 280,
         'Where the X post is cut. At 280 the nine-stage structure compresses to hook, evidence and implication.',
         { min: 100, max: 4000, step: 10, unit: 'chars' }),
+      num('facebookMaxChars', 'Facebook length limit', 2000,
+        'Where a Facebook caption is cut. Facebook permits far more, but engagement on long-form research posts falls off well before that.',
+        { min: 400, max: 5000, step: 100, unit: 'chars' }),
       bool('preserveLineBreaks', 'Preserve paragraph breaks', true,
         'On, the paragraph rhythm survives adaptation, which materially affects LinkedIn readability.'),
     ],
@@ -1812,7 +1815,7 @@ const KNOWLEDGE_SKILLS: SkillSpec[] = [
     section: 'Retrieval',
     name: 'Retrieve entries',
     summary:
-      'The read path every other agent uses, including the caption writer and the JARVIS knowledge search tool.',
+      'The read path every other agent uses, including the caption writer and the command plane knowledge search tool.',
     inputs: ['Query', 'Active entries'],
     outputs: ['Ranked entries'],
     order: 5,
@@ -2214,7 +2217,7 @@ const LEARNING_SKILLS: SkillSpec[] = [
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export const SKILLS: SkillSpec[] = [
-  ...JARVIS_SKILLS,
+  ...ASSISTANT_SKILLS,
   ...SCRAPING_SKILLS,
   ...VALIDATION_SKILLS,
   ...ANALYSIS_SKILLS,

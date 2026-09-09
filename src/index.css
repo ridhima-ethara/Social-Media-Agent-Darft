@@ -35,14 +35,15 @@
   --color-series-li: #3987e5;
   --color-series-ig: #d55181;
   --color-series-x: #19a219;
+  --color-series-fb: #3b7dd8;
 
-  /* ── JARVIS HUD ───────────────────────────────────────────────────────── */
+  /* ── Ethara HUD ───────────────────────────────────────────────────────── */
   --color-hud: rgba(122, 153, 209, 0.22);
   --color-hud-strong: rgba(167, 191, 232, 0.42);
   --color-hud-glow: rgba(238, 0, 238, 0.18);
-  --jarvis-ring-1: 40s;
-  --jarvis-ring-2: 26s;
-  --jarvis-ring-3: 9s;
+  --assistant-ring-1: 40s;
+  --assistant-ring-2: 26s;
+  --assistant-ring-3: 9s;
 
   /* ── motion ───────────────────────────────────────────────────────────── */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -1026,9 +1027,9 @@ body {
   }
 }
 
-/* ── JARVIS — the expressive layer ────────────────────────────────────────── */
+/* ── Ethara — the expressive layer ────────────────────────────────────────── */
 
-@keyframes jarvis-ring-outer {
+@keyframes assistant-ring-outer {
   from {
     transform: rotate(0deg);
   }
@@ -1037,7 +1038,7 @@ body {
   }
 }
 
-@keyframes jarvis-ring-mid {
+@keyframes assistant-ring-mid {
   from {
     transform: rotate(360deg);
   }
@@ -1046,7 +1047,7 @@ body {
   }
 }
 
-@keyframes jarvis-ring-inner {
+@keyframes assistant-ring-inner {
   from {
     transform: rotate(0deg);
   }
@@ -1055,7 +1056,7 @@ body {
   }
 }
 
-@keyframes jarvis-core-breathe {
+@keyframes assistant-core-breathe {
   0%,
   100% {
     transform: scale(1);
@@ -1067,7 +1068,7 @@ body {
   }
 }
 
-@keyframes jarvis-listen {
+@keyframes assistant-listen {
   from {
     opacity: 0.4;
     transform: scale(1);
@@ -1078,7 +1079,7 @@ body {
   }
 }
 
-@keyframes jarvis-think-sweep {
+@keyframes assistant-think-sweep {
   from {
     transform: rotate(0deg);
   }
@@ -1087,7 +1088,7 @@ body {
   }
 }
 
-@keyframes jarvis-speak-pulse {
+@keyframes assistant-speak-pulse {
   0% {
     transform: scale(1);
   }
@@ -1099,7 +1100,7 @@ body {
   }
 }
 
-@keyframes jarvis-attention {
+@keyframes assistant-attention {
   0%,
   62%,
   100% {
@@ -1114,7 +1115,7 @@ body {
   }
 }
 
-@keyframes jarvis-error-flash {
+@keyframes assistant-error-flash {
   0% {
     opacity: 1;
   }
@@ -1126,7 +1127,7 @@ body {
   }
 }
 
-@keyframes jarvis-wave {
+@keyframes assistant-wave {
   0%,
   100% {
     transform: scaleY(0.35);
@@ -1136,7 +1137,7 @@ body {
   }
 }
 
-@keyframes jarvis-token-caret {
+@keyframes assistant-token-caret {
   0%,
   49% {
     opacity: 1;
@@ -1147,7 +1148,7 @@ body {
   }
 }
 
-@keyframes jarvis-plan-in {
+@keyframes assistant-plan-in {
   from {
     opacity: 0;
     transform: translateY(12px);
@@ -1158,7 +1159,7 @@ body {
   }
 }
 
-@keyframes jarvis-step-in {
+@keyframes assistant-step-in {
   from {
     opacity: 0;
     transform: translateY(6px);
@@ -1169,7 +1170,7 @@ body {
   }
 }
 
-@keyframes jarvis-step-run {
+@keyframes assistant-step-run {
   from {
     transform: rotate(0deg);
   }
@@ -1178,7 +1179,7 @@ body {
   }
 }
 
-@keyframes jarvis-step-done {
+@keyframes assistant-step-done {
   0% {
     opacity: 0.35;
   }
@@ -1190,7 +1191,7 @@ body {
   }
 }
 
-@keyframes jarvis-confirm-ttl {
+@keyframes assistant-confirm-ttl {
   from {
     stroke-dashoffset: 0;
   }
@@ -1199,7 +1200,7 @@ body {
   }
 }
 
-@keyframes jarvis-bar-rise {
+@keyframes assistant-bar-rise {
   from {
     opacity: 0;
     transform: translateY(12px);
@@ -1212,7 +1213,7 @@ body {
   }
 }
 
-@keyframes jarvis-notice-in {
+@keyframes assistant-notice-in {
   from {
     opacity: 0;
     transform: translateX(8px);
@@ -1292,9 +1293,9 @@ body {
   animation: ticker-flip 120ms var(--ease-in-out-soft);
 }
 
-/* ── The JARVIS core: one class, seven states ─────────────────────────────── */
+/* ── The command core: one class, seven states ─────────────────────────────── */
 
-.jarvis-core {
+.assistant-core {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1302,88 +1303,88 @@ body {
   flex: none;
 }
 
-.jarvis-core .jc-ring-outer {
+.assistant-core .jc-ring-outer {
   transform-origin: center;
-  animation: jarvis-ring-outer var(--jarvis-ring-1) linear infinite;
+  animation: assistant-ring-outer var(--assistant-ring-1) linear infinite;
   will-change: transform;
 }
-.jarvis-core .jc-ring-mid {
+.assistant-core .jc-ring-mid {
   transform-origin: center;
-  animation: jarvis-ring-mid var(--jarvis-ring-2) linear infinite;
+  animation: assistant-ring-mid var(--assistant-ring-2) linear infinite;
   will-change: transform;
 }
-.jarvis-core .jc-ring-inner {
+.assistant-core .jc-ring-inner {
   transform-origin: center;
 }
-.jarvis-core .jc-centre {
+.assistant-core .jc-centre {
   transform-origin: center;
-  animation: jarvis-core-breathe 4s var(--ease-in-out-soft) infinite;
+  animation: assistant-core-breathe 4s var(--ease-in-out-soft) infinite;
 }
-.jarvis-core .jc-sweep {
+.assistant-core .jc-sweep {
   display: none;
   transform-origin: center;
 }
-.jarvis-core .jc-halo {
+.assistant-core .jc-halo {
   opacity: 0.3;
   transform-origin: center;
 }
 
 /* dormant — the resting state */
-.jarvis-core[data-state='dormant'] {
+.assistant-core[data-state='dormant'] {
   opacity: 0.45;
 }
 
 /* listening — rings speed up, halo blooms, tick ring becomes a waveform */
-.jarvis-core[data-state='listening'] .jc-ring-outer {
+.assistant-core[data-state='listening'] .jc-ring-outer {
   animation-duration: 8s;
 }
-.jarvis-core[data-state='listening'] .jc-ring-mid {
+.assistant-core[data-state='listening'] .jc-ring-mid {
   animation-duration: 8s;
 }
-.jarvis-core[data-state='listening'] .jc-halo {
-  animation: jarvis-listen 400ms var(--ease-out-soft) both;
+.assistant-core[data-state='listening'] .jc-halo {
+  animation: assistant-listen 400ms var(--ease-out-soft) both;
   opacity: 0.95;
 }
 
 /* thinking — counter-spin at 2.2s + an orbiting scan highlight */
-.jarvis-core[data-state='thinking'] .jc-ring-outer,
-.jarvis-core[data-state='thinking'] .jc-ring-mid {
+.assistant-core[data-state='thinking'] .jc-ring-outer,
+.assistant-core[data-state='thinking'] .jc-ring-mid {
   animation-duration: 2.2s;
 }
-.jarvis-core[data-state='thinking'] .jc-sweep {
+.assistant-core[data-state='thinking'] .jc-sweep {
   display: block;
-  animation: jarvis-think-sweep 900ms linear infinite;
+  animation: assistant-think-sweep 900ms linear infinite;
 }
 
 /* working — the outer ring becomes a progress arc */
-.jarvis-core[data-state='working'] .jc-ring-outer {
+.assistant-core[data-state='working'] .jc-ring-outer {
   animation-duration: 6s;
 }
-.jarvis-core[data-state='working'] .jc-arc {
+.assistant-core[data-state='working'] .jc-arc {
   transition: stroke-dashoffset var(--dur-base) var(--ease-out-soft);
 }
 
 /* speaking — the centre pulses per narration token */
-.jarvis-core[data-state='speaking'] .jc-centre {
-  animation: jarvis-speak-pulse 140ms var(--ease-out-soft);
+.assistant-core[data-state='speaking'] .jc-centre {
+  animation: assistant-speak-pulse 140ms var(--ease-out-soft);
 }
 
 /* attention — a slow double blink */
-.jarvis-core[data-state='attention'] .jc-halo {
-  animation: jarvis-attention 3s var(--ease-in-out-soft) infinite;
+.assistant-core[data-state='attention'] .jc-halo {
+  animation: assistant-attention 3s var(--ease-in-out-soft) infinite;
 }
 
 /* error — one hard flash, then settle */
-.jarvis-core[data-state='error'] .jc-centre {
-  animation: jarvis-error-flash 180ms var(--ease-in-out-soft) 1;
+.assistant-core[data-state='error'] .jc-centre {
+  animation: assistant-error-flash 180ms var(--ease-in-out-soft) 1;
 }
 
-.jarvis-wave-bar {
+.assistant-wave-bar {
   transform-origin: center bottom;
   will-change: transform;
 }
 
-.jarvis-caret::after {
+.assistant-caret::after {
   content: '';
   display: inline-block;
   width: 1px;
@@ -1391,37 +1392,111 @@ body {
   margin-left: 2px;
   background: var(--color-magenta-ink);
   vertical-align: text-bottom;
-  animation: jarvis-token-caret 620ms steps(1) infinite;
+  animation: assistant-token-caret 620ms steps(1) infinite;
 }
 
-.anim-jarvis-plan-in {
-  animation: jarvis-plan-in var(--dur-base) var(--ease-out-expo) both;
+.anim-assistant-plan-in {
+  animation: assistant-plan-in var(--dur-base) var(--ease-out-expo) both;
 }
-.anim-jarvis-step-in {
-  animation: jarvis-step-in var(--dur-base) var(--ease-out-expo) both;
+.anim-assistant-step-in {
+  animation: assistant-step-in var(--dur-base) var(--ease-out-expo) both;
   animation-delay: calc(min(var(--i, 0), 12) * 30ms);
 }
-.anim-jarvis-bar-rise {
-  animation: jarvis-bar-rise 220ms var(--ease-out-expo) both;
+.anim-assistant-bar-rise {
+  animation: assistant-bar-rise 220ms var(--ease-out-expo) both;
 }
-.anim-jarvis-notice-in {
-  animation: jarvis-notice-in var(--dur-base) var(--ease-out-expo) both;
+.anim-assistant-notice-in {
+  animation: assistant-notice-in var(--dur-base) var(--ease-out-expo) both;
+}
+
+/* ── Depth · the 3D layer ─────────────────────────────────────────────────── */
+
+@keyframes orbit-3d {
+  from { transform: rotateX(72deg) rotateZ(0deg); }
+  to   { transform: rotateX(72deg) rotateZ(360deg); }
+}
+@keyframes orbit-3d-reverse {
+  from { transform: rotateX(-64deg) rotateY(18deg) rotateZ(360deg); }
+  to   { transform: rotateX(-64deg) rotateY(18deg) rotateZ(0deg); }
+}
+@keyframes orbit-3d-tilt {
+  from { transform: rotateY(58deg) rotateX(12deg) rotateZ(0deg); }
+  to   { transform: rotateY(58deg) rotateX(12deg) rotateZ(-360deg); }
+}
+@keyframes page-enter-3d {
+  from { opacity: 0; transform: perspective(1400px) translateY(14px) rotateX(-4deg); }
+  to   { opacity: 1; transform: perspective(1400px) translateY(0) rotateX(0deg); }
+}
+@keyframes float-3d {
+  0%, 100% { transform: perspective(900px) rotateY(-7deg) rotateX(3deg) translateY(0); }
+  50%      { transform: perspective(900px) rotateY(7deg) rotateX(-3deg) translateY(-6px); }
+}
+@keyframes plane-settle {
+  from { transform: perspective(1600px) rotateX(9deg) scale(0.985); opacity: 0.6; }
+  to   { transform: perspective(1600px) rotateX(6deg) scale(1); opacity: 1; }
+}
+
+.stage-3d {
+  perspective: 1200px;
+  transform-style: preserve-3d;
+}
+.tilt-surface {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 260ms var(--ease-out-soft);
+  will-change: transform;
+}
+.tilt-glare {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  transition: opacity 260ms var(--ease-out-soft);
+}
+.holo-ring {
+  position: absolute;
+  border-radius: 999px;
+  border: 1px solid var(--color-hud-strong);
+  box-shadow: 0 0 18px -6px var(--color-glow);
+  pointer-events: none;
+  will-change: transform;
+}
+.holo-ring-1 { animation: orbit-3d 14s linear infinite; }
+.holo-ring-2 { animation: orbit-3d-reverse 19s linear infinite; border-color: var(--color-magenta); opacity: 0.55; }
+.holo-ring-3 { animation: orbit-3d-tilt 26s linear infinite; opacity: 0.35; }
+
+.anim-page-enter-3d {
+  animation: page-enter-3d var(--dur-slow) var(--ease-out-expo) both;
+  transform-origin: 50% 0;
+}
+.anim-float-3d {
+  animation: float-3d 12s var(--ease-in-out-soft) infinite;
+  will-change: transform;
+}
+.plane-3d {
+  animation: plane-settle var(--dur-cinematic) var(--ease-out-expo) both;
+  transform-style: preserve-3d;
+  transition: transform 420ms var(--ease-out-soft);
+}
+.plane-3d:hover {
+  transform: perspective(1600px) rotateX(0deg) scale(1);
 }
 
 /* ── Ambient HUD ──────────────────────────────────────────────────────────── */
 
-.jarvis-hud .hud-bracket {
+.assistant-hud .hud-bracket {
   animation:
     hud-bracket-draw 720ms var(--ease-out-expo) both,
     glow-pulse 8s var(--ease-in-out-soft) infinite 720ms;
 }
 
-.jarvis-hud .hud-grid {
+.assistant-hud .hud-grid {
   animation: grid-pan 60s linear infinite;
   will-change: transform;
 }
 
-.jarvis-hud .hud-scan {
+.assistant-hud .hud-scan {
   animation: scan-line 12s var(--ease-in-out-soft) infinite;
   will-change: transform;
 }
@@ -1474,7 +1549,16 @@ body {
     scroll-behavior: auto !important;
   }
 
-  .jarvis-hud,
+  .holo-ring {
+    display: none !important;
+  }
+  .tilt-surface,
+  .plane-3d,
+  .anim-float-3d {
+    transform: none !important;
+  }
+
+  .assistant-hud,
   .scanline,
   .bg-live {
     display: none !important;

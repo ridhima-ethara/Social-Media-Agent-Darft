@@ -23,7 +23,7 @@
  *     and one completed build dated the most recent Sunday
  *   · 3 months of platform analytics for LinkedIn and Instagram
  *   · 12 agent_state rows and ~9 activity events
- *   · 1 JARVIS conversation with 6 turns covering the full range
+ *   · 1 Ethara conversation with 6 turns covering the full range
  */
 
 import {
@@ -344,7 +344,7 @@ const IDEA_SEEDS: IdeaSeed[] = [
  */
 const IDEA_PLATFORMS: Platform[] = [
   'linkedin', 'linkedin', 'linkedin', 'instagram', 'linkedin',
-  'linkedin', 'linkedin', 'linkedin', 'linkedin', 'linkedin',
+  'facebook', 'linkedin', 'linkedin', 'facebook', 'linkedin',
   'x', 'linkedin', 'linkedin', 'linkedin', 'linkedin', 'instagram',
 ]
 
@@ -382,6 +382,8 @@ const PUBLISHED_SEEDS: PublishedSeed[] = [
   { title: 'Agent reliability, in four panels', platform: 'instagram', content: 'Tool contracts. Idempotency. Legible errors. Deterministic replay.\n\nFour changes, none of them a model upgrade.\n\n#AgenticAI #AIAgents #LLMOps', daysAgo: 9, reach: 8140, impressions: 9800, likes: 372, comments: 28, shares: 31, summary: 'Reach 42% above the Instagram trailing average — the strongest Instagram post of the period.', recommendation: 'Four-panel breakdowns are working. Make this a recurring format.' },
   { title: 'Reward models are the product', platform: 'x', content: 'A reward model is a specification written in examples.\n\nWhatever it rewards is what your system does in every case you did not enumerate.\n\n#RewardModeling #ReinforcementLearning', daysAgo: 19, reach: 4280, impressions: 5100, likes: 164, comments: 12, shares: 38, summary: 'Engagement rate of 4.2% against an X baseline of 3.6%, on a small sample.', recommendation: 'X rewards the compressed claim. Cut to the single assertion and drop the elaboration.' },
   { title: 'The environment was the bottleneck', platform: 'x', content: 'Nine months of agent work in one line: the model was never the bottleneck. The environment was.\n\n#AgenticAI #AIAgents', daysAgo: 6, reach: 5640, impressions: 6800, likes: 232, comments: 18, shares: 54, summary: 'Engagement rate of 4.5%, above the X baseline of 3.6%, with shares carrying most of it.', recommendation: 'Single-sentence posts are outperforming multi-paragraph ones on this platform by a clear margin.' },
+  { title: 'Reward models are specifications', platform: 'facebook', content: 'Every preference pair you collect narrows what a model is allowed to become. The pairs you did not collect are the behaviours you did not constrain.\n\nWe review reward definitions the way we review API contracts now — before the work starts, with an owner named.\n\n#RewardModeling #AIAlignment #AIResearch', daysAgo: 13, reach: 3840, impressions: 4600, likes: 142, comments: 23, shares: 17, summary: 'The first Facebook reading on this account, so there is no trailing baseline to compare against yet. Comments came from practitioners rather than the general audience.', recommendation: 'Publish two more before drawing any conclusion. One post is a reading, not a trend.' },
+  { title: 'The environment was the bottleneck', platform: 'facebook', content: 'Nine months of agent work, in one line: the model was never the constraint. The environment was.\n\nNon-idempotent tools, unversioned schemas, errors the planner could not read. We fixed the tool surface and reliability moved more in three weeks than in the previous three months.\n\n#AgenticAI #AIAgents #LLMOps', daysAgo: 4, reach: 4920, impressions: 5900, likes: 198, comments: 31, shares: 26, summary: 'Reach 28% above the first Facebook post, on a sample of two — too small to call a baseline. Shares carried it further than likes did.', recommendation: 'The concrete failure list travelled. Keep the structure; the sample is still too small to conclude anything about the channel.' },
 ]
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -508,26 +510,26 @@ async function clearWorkspace(workspaceId: string): Promise<void> {
     [workspaceId],
   )
   await query(
-    `DELETE FROM jarvis_steps WHERE turn_id IN (
-       SELECT t.id FROM jarvis_turns t
-       JOIN jarvis_conversations c ON c.id = t.conversation_id
+    `DELETE FROM assistant_steps WHERE turn_id IN (
+       SELECT t.id FROM assistant_turns t
+       JOIN assistant_conversations c ON c.id = t.conversation_id
        WHERE c.workspace_id = $1)`,
     [workspaceId],
   )
   await query(
-    `DELETE FROM jarvis_confirmations WHERE turn_id IN (
-       SELECT t.id FROM jarvis_turns t
-       JOIN jarvis_conversations c ON c.id = t.conversation_id
+    `DELETE FROM assistant_confirmations WHERE turn_id IN (
+       SELECT t.id FROM assistant_turns t
+       JOIN assistant_conversations c ON c.id = t.conversation_id
        WHERE c.workspace_id = $1)`,
     [workspaceId],
   )
   await query(
-    `DELETE FROM jarvis_turns WHERE conversation_id IN (
-       SELECT id FROM jarvis_conversations WHERE workspace_id = $1)`,
+    `DELETE FROM assistant_turns WHERE conversation_id IN (
+       SELECT id FROM assistant_conversations WHERE workspace_id = $1)`,
     [workspaceId],
   )
-  await query('DELETE FROM jarvis_conversations WHERE workspace_id = $1', [workspaceId])
-  await query('DELETE FROM jarvis_briefs WHERE workspace_id = $1', [workspaceId])
+  await query('DELETE FROM assistant_conversations WHERE workspace_id = $1', [workspaceId])
+  await query('DELETE FROM assistant_briefs WHERE workspace_id = $1', [workspaceId])
 
   await query(
     `DELETE FROM drafts WHERE idea_id IN (SELECT id FROM content_ideas WHERE workspace_id = $1)`,
@@ -1377,7 +1379,7 @@ async function seedKnowledge(
 
 async function seedAgentState(workspaceId: string): Promise<void> {
   for (const agent of AGENTS) {
-    const isJarvis = agent.id === 'jarvis'
+    const isAssistant = agent.id === 'assistant'
     await query(
       `INSERT INTO agent_state
          (workspace_id, agent_id, status, current_task, last_run, processed, success_rate)
@@ -1392,7 +1394,7 @@ async function seedAgentState(workspaceId: string): Promise<void> {
         workspaceId,
         agent.id,
         agent.id === 'validation' ? 'needs_review' : 'idle',
-        isJarvis
+        isAssistant
           ? 'Listening'
           : agent.id === 'validation'
             ? 'Holding items for a human verdict'
@@ -1598,11 +1600,11 @@ async function seedRunHistory(workspaceId: string, runId: string): Promise<void>
   }
 }
 
-/* ── The JARVIS conversation: six turns covering the full range ─────────────── */
+/* ── The command plane conversation: six turns covering the full range ─────────────── */
 
-async function seedJarvis(workspaceId: string): Promise<void> {
+async function seedAssistant(workspaceId: string): Promise<void> {
   const conversation = await queryOne<{ id: string }>(
-    `INSERT INTO jarvis_conversations (workspace_id, actor, role, title, started_at, last_at)
+    `INSERT INTO assistant_conversations (workspace_id, actor, role, title, started_at, last_at)
      VALUES ($1,'Ridhima','marketing',$2,$3,$4)
      RETURNING id`,
     [
@@ -1613,7 +1615,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
     ],
   )
   if (!conversation) return
-  tally('jarvis_conversations')
+  tally('assistant_conversations')
 
   const reviewCount = Number(
     (
@@ -1641,7 +1643,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
   )
 
   interface TurnSeed {
-    speaker: 'operator' | 'jarvis'
+    speaker: 'operator' | 'assistant'
     utterance?: string
     channel: 'text' | 'voice' | 'ambient' | 'cron'
     narration?: string
@@ -1670,7 +1672,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
       minutesAgo: 1440,
     },
     {
-      speaker: 'jarvis',
+      speaker: 'assistant',
       channel: 'text',
       status: 'completed',
       minutesAgo: 1439,
@@ -1701,7 +1703,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
       minutesAgo: 1380,
     },
     {
-      speaker: 'jarvis',
+      speaker: 'assistant',
       channel: 'text',
       status: 'completed',
       minutesAgo: 1378,
@@ -1735,7 +1737,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
       minutesAgo: 1300,
     },
     {
-      speaker: 'jarvis',
+      speaker: 'assistant',
       channel: 'text',
       status: 'completed',
       minutesAgo: 1299,
@@ -1754,7 +1756,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
       minutesAgo: 240,
     },
     {
-      speaker: 'jarvis',
+      speaker: 'assistant',
       channel: 'text',
       status: 'completed',
       minutesAgo: 238,
@@ -1781,7 +1783,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
 
     // 5 · An ambient notice.
     {
-      speaker: 'jarvis',
+      speaker: 'assistant',
       channel: 'ambient',
       status: 'completed',
       minutesAgo: 90,
@@ -1790,7 +1792,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
 
     // 6 · The morning brief.
     {
-      speaker: 'jarvis',
+      speaker: 'assistant',
       channel: 'cron',
       status: 'completed',
       minutesAgo: 42,
@@ -1801,7 +1803,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
   let seq = 1
   for (const t of turns) {
     const turn = await queryOne<{ id: string }>(
-      `INSERT INTO jarvis_turns
+      `INSERT INTO assistant_turns
          (conversation_id, seq, speaker, utterance, channel, intent, plan, narration,
           confidence, status, last_entity, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -1822,13 +1824,13 @@ async function seedJarvis(workspaceId: string): Promise<void> {
       ],
     )
     if (!turn) continue
-    tally('jarvis_turns')
+    tally('assistant_turns')
     seq += 1
 
     if (t.steps) {
       for (const [i, step] of t.steps.entries()) {
         await query(
-          `INSERT INTO jarvis_steps
+          `INSERT INTO assistant_steps
              (turn_id, idx, tool_id, risk, args, why, status, result_summary,
               duration_ms, started_at, finished_at)
            VALUES ($1,$2,$3,$4,'{}'::jsonb,$5,$6,$7,$8,$9,$10)`,
@@ -1845,21 +1847,21 @@ async function seedJarvis(workspaceId: string): Promise<void> {
             new Date(NOW.getTime() - t.minutesAgo * 60000 + 1200).toISOString(),
           ],
         )
-        tally('jarvis_steps')
+        tally('assistant_steps')
       }
     }
   }
 
   // A decided confirmation on the publish turn, so the audit trail is complete.
   const publishTurn = await queryOne<{ id: string }>(
-    `SELECT t.id FROM jarvis_turns t
+    `SELECT t.id FROM assistant_turns t
       WHERE t.conversation_id = $1 AND t.narration LIKE 'Published to LinkedIn%'
       LIMIT 1`,
     [conversation.id],
   )
   if (publishTurn) {
     await query(
-      `INSERT INTO jarvis_confirmations
+      `INSERT INTO assistant_confirmations
          (turn_id, token, plan, prompt, expires_at, decided, decided_by, decided_at, created_at)
        VALUES ($1,$2,$3,$4,$5,'confirmed','Ridhima',$6,$7)`,
       [
@@ -1875,12 +1877,12 @@ async function seedJarvis(workspaceId: string): Promise<void> {
         new Date(NOW.getTime() - 240 * 60000).toISOString(),
       ],
     )
-    tally('jarvis_confirmations')
+    tally('assistant_confirmations')
   }
 
   // The most recent brief, which the Dashboard strip renders.
   await query(
-    `INSERT INTO jarvis_briefs (workspace_id, trigger, signals, recommendation, narration, created_at)
+    `INSERT INTO assistant_briefs (workspace_id, trigger, signals, recommendation, narration, created_at)
      VALUES ($1,'cron',$2,$3,$4,$5)`,
     [
       workspaceId,
@@ -1894,7 +1896,7 @@ async function seedJarvis(workspaceId: string): Promise<void> {
       new Date(NOW.getTime() - 42 * 60000).toISOString(),
     ],
   )
-  tally('jarvis_briefs')
+  tally('assistant_briefs')
 }
 
 /* ── Analytics ─────────────────────────────────────────────────────────────── */
@@ -1920,6 +1922,47 @@ async function seedAnalytics(workspaceId: string): Promise<void> {
     )
     tally('platform_analytics')
   }
+}
+
+/* ── Trend URLs ─────────────────────────────────────────────────────────── */
+
+/**
+ * Every seeded hashtag and keyword signal gets the URL a live run would have
+ * recorded: the tag's own feed, the term's content search, and the strongest
+ * captured post carrying it. Derived from the corpus, never invented.
+ */
+async function backfillTrendUrls(workspaceId: string): Promise<void> {
+  // Correlated subqueries rather than LATERAL: Postgres will not let a FROM
+  // item reference the table an UPDATE is targeting.
+  await query(
+    `UPDATE hashtags SET
+       feed_url = COALESCE(feed_url, 'https://www.linkedin.com/feed/hashtag/' || tag || '/'),
+       top_post_url = COALESCE(top_post_url, (
+         SELECT si.url FROM scraped_items si
+         WHERE si.workspace_id = hashtags.workspace_id AND hashtags.display_tag = ANY(si.hashtags)
+         ORDER BY si.engagement DESC LIMIT 1)),
+       top_post_title = COALESCE(top_post_title, (
+         SELECT si.title FROM scraped_items si
+         WHERE si.workspace_id = hashtags.workspace_id AND hashtags.display_tag = ANY(si.hashtags)
+         ORDER BY si.engagement DESC LIMIT 1))
+     WHERE workspace_id = $1`,
+    [workspaceId],
+  )
+  await query(
+    `UPDATE keyword_signals SET
+       search_url = COALESCE(search_url, (
+         SELECT 'https://www.linkedin.com/search/results/content/?keywords=' || replace(k.term, ' ', '%20') || '&sortBy=%22date_posted%22'
+         FROM keywords k WHERE k.id = keyword_signals.keyword_id)),
+       top_post_url = COALESCE(top_post_url, (
+         SELECT si.url FROM scraped_items si
+         WHERE si.keyword_id = keyword_signals.keyword_id ORDER BY si.engagement DESC LIMIT 1)),
+       top_post_title = COALESCE(top_post_title, (
+         SELECT si.title FROM scraped_items si
+         WHERE si.keyword_id = keyword_signals.keyword_id ORDER BY si.engagement DESC LIMIT 1))
+     WHERE workspace_id = $1`,
+    [workspaceId],
+  )
+  tally('trend_urls')
 }
 
 /* ── Lineage ───────────────────────────────────────────────────────────────── */
@@ -2030,8 +2073,9 @@ async function main(): Promise<void> {
   await seedActivity(workspaceId)
   await seedReviewQueue(workspaceId)
   await seedRunHistory(workspaceId, runId)
-  await seedJarvis(workspaceId)
+  await seedAssistant(workspaceId)
   await seedLineage(workspaceId)
+  await backfillTrendUrls(workspaceId)
 
   const width = Math.max(...Object.keys(counts).map((k) => k.length))
   for (const key of Object.keys(counts).sort()) {

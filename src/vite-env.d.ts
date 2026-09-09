@@ -2,8 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_API_URL?: string
-  readonly VITE_JARVIS_VOICE?: string
-  readonly VITE_JARVIS_WAKE_PHRASE?: string
+  readonly VITE_ASSISTANT_VOICE?: string
+  readonly VITE_ASSISTANT_WAKE_PHRASE?: string
 }
 
 interface ImportMeta {

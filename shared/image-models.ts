@@ -91,6 +91,7 @@ export const CANVASES: Record<Platform, Canvas> = {
   linkedin: { width: 1200, height: 627, label: '1200×627', aspect: '1.91:1' },
   instagram: { width: 1080, height: 1350, label: '1080×1350', aspect: '4:5' },
   x: { width: 1600, height: 900, label: '1600×900', aspect: '16:9' },
+  facebook: { width: 1200, height: 630, label: '1200×630', aspect: '1.91:1' },
 }
 
 export function canvasFor(platform: Platform): Canvas {

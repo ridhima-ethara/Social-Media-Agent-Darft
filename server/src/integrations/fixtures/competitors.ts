@@ -92,7 +92,7 @@ export const COMPETITOR_POSTS: FixtureCompetitorPost[] = [
 
 export interface FixtureSourceRegistryEntry {
   name: string
-  kind: 'linkedin' | 'instagram' | 'x' | 'web'
+  kind: 'linkedin' | 'instagram' | 'x' | 'facebook' | 'web'
   sourceType: 'Social' | 'News' | 'Competitor' | 'Community' | 'Website'
   url: string
   trusted: boolean

@@ -21,11 +21,11 @@ const SCHEMA_PATH = join(HERE, 'schema.sql')
 
 /** Every table this schema owns, in dependency order for a clean drop. */
 const OWNED_TABLES = [
-  'jarvis_briefs',
-  'jarvis_confirmations',
-  'jarvis_steps',
-  'jarvis_turns',
-  'jarvis_conversations',
+  'assistant_briefs',
+  'assistant_confirmations',
+  'assistant_steps',
+  'assistant_turns',
+  'assistant_conversations',
   'lineage_edges',
   'review_queue',
   'activity_events',

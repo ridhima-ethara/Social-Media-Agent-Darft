@@ -426,17 +426,18 @@ export type ContentFormat = (typeof FORMATS)[number]
  * fit — never a coin toss, and always explainable.
  */
 export const FORMAT_PLATFORM_FIT: Record<ContentFormat, Record<Platform, number>> = {
-  'Thought Leadership': { linkedin: 96, instagram: 46, x: 72 },
-  Carousel: { linkedin: 82, instagram: 94, x: 38 },
-  'Short Post': { linkedin: 64, instagram: 58, x: 92 },
-  Video: { linkedin: 70, instagram: 88, x: 60 },
-  'Case Study': { linkedin: 92, instagram: 52, x: 54 },
+  'Thought Leadership': { linkedin: 96, instagram: 46, x: 72, facebook: 74 },
+  Carousel: { linkedin: 82, instagram: 94, x: 38, facebook: 68 },
+  'Short Post': { linkedin: 64, instagram: 58, x: 92, facebook: 70 },
+  Video: { linkedin: 70, instagram: 88, x: 60, facebook: 82 },
+  'Case Study': { linkedin: 92, instagram: 52, x: 54, facebook: 66 },
 }
 
 export const PLATFORM_LABEL: Record<Platform, string> = {
   linkedin: 'LinkedIn',
   instagram: 'Instagram',
   x: 'X',
+  facebook: 'Facebook',
 }
 
 /** Expected engagement level from a predicted index. */

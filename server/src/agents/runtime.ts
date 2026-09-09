@@ -2,8 +2,8 @@
  * THE SKILL RUNTIME
  *
  * One execution path for every agent, whether a run was started by cron, by an
- * operator clicking Run Discovery, or by JARVIS acting on an utterance. There is
- * no second path — which is what makes a JARVIS-triggered run indistinguishable
+ * operator clicking Run Discovery, or by Ethara acting on an utterance. There is
+ * no second path — which is what makes an operator-triggered run indistinguishable
  * from a scheduled one in telemetry.
  *
  * The mechanics:
@@ -239,9 +239,9 @@ export interface RunAgentOptions {
   workspaceId: string
   /** The pipeline run this agent belongs to, when it belongs to one. */
   pipelineRunId?: string | null
-  /** 'cron' | 'manual' | 'jarvis' | 'api' — recorded on the agent run. */
+  /** 'cron' | 'manual' | 'assistant' | 'api' — recorded on the agent run. */
   trigger?: string
-  /** The JARVIS turn that caused this, when applicable. */
+  /** The command plane turn that caused this, when applicable. */
   turnId?: string | null
   /** Restrict to these sections of the agent's skill list. */
   sections?: string[]

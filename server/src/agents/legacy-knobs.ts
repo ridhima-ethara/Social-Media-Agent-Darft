@@ -69,13 +69,13 @@ const KEY_ALIASES: Record<string, Record<string, string>> = {
   'generation.image.render': {
     imageModel: 'model',
   },
-  'jarvis.intent.parse': {
+  'assistant.intent.parse': {
     confidenceThreshold: 'clarifyThreshold',
   },
-  'jarvis.plan.compose': {
+  'assistant.plan.compose': {
     maxPlanSteps: 'maxSteps',
   },
-  'jarvis.confirm.gate': {
+  'assistant.confirm.gate': {
     ttl: 'ttlSeconds',
   },
 }

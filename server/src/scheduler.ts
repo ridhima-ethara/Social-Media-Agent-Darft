@@ -4,14 +4,14 @@
  * node-cron, and every scheduled job is also manually triggerable through a
  * route — nothing in this product happens only on a timer.
  *
- * Jobs go through the same orchestrator and the same JARVIS plane as an operator
+ * Jobs go through the same orchestrator and the same command plane as an operator
  * action. The only difference is the `trigger` label on the row.
  */
 
 import cron, { type ScheduledTask } from 'node-cron'
 
 import { config } from './config'
-import { publishNotices, composeBrief, sweepForNotices } from './jarvis/watch'
+import { publishNotices, composeBrief, sweepForNotices } from './assistant/watch'
 import { buildKnowledge } from './orchestrator'
 import { currentWorkspaceId } from './db/repo'
 import { publishActivity } from './events'
@@ -47,7 +47,7 @@ async function runBriefing(): Promise<void> {
     changesToReport: 3,
     includeRecommendation: true,
   })
-  publishActivity('jarvis', brief.narration, 'ok', { briefId: brief.id })
+  publishActivity('assistant', brief.narration, 'ok', { briefId: brief.id })
 }
 
 /** The ambient sweep. Notices are never modal; they land in the rail. */
@@ -69,7 +69,7 @@ function guard(id: string, fn: () => Promise<void>): () => Promise<void> {
       // A failing job must never take the process down.
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[scheduler] ${id} failed — ${message}`)
-      publishActivity('jarvis', `Scheduled job ${id} failed — ${message}`, 'error')
+      publishActivity('assistant', `Scheduled job ${id} failed — ${message}`, 'error')
     }
   }
 }
@@ -86,25 +86,25 @@ export function startScheduler(): RegisteredJob[] {
   })
 
   register({
-    id: 'jarvis.brief',
+    id: 'assistant.brief',
     description: 'The proactive briefing: three changes and one recommendation',
-    schedule: config.jarvis.briefCron,
+    schedule: config.assistant.briefCron,
     timezone,
     fn: runBriefing,
   })
 
   // The ambient sweep runs on an interval rather than a cron expression, because
   // it is measured in seconds.
-  const interval = Math.max(10_000, config.jarvis.watchIntervalMs)
-  const watcher = setInterval(guard('jarvis.watch', runWatch), interval)
+  const interval = Math.max(10_000, config.assistant.watchIntervalMs)
+  const watcher = setInterval(guard('assistant.watch', runWatch), interval)
   watcher.unref()
   jobs.push({
-    id: 'jarvis.watch',
+    id: 'assistant.watch',
     description: `The ambient anomaly sweep, every ${Math.round(interval / 1000)}s`,
     schedule: `every ${Math.round(interval / 1000)}s`,
     timezone,
     task: null,
-    runNow: guard('jarvis.watch', runWatch),
+    runNow: guard('assistant.watch', runWatch),
   })
 
   return jobs

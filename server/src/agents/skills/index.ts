@@ -80,6 +80,11 @@ export interface HashtagCandidate {
   lastSeenAt: string
   /** Every keyword whose query surfaced this tag. */
   surfacedBy: string[]
+  /** The tag's own LinkedIn feed — a URL the operator can open. */
+  feedUrl: string
+  /** The strongest post that carried it, by engagement. */
+  topPostUrl: string | null
+  topPostTitle: string | null
   /** Set by `scraping.hashtag.expand` when the tag's own feed was read. */
   independentPostCount?: number
   independentEngagement?: number
@@ -136,6 +141,11 @@ export interface KeywordTrend {
   isTrending: boolean
   trendReason: string
   priorRuns: number
+  /** LinkedIn content search for the term — a URL the operator can open. */
+  searchUrl: string
+  /** The strongest post for the keyword this run, by engagement. */
+  topPostUrl: string | null
+  topPostTitle: string | null
 }
 
 export interface RankedHashtagGroup {
@@ -350,7 +360,7 @@ export interface CandidateEntry {
 
 export interface KnowledgePayload extends Record<string, unknown> {
   buildId: string
-  trigger: 'cron' | 'manual' | 'jarvis'
+  trigger: 'cron' | 'manual' | 'assistant'
   targets?: ResearchTarget[]
   raw?: RawResearch[]
   researchSource?: 'live' | 'fixture'

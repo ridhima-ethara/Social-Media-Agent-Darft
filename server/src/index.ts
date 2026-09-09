@@ -16,7 +16,7 @@ import { config, describeConfiguration } from './config'
 import { assertDb, closePool } from './db/pool'
 import { createApiRouter } from './api'
 import { auditSkillCoverage } from './agents/skills/_register'
-import { auditToolCoverage } from './jarvis/tools/index'
+import { auditToolCoverage } from './assistant/tools/index'
 import { scheduledJobs, startScheduler, stopScheduler } from './scheduler'
 
 const DIM = '\u001B[2m'

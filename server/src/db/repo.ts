@@ -185,6 +185,9 @@ export interface KeywordSignalRow {
   rank: number | null
   is_trending: boolean
   trend_reason: string | null
+  search_url: string | null
+  top_post_url: string | null
+  top_post_title: string | null
   captured_at: string
 }
 
@@ -196,7 +199,8 @@ export async function latestKeywordSignals(
     `SELECT DISTINCT ON (ks.keyword_id)
             ks.id, ks.keyword_id, k.term, ks.run_id, ks.post_count, ks.total_engagement,
             ks.avg_engagement, ks.velocity, ks.growth_pct, ks.trend_score, ks.rank,
-            ks.is_trending, ks.trend_reason, ks.captured_at
+            ks.is_trending, ks.trend_reason, ks.search_url, ks.top_post_url, ks.top_post_title,
+            ks.captured_at
        FROM keyword_signals ks
        JOIN keywords k ON k.id = ks.keyword_id
       WHERE ks.workspace_id = $1
@@ -272,6 +276,9 @@ export interface KeywordSignalInsert {
   rank: number
   isTrending: boolean
   trendReason: string
+  searchUrl: string
+  topPostUrl: string | null
+  topPostTitle: string | null
 }
 
 export async function insertKeywordSignal(
@@ -281,8 +288,9 @@ export async function insertKeywordSignal(
   await query(
     `INSERT INTO keyword_signals
        (workspace_id, keyword_id, run_id, post_count, total_engagement, avg_engagement,
-        velocity, growth_pct, trend_score, rank, is_trending, trend_reason)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        velocity, growth_pct, trend_score, rank, is_trending, trend_reason,
+        search_url, top_post_url, top_post_title)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
     [
       workspaceId,
       s.keywordId,
@@ -296,6 +304,9 @@ export async function insertKeywordSignal(
       s.rank,
       s.isTrending,
       s.trendReason,
+      s.searchUrl,
+      s.topPostUrl,
+      s.topPostTitle,
     ],
   )
 }
@@ -442,6 +453,9 @@ export interface HashtagRow {
   researched_at: string | null
   first_seen_at: string
   last_seen_at: string
+  feed_url: string | null
+  top_post_url: string | null
+  top_post_title: string | null
 }
 
 export async function listHashtags(
@@ -603,7 +617,7 @@ export async function getIdea(workspaceId: string, id: string): Promise<IdeaRow 
 }
 
 /**
- * Fuzzy title lookup, for JARVIS resolving "publish the reward models post".
+ * Fuzzy title lookup, for Ethara resolving "publish the reward models post".
  * The Dice threshold lives with the caller; this returns candidates in order.
  */
 export async function findIdeasByTitle(
@@ -1162,7 +1176,7 @@ export interface KnowledgeBuildRow {
 
 export async function startKnowledgeBuild(
   workspaceId: string,
-  trigger: 'cron' | 'manual' | 'jarvis',
+  trigger: 'cron' | 'manual' | 'assistant',
 ): Promise<KnowledgeBuildRow | null> {
   return queryOne<KnowledgeBuildRow>(
     `INSERT INTO knowledge_builds (workspace_id, trigger, status)
@@ -1878,6 +1892,9 @@ export interface HashtagInsert {
   inTopSet: boolean
   firstSeenAt: string
   lastSeenAt: string
+  feedUrl: string
+  topPostUrl: string | null
+  topPostTitle: string | null
 }
 
 /** Writes the hashtag candidates and returns `tag → row id`. */
@@ -1895,13 +1912,13 @@ export async function persistHashtagCandidates(
          post_count, total_engagement, engagement_per_post,
          relevance, credibility, freshness, hashtag_score, rank,
          validation, verdict_reason, in_top_set,
-         first_seen_at, last_seen_at, validated_at
+         first_seen_at, last_seen_at, feed_url, top_post_url, top_post_title, validated_at
        ) VALUES (
          $1, $2, $3, $4, $5,
          $6, $7, $8,
          $9, $10, $11, $12, $13,
          $14, $15, $16,
-         $17, $18,
+         $17, $18, $19, $20, $21,
          CASE WHEN $14 = 'pending' THEN NULL ELSE now() END
        )
        ON CONFLICT (workspace_id, tag, run_id) DO UPDATE SET
@@ -1919,6 +1936,9 @@ export async function persistHashtagCandidates(
          verdict_reason = EXCLUDED.verdict_reason,
          in_top_set = EXCLUDED.in_top_set,
          last_seen_at = EXCLUDED.last_seen_at,
+         feed_url = EXCLUDED.feed_url,
+         top_post_url = COALESCE(EXCLUDED.top_post_url, hashtags.top_post_url),
+         top_post_title = COALESCE(EXCLUDED.top_post_title, hashtags.top_post_title),
          validated_at = CASE WHEN EXCLUDED.validation = 'pending' THEN NULL ELSE now() END
        RETURNING id`,
       [
@@ -1940,6 +1960,9 @@ export async function persistHashtagCandidates(
         c.inTopSet,
         c.firstSeenAt,
         c.lastSeenAt,
+        c.feedUrl,
+        c.topPostUrl,
+        c.topPostTitle,
       ],
     )
     if (row) idByTag.set(c.tag, row.id)

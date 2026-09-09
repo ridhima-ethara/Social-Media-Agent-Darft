@@ -761,6 +761,7 @@ const CANVAS_BY_PLATFORM: Record<Platform, string> = {
   linkedin: '1200x627',
   instagram: '1080x1350',
   x: '1600x900',
+  facebook: '1200x630',
 }
 
 export function checkBrandCompliance(candidate: BrandCandidate): BrandCheck {

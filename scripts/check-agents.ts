@@ -107,16 +107,16 @@ pass(
 /* ── 4 · Tool handler modules exist ────────────────────────────────────────── */
 section('Tool handlers')
 
-const toolDir = join(ROOT, 'server/src/jarvis/tools')
+const toolDir = join(ROOT, 'server/src/assistant/tools')
 if (!existsSync(toolDir)) {
-  warn('server/src/jarvis/tools', 'Directory does not exist yet — expected before phase P6 completes.')
+  warn('server/src/assistant/tools', 'Directory does not exist yet — expected before phase P6 completes.')
 } else {
   const registryFile = join(toolDir, 'index.ts')
   const registered = existsSync(registryFile) ? readFileSync(registryFile, 'utf8') : ''
   let missing = 0
   for (const tool of TOOLS) {
     if (!registered.includes(`'${tool.id}'`) && !registered.includes(`"${tool.id}"`)) {
-      fail(tool.id, 'No handler registered in server/src/jarvis/tools/index.ts.')
+      fail(tool.id, 'No handler registered in server/src/assistant/tools/index.ts.')
       missing += 1
     }
   }
@@ -153,38 +153,66 @@ if (!existsSync(specDir)) {
 /* ── 6 · Critical skill handlers ───────────────────────────────────────────── */
 section('Critical skill handlers')
 
-const registerFile = join(ROOT, 'server/src/agents/skills/_register.ts')
+const agentsDir = join(ROOT, 'server/src/agents')
+const registerFile = join(agentsDir, 'skills/_register.ts')
 if (!existsSync(registerFile)) {
   warn('server/src/agents/skills/_register.ts', 'Does not exist yet — expected before phase P4 completes.')
 } else {
-  const skillFiles = readdirSync(join(ROOT, 'server/src/agents/skills'))
-    .filter((f) => f.endsWith('.ts'))
-    .map((f) => readFileSync(join(ROOT, 'server/src/agents/skills', f), 'utf8'))
+  // One handlers.ts per agent folder. The union of them must register every critical skill.
+  const handlerFiles = readdirSync(agentsDir, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(join(agentsDir, d.name, 'handlers.ts')))
+    .map((d) => readFileSync(join(agentsDir, d.name, 'handlers.ts'), 'utf8'))
     .join('\n')
-
   let missingHandlers = 0
   for (const id of CRITICAL_SKILL_IDS) {
-    if (!skillFiles.includes(`'${id}'`) && !skillFiles.includes(`"${id}"`)) {
-      fail(id, 'Critical skill has no handler. The runtime will refuse to boot.')
+    if (!handlerFiles.includes(`'${id}'`) && !handlerFiles.includes(`"${id}"`)) {
+      fail(id, 'Critical skill has no handler in any server/src/agents/<id>/handlers.ts.')
       missingHandlers += 1
     }
   }
-  if (missingHandlers === 0) {
-    pass(`all ${CRITICAL_SKILL_IDS.length} critical skills have a handler`)
-  }
+  if (missingHandlers === 0) pass(`all ${CRITICAL_SKILL_IDS.length} critical skills have a handler`)
 
   let missingAny = 0
   for (const skill of SKILLS) {
-    if (!skillFiles.includes(`'${skill.id}'`) && !skillFiles.includes(`"${skill.id}"`)) {
-      missingAny += 1
-    }
+    if (!handlerFiles.includes(`'${skill.id}'`) && !handlerFiles.includes(`"${skill.id}"`)) missingAny += 1
   }
-  if (missingAny > 0) {
-    warn('skills', `${missingAny} non-critical skill(s) have no handler and will record as skipped.`)
-  } else {
-    pass(`all ${SKILLS.length} skills have a handler`)
+  if (missingAny === 0) pass(`all ${SKILLS.length} skills have a handler`)
+  else warn('handlers', `${missingAny} non-critical skill(s) have no handler yet — they will be recorded as skipped.`)
+}
+
+/* ── 7 · Agent folders and the hand-off graph ─────────────────────────────── */
+section('Agent folders')
+
+const { AGENT_ROSTER, HANDLERS_BY_AGENT, assertFoldersMatchRegistry, assertToolAllowlists } = await import(
+  '../packages/agents/index'
+)
+const { assertGraph, pipelineOrder } = await import('../packages/agents/graph')
+
+let folderProblems = 0
+for (const agent of AGENT_ROSTER) {
+  const handlers = HANDLERS_BY_AGENT[agent.id]
+  if (!handlers || !existsSync(join(ROOT, handlers))) {
+    fail(agent.id, `HANDLERS path missing: ${handlers ?? '(undeclared)'}`)
+    folderProblems += 1
   }
 }
+for (const problem of assertFoldersMatchRegistry()) {
+  fail(problem.agentId, problem.message)
+  folderProblems += 1
+}
+for (const problem of assertToolAllowlists()) {
+  fail(problem.agentId, problem.message)
+  folderProblems += 1
+}
+for (const problem of assertGraph()) {
+  fail('graph', problem.message)
+  folderProblems += 1
+}
+if (folderProblems === 0) {
+  pass(`${AGENT_ROSTER.length} agent folders match the registry; handlers present; allowlists hold`)
+  pass(`pipeline order from handsOffTo: ${pipelineOrder().join(' → ')}`)
+}
+
 
 /* ── Result ────────────────────────────────────────────────────────────────── */
 console.log('')

@@ -96,6 +96,17 @@ function int(row: LooseRecord, ...keys: string[]): number {
   return 0
 }
 
+/** A nested integer, e.g. `engagement.likes`. Zero when absent — callers OR a flat fallback. */
+function nestedInt(row: LooseRecord, path: string): number {
+  const v = nested(row, path)
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v)
+  if (typeof v === 'string') {
+    const n = Number.parseInt(v.replace(/[^\d-]/g, ''), 10)
+    if (Number.isFinite(n)) return n
+  }
+  return 0
+}
+
 function nested(row: LooseRecord, path: string): unknown {
   let cursor: unknown = row
   for (const part of path.split('.')) {
@@ -132,21 +143,21 @@ function normalisePost(
   const text = str(row, 'text', 'postText', 'content', 'description', 'commentary')
   const externalId =
     str(row, 'urn', 'postId', 'id', 'activityUrn', 'shareUrn') ||
-    str(row, 'url', 'postUrl', 'link')
+    str(row, 'url', 'postUrl', 'linkedinUrl', 'link')
   if (text === '' || externalId === '') return null
 
   const authorFromNested =
     typeof nested(row, 'author.name') === 'string' ? (nested(row, 'author.name') as string) : ''
   const headlineFromNested =
-    typeof nested(row, 'author.headline') === 'string'
-      ? (nested(row, 'author.headline') as string)
+    typeof (nested(row, 'author.headline') ?? nested(row, 'author.info')) === 'string'
+      ? ((nested(row, 'author.headline') ?? nested(row, 'author.info')) as string)
       : ''
   const followersFromNested = nested(row, 'author.followersCount')
 
   const postedRaw =
     str(row, 'postedAt', 'publishedAt', 'date', 'time', 'createdAt') ||
     new Date().toISOString()
-  const parsed = new Date(postedRaw)
+  const parsed = new Date((typeof nested(row, 'postedAt.date') === 'string' ? (nested(row, 'postedAt.date') as string) : '') || postedRaw)
   const postedAt = Number.isNaN(parsed.getTime())
     ? new Date().toISOString()
     : parsed.toISOString()
@@ -166,11 +177,11 @@ function normalisePost(
       typeof followersFromNested === 'number'
         ? Math.trunc(followersFromNested)
         : int(row, 'authorFollowers', 'followersCount', 'followers'),
-    url: str(row, 'url', 'postUrl', 'link') || `https://www.linkedin.com/feed/update/${externalId}`,
+    url: str(row, 'url', 'postUrl', 'linkedinUrl', 'link') || `https://www.linkedin.com/feed/update/${externalId}`,
     postedAt,
-    reactions: int(row, 'numLikes', 'likesCount', 'reactions', 'reactionsCount', 'totalReactions'),
-    comments: int(row, 'numComments', 'commentsCount', 'comments'),
-    reposts: int(row, 'numShares', 'sharesCount', 'reposts', 'repostsCount'),
+    reactions: nestedInt(row, 'engagement.likes') || int(row, 'numLikes', 'likesCount', 'reactions', 'reactionsCount', 'totalReactions'),
+    comments: nestedInt(row, 'engagement.comments') || int(row, 'numComments', 'commentsCount', 'comments'),
+    reposts: nestedInt(row, 'engagement.shares') || int(row, 'numShares', 'sharesCount', 'reposts', 'repostsCount'),
     hashtags: declaredHashtags.length > 0 ? declaredHashtags : extractHashtagsFromText(text),
     keyword,
     sourceName,
@@ -275,16 +286,183 @@ export function apifyFixtureCompetitorPosts(
 
 const UNAVAILABLE = 'APIFY_API_TOKEN is not set'
 
-/** Apify's run-sync route returns dataset items directly, which is what we want. */
-function runSyncUrl(actor: string): string {
-  // Actor ids use `~` as the owner separator and must not be URL-escaped away.
-  const encoded = actor.replace(/\//g, '~')
-  return `${config.apify.baseUrl}/acts/${encoded}/run-sync-get-dataset-items?token=${encodeURIComponent(config.apify.token)}`
+/* ═══════════════════════════════════════════════════════════════════════════
+   REQUEST PLUMBING — per https://apify.com/agents.md
+   Bearer header, never a query-string token. Cost caps in the query string,
+   never the input body. Sync first; async run → poll → dataset when sync
+   cannot finish inside its window.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function authHeaders(): Record<string, string> {
+  return { authorization: `Bearer ${config.apify.token}` }
+}
+
+/** Actor ids use `~` as the owner separator and must not be URL-escaped away. */
+function actorPath(actor: string): string {
+  return actor.replace(/\//g, '~')
+}
+
+/** `maxItems` caps a pay-per-result run's cost; `memory` sizes the container. */
+function capQuery(maxItems: number): string {
+  return `maxItems=${Math.max(1, Math.trunc(maxItems))}&memory=${config.apify.memoryMbytes}`
+}
+
+function runSyncUrl(actor: string, maxItems: number): string {
+  return `${config.apify.baseUrl}/actors/${actorPath(actor)}/run-sync-get-dataset-items?${capQuery(maxItems)}`
+}
+
+function runAsyncUrl(actor: string, maxItems: number): string {
+  return `${config.apify.baseUrl}/actors/${actorPath(actor)}/runs?${capQuery(maxItems)}`
+}
+
+type ActorFamily = 'harvestapi' | 'apimaestro' | 'generic'
+
+/** Input field names are per actor, not per platform — so the body is built per family. */
+function familyOf(actor: string): ActorFamily {
+  if (actor.startsWith('harvestapi')) return 'harvestapi'
+  if (actor.startsWith('apimaestro')) return 'apimaestro'
+  return 'generic'
+}
+
+const POSTED_LIMIT: Record<ApifyPostSearchInput['datePosted'], string> = {
+  'past-24h': '24h',
+  'past-week': 'week',
+  'past-month': 'month',
+}
+
+function postSearchBody(actor: string, input: ApifyPostSearchInput): Record<string, unknown> {
+  switch (familyOf(actor)) {
+    case 'harvestapi':
+      return {
+        searchQueries: [input.keyword],
+        maxPosts: input.maxItems,
+        sortBy: input.sortBy,
+        postedLimit: POSTED_LIMIT[input.datePosted],
+      }
+    case 'apimaestro':
+      return {
+        keyword: input.keyword,
+        sort_type: input.sortBy === 'date' ? 'date_posted' : 'relevance',
+        limit: Math.min(50, input.maxItems),
+        total_posts: input.maxItems,
+      }
+    default:
+      return {
+        searchQuery: input.keyword,
+        maxItems: input.maxItems,
+        sortBy: input.sortBy,
+        datePosted: input.datePosted,
+      }
+  }
 }
 
 /**
- * Keyword post search. The one adapter `scraping.linkedin.fetch` calls.
+ * A hashtag feed is a post search for `#tag`. Reading it through the same
+ * actor as the keyword search is deliberate: it is an independent volume
+ * reading, and one actor family means one output shape to normalise.
  */
+function hashtagBody(actor: string, tag: string, maxItems: number): Record<string, unknown> {
+  switch (familyOf(actor)) {
+    case 'harvestapi':
+      return { searchQueries: [`#${tag}`], maxPosts: maxItems, sortBy: 'date', postedLimit: 'month' }
+    case 'apimaestro':
+      return { keyword: `#${tag}`, sort_type: 'date_posted', limit: Math.min(50, maxItems), total_posts: maxItems }
+    default:
+      return { hashtag: tag, maxItems }
+  }
+}
+
+function profileUrl(handle: string): string {
+  if (/^https?:\/\//i.test(handle)) return handle
+  return `https://www.linkedin.com/company/${handle.replace(/^@/, '')}`
+}
+
+function profileBody(actor: string, input: ApifyProfileInput): Record<string, unknown> {
+  switch (familyOf(actor)) {
+    case 'harvestapi':
+      return { targetUrls: [profileUrl(input.handle)], maxPosts: input.maxItems, postedLimit: 'month' }
+    default:
+      return { username: input.handle, maxItems: input.maxItems }
+  }
+}
+
+interface RunRecord {
+  id: string
+  status: string
+  defaultDatasetId: string
+}
+
+const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED'])
+
+/**
+ * Runs an actor and returns its dataset items.
+ *
+ * The synchronous endpoint returns items directly but is capped at its own
+ * window. When it times out, the run is started asynchronously and polled
+ * until it reaches a terminal state — so a slow LinkedIn query degrades to
+ * "slower", never to "failed".
+ */
+async function runActor(
+  actor: string,
+  body: Record<string, unknown>,
+  maxItems: number,
+  adapterId: string,
+): Promise<unknown[]> {
+  try {
+    const payload = await fetchJson<unknown>(runSyncUrl(actor, maxItems), {
+      method: 'POST',
+      headers: authHeaders(),
+      timeoutMs: config.apify.runTimeoutMs,
+      adapterId,
+      body,
+    })
+    return datasetItems(payload)
+  } catch (error) {
+    const timedOut = error instanceof AdapterError && /timed out/i.test(error.message)
+    if (!timedOut) throw error
+  }
+
+  const started = await fetchJson<{ data?: RunRecord }>(runAsyncUrl(actor, maxItems), {
+    method: 'POST',
+    headers: authHeaders(),
+    timeoutMs: 30_000,
+    adapterId,
+    body,
+  })
+  const run = started.data
+  if (!run?.id) throw new AdapterError(adapterId, 'actor run did not start')
+
+  const deadline = Date.now() + config.apify.runTimeoutMs * 2
+  let status = run.status
+  let datasetId = run.defaultDatasetId
+
+  while (!TERMINAL.has(status)) {
+    if (Date.now() > deadline) throw new AdapterError(adapterId, `run ${run.id} did not finish in time`)
+    await new Promise((resolve) => setTimeout(resolve, 3_000))
+    const polled = await fetchJson<{ data?: RunRecord }>(`${config.apify.baseUrl}/actor-runs/${run.id}`, {
+      headers: authHeaders(),
+      timeoutMs: 20_000,
+      adapterId,
+    })
+    status = polled.data?.status ?? status
+    datasetId = polled.data?.defaultDatasetId ?? datasetId
+  }
+
+  if (status !== 'SUCCEEDED') throw new AdapterError(adapterId, `run ${run.id} ended ${status}`)
+
+  const items = await fetchJson<unknown>(`${config.apify.baseUrl}/datasets/${datasetId}/items?limit=${maxItems}`, {
+    headers: authHeaders(),
+    timeoutMs: 60_000,
+    adapterId,
+  })
+  return datasetItems(items)
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE ADAPTERS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Keyword post search. The one adapter `scraping.linkedin.fetch` calls. */
 export const apifyPostSearch: ServiceAdapter<ApifyPostSearchInput, RawPost[]> = {
   id: 'apify.postSearch',
   label: 'Apify · LinkedIn post search',
@@ -300,20 +478,11 @@ export const apifyPostSearch: ServiceAdapter<ApifyPostSearchInput, RawPost[]> = 
   async run(input: ApifyPostSearchInput): Promise<RawPost[]> {
     if (!this.isConfigured()) throw new AdapterError(this.id, UNAVAILABLE)
 
-    const payload = await fetchJson<unknown>(runSyncUrl(config.apify.postsActor), {
-      method: 'POST',
-      timeoutMs: config.apify.runTimeoutMs,
-      adapterId: 'apify.postSearch',
-      body: {
-        searchQuery: input.keyword,
-        maxItems: Math.min(input.maxItems, config.apify.maxItemsPerKeyword),
-        sortBy: input.sortBy,
-        datePosted: input.datePosted,
-        memory: config.apify.memoryMbytes,
-      },
-    })
+    const actor = config.apify.postsActor
+    const maxItems = Math.min(input.maxItems, config.apify.maxItemsPerKeyword)
+    const items = await runActor(actor, postSearchBody(actor, { ...input, maxItems }), maxItems, this.id)
 
-    const posts = datasetItems(payload)
+    const posts = items
       .map((item) => normalisePost(item, input.keyword, 'LinkedIn · Research Feed'))
       .filter((p): p is RawPost => p !== null)
       .filter((p) => p.authorFollowers >= input.minAuthorFollowers)
@@ -321,20 +490,13 @@ export const apifyPostSearch: ServiceAdapter<ApifyPostSearchInput, RawPost[]> = 
     if (posts.length === 0) {
       // An empty live result is indistinguishable from a broken actor from the
       // caller's side, so say so rather than reporting a successful zero.
-      throw new AdapterError(
-        this.id,
-        `actor returned no usable items for "${input.keyword}"`,
-      )
+      throw new AdapterError(this.id, `actor returned no usable items for "${input.keyword}"`)
     }
-
     return posts
   },
 }
 
-/**
- * Hashtag feed. An independent volume reading, not biased by the keyword query
- * that surfaced the tag.
- */
+/** Hashtag feed — an independent volume reading, not biased by the keyword query. */
 export const apifyHashtagFeed: ServiceAdapter<ApifyHashtagInput, RawPost[]> = {
   id: 'apify.hashtagFeed',
   label: 'Apify · LinkedIn hashtag feed',
@@ -351,18 +513,10 @@ export const apifyHashtagFeed: ServiceAdapter<ApifyHashtagInput, RawPost[]> = {
     if (!this.isConfigured()) throw new AdapterError(this.id, UNAVAILABLE)
 
     const tag = input.hashtag.replace(/^#/, '')
-    const payload = await fetchJson<unknown>(runSyncUrl(config.apify.hashtagActor), {
-      method: 'POST',
-      timeoutMs: config.apify.runTimeoutMs,
-      adapterId: 'apify.hashtagFeed',
-      body: {
-        hashtag: tag,
-        maxItems: input.maxItems,
-        memory: config.apify.memoryMbytes,
-      },
-    })
+    const actor = config.apify.hashtagActor
+    const items = await runActor(actor, hashtagBody(actor, tag, input.maxItems), input.maxItems, this.id)
 
-    const posts = datasetItems(payload)
+    const posts = items
       .map((item) => normalisePost(item, `#${tag}`, 'LinkedIn · Hashtag Feeds'))
       .filter((p): p is RawPost => p !== null)
 
@@ -373,10 +527,10 @@ export const apifyHashtagFeed: ServiceAdapter<ApifyHashtagInput, RawPost[]> = {
   },
 }
 
-/** Competitor profile posts. */
+/** Competitor company or profile posts. */
 export const apifyProfilePosts: ServiceAdapter<ApifyProfileInput, CompetitorPost[]> = {
   id: 'apify.profilePosts',
-  label: 'Apify · LinkedIn profile posts',
+  label: 'Apify · LinkedIn company posts',
 
   isConfigured(): boolean {
     return config.apify.configured
@@ -389,42 +543,26 @@ export const apifyProfilePosts: ServiceAdapter<ApifyProfileInput, CompetitorPost
   async run(input: ApifyProfileInput): Promise<CompetitorPost[]> {
     if (!this.isConfigured()) throw new AdapterError(this.id, UNAVAILABLE)
 
-    const payload = await fetchJson<unknown>(runSyncUrl(config.apify.profileActor), {
-      method: 'POST',
-      timeoutMs: config.apify.runTimeoutMs,
-      adapterId: 'apify.profilePosts',
-      body: {
-        username: input.handle,
-        maxItems: input.maxItems,
-        memory: config.apify.memoryMbytes,
-      },
-    })
+    const actor = config.apify.profileActor
+    const raw = await runActor(actor, profileBody(actor, input), input.maxItems, this.id)
 
-    const items = datasetItems(payload)
+    const items = raw
       .map((item) => normalisePost(item, input.competitorName, 'Competitor Pages'))
       .filter((p): p is RawPost => p !== null)
 
     if (items.length === 0) {
-      throw new AdapterError(
-        this.id,
-        `profile actor returned no usable items for ${input.handle}`,
-      )
+      throw new AdapterError(this.id, `company actor returned no usable items for ${input.handle}`)
     }
 
     // Engagement index is relative to this competitor's own batch, so a large
     // account and a small one are comparable.
-    const maxEngagement = Math.max(
-      ...items.map((p) => p.reactions + p.comments * 3 + p.reposts * 5),
-      1,
-    )
+    const maxEngagement = Math.max(...items.map((p) => p.reactions + p.comments * 3 + p.reposts * 5), 1)
 
     return items.map((p) => ({
       competitor: input.competitorName,
       text: p.text,
       format: inferFormat(p.text),
-      engagementIndex: Math.round(
-        ((p.reactions + p.comments * 3 + p.reposts * 5) / maxEngagement) * 100,
-      ),
+      engagementIndex: Math.round(((p.reactions + p.comments * 3 + p.reposts * 5) / maxEngagement) * 100),
       postedAt: p.postedAt,
       topics: p.hashtags.map((h) => h.toLowerCase()),
     }))

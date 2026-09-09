@@ -76,16 +76,16 @@ import {
   runCommand,
   resumeConfirmed,
   type CommandFrame,
-} from './jarvis/index'
-import { composeBrief, sweepForNotices } from './jarvis/watch'
+} from './assistant/index'
+import { composeBrief, sweepForNotices } from './assistant/watch'
 import {
   latestBrief,
   latestConversation,
   listConversations,
   pendingConfirmation,
-} from './db/jarvis-repo'
-import { capabilities, registeredToolIds } from './jarvis/tools/index'
-import { availableImageModels } from './agents/skills/image-models/index'
+} from './db/assistant-repo'
+import { capabilities, registeredToolIds } from './assistant/tools/index'
+import { availableImageModels } from './agents/image/image-models/index'
 import { integrationReport } from './integrations'
 import {
   applyInstruction,
@@ -156,10 +156,10 @@ export function createApiRouter(): Router {
         apify: { configured: statuses.apify.configured, reason: statuses.apify.reason },
         parallel: { configured: statuses.parallel.configured, reason: statuses.parallel.reason },
         gcp: { configured: statuses.gcp.configured, reason: statuses.gcp.reason },
-        jarvis: {
-          provider: config.jarvis.provider,
-          configured: statuses.jarvis.configured,
-          reason: statuses.jarvis.reason,
+        assistant: {
+          provider: config.assistant.provider,
+          configured: statuses.assistant.configured,
+          reason: statuses.assistant.reason,
         },
         images: availableImageModels(),
       },
@@ -280,9 +280,9 @@ export function createApiRouter(): Router {
     route(async (_req, _res, workspaceId) => buildState(workspaceId)),
   )
 
-  /* ── JARVIS ──────────────────────────────────────────────────────────────── */
+  /* ── Ethara ──────────────────────────────────────────────────────────────── */
 
-  api.post('/jarvis/command', async (req, res) => {
+  api.post('/assistant/command', async (req, res) => {
     try {
       const workspaceId = await currentWorkspaceId()
       const body = parseBody(
@@ -325,7 +325,7 @@ export function createApiRouter(): Router {
     }
   })
 
-  api.post('/jarvis/confirm', async (req, res) => {
+  api.post('/assistant/confirm', async (req, res) => {
     try {
       const workspaceId = await currentWorkspaceId()
       const body = parseBody(
@@ -366,19 +366,19 @@ export function createApiRouter(): Router {
   })
 
   api.get(
-    '/jarvis/conversation/:id',
+    '/assistant/conversation/:id',
     route(async (req) => conversationTranscript(String(req.params.id), 60)),
   )
 
   api.get(
-    '/jarvis/conversations',
+    '/assistant/conversations',
     route(async (_req, _res, workspaceId) => ({
       conversations: await listConversations(workspaceId, 40),
     })),
   )
 
   api.get(
-    '/jarvis/brief',
+    '/assistant/brief',
     route(async (_req, _res, workspaceId) => ({
       brief: await latestBrief(workspaceId),
       notices: await sweepForNotices(workspaceId),
@@ -386,7 +386,7 @@ export function createApiRouter(): Router {
   )
 
   api.post(
-    '/jarvis/brief',
+    '/assistant/brief',
     route(async (req, _res, workspaceId) => {
       const body = parseBody(
         z.object({ role: z.enum(['marketing', 'leadership']).default('marketing') }),
@@ -404,7 +404,7 @@ export function createApiRouter(): Router {
   )
 
   api.get(
-    '/jarvis/suggestions',
+    '/assistant/suggestions',
     route(async (req) => {
       const q = typeof req.query.q === 'string' ? req.query.q : ''
       const matches = q.trim().length === 0 ? [] : matchTools(q).slice(0, 6)
@@ -972,6 +972,77 @@ export function createApiRouter(): Router {
     }),
   )
 
+  /* ── TRENDS — the trending set, with the URLs to open ────────────────── */
+
+  async function trendsPayload(workspaceId: string) {
+    const [keywords, hashtags] = await Promise.all([
+      trendingKeywords(workspaceId, 5),
+      listHashtags(workspaceId, { top: true, limit: config.knowledge.hashtagCount }),
+    ])
+    return {
+      generatedAt: new Date().toISOString(),
+      keywords: keywords.map((r, i) => ({
+        rank: r.rank ?? i + 1,
+        term: r.term,
+        trendScore: r.trend_score,
+        postCount: r.post_count,
+        totalEngagement: r.total_engagement,
+        growthPct: Number(r.growth_pct),
+        reason: r.trend_reason,
+        searchUrl: r.search_url,
+        topPostUrl: r.top_post_url,
+        topPostTitle: r.top_post_title,
+      })),
+      hashtags: hashtags.map((r, i) => ({
+        rank: r.rank ?? i + 1,
+        tag: `#${r.display_tag}`,
+        keyword: r.keyword_term,
+        score: r.hashtag_score,
+        postCount: r.post_count,
+        engagementPerPost: Number(r.engagement_per_post),
+        validation: r.validation,
+        feedUrl: r.feed_url ?? `https://www.linkedin.com/feed/hashtag/${encodeURIComponent(r.tag)}/`,
+        topPostUrl: r.top_post_url,
+        topPostTitle: r.top_post_title,
+      })),
+    }
+  }
+
+  api.get(
+    '/trends',
+    route(async (_req, _res, workspaceId) => trendsPayload(workspaceId)),
+  )
+
+  api.get('/trends.csv', async (_req, res) => {
+    try {
+      const payload = await trendsPayload(await currentWorkspaceId())
+      const cell = (v: unknown): string => {
+        const t = v === null || v === undefined ? '' : String(v)
+        return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t
+      }
+      const lines = ['kind,rank,name,keyword,score,posts,url,top_post_url,top_post_title,reason']
+      for (const k of payload.keywords) {
+        lines.push(
+          ['keyword', k.rank, k.term, '', k.trendScore, k.postCount, k.searchUrl, k.topPostUrl, k.topPostTitle, k.reason]
+            .map(cell)
+            .join(','),
+        )
+      }
+      for (const h of payload.hashtags) {
+        lines.push(
+          ['hashtag', h.rank, h.tag, h.keyword, h.score, h.postCount, h.feedUrl, h.topPostUrl, h.topPostTitle, '']
+            .map(cell)
+            .join(','),
+        )
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+      res.setHeader('Content-Disposition', 'attachment; filename="ethara-trends.csv"')
+      res.send(lines.join('\r\n'))
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
   api.get(
     '/brand',
     route(async () => ({ brand: BRAND, rules: BRAND_RULES })),
@@ -1135,7 +1206,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     sources,
     pipeline: run,
     platformLabels: PLATFORM_LABEL,
-    jarvis: {
+    assistant: {
       conversation,
       turns: transcript.turns,
       brief,
@@ -1150,7 +1221,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     },
     mode: {
       publishMode: config.core.publishMode,
-      jarvisProvider: config.jarvis.provider,
+      assistantProvider: config.assistant.provider,
       integrations: integrationReport().adapters,
     },
   }

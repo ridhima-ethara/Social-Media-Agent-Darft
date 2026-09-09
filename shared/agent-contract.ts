@@ -26,9 +26,9 @@ export const STAGE_IDS = [
 
 export type StageId = (typeof STAGE_IDS)[number]
 
-/** The twelve agents. `jarvis` is the command plane; the other eleven are specialists. */
+/** The twelve agents. `assistant` is the command plane; the other eleven are specialists. */
 export const AGENT_IDS = [
-  'jarvis',
+  'assistant',
   'scraping',
   'validation',
   'analysis',
@@ -163,7 +163,7 @@ export interface SkillContext {
   emit(type: string, message: string, data?: Record<string, unknown>): void
   /** Pipeline run id, when this skill is running inside one. */
   runId?: string
-  /** The JARVIS turn that triggered this, when applicable. */
+  /** The command plane turn that triggered this, when applicable. */
   turnId?: string
 }
 
@@ -236,7 +236,7 @@ export type Sourced<T> = T & {
    DOMAIN VOCABULARY
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export const PLATFORMS = ['linkedin', 'instagram', 'x'] as const
+export const PLATFORMS = ['linkedin', 'instagram', 'x', 'facebook'] as const
 export type Platform = (typeof PLATFORMS)[number]
 
 /** Exactly one of these lands on every candidate. Nothing is ever deleted. */

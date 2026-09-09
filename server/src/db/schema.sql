@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS sources (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   name         TEXT NOT NULL,
-  kind         TEXT NOT NULL CHECK (kind IN ('linkedin','instagram','x','web')),
+  kind         TEXT NOT NULL CHECK (kind IN ('linkedin','instagram','x','facebook','web')),
   source_type  TEXT NOT NULL CHECK (source_type IN ('Social','News','Competitor','Community','Website')),
   url          TEXT,
   trusted      BOOLEAN NOT NULL DEFAULT false,
@@ -171,7 +171,7 @@ CREATE TABLE IF NOT EXISTS content_ideas (
   title                 TEXT NOT NULL,
   description           TEXT,
   source_topic          TEXT,
-  platform              TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x')),
+  platform              TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x','facebook')),
   alt_platforms         JSONB NOT NULL DEFAULT '[]'::jsonb,
   scheduled_date        DATE NOT NULL,
   scheduled_time        TEXT NOT NULL DEFAULT '10:30 AM',
@@ -205,7 +205,7 @@ CREATE INDEX IF NOT EXISTS content_ideas_workspace_status_idx
 CREATE TABLE IF NOT EXISTS drafts (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   idea_id      UUID NOT NULL REFERENCES content_ideas(id) ON DELETE CASCADE,
-  platform     TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x')),
+  platform     TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x','facebook')),
   body         TEXT NOT NULL,
   revision     INTEGER NOT NULL DEFAULT 1,
   generated_by TEXT,
@@ -222,7 +222,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS drafts_idea_platform_key
 CREATE TABLE IF NOT EXISTS media_assets (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   idea_id         UUID NOT NULL REFERENCES content_ideas(id) ON DELETE CASCADE,
-  platform        TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x')),
+  platform        TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x','facebook')),
   kind            TEXT NOT NULL DEFAULT 'single' CHECK (kind IN ('single','carousel')),
   concept         TEXT,
   canvas          TEXT,
@@ -248,7 +248,7 @@ CREATE TABLE IF NOT EXISTS posts (
   workspace_id            UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   idea_id                 UUID REFERENCES content_ideas(id) ON DELETE SET NULL,
   title                   TEXT NOT NULL,
-  platform                TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x')),
+  platform                TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x','facebook')),
   content                 TEXT NOT NULL,
   status                  TEXT NOT NULL DEFAULT 'published'
                           CHECK (status IN ('published','failed','scheduled')),
@@ -286,7 +286,7 @@ CREATE INDEX IF NOT EXISTS post_metrics_post_captured_idx
 CREATE TABLE IF NOT EXISTS platform_analytics (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  platform     TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x')),
+  platform     TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x','facebook')),
   month        TEXT NOT NULL,
   label        TEXT,
   -- An unreported period is EXCLUDED from averages, never counted as zero.
@@ -303,7 +303,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS platform_analytics_key
 CREATE TABLE IF NOT EXISTS knowledge_builds (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id        UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  trigger             TEXT NOT NULL DEFAULT 'manual' CHECK (trigger IN ('cron','manual','jarvis')),
+  trigger             TEXT NOT NULL DEFAULT 'manual' CHECK (trigger IN ('cron','manual','assistant')),
   status              TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')),
   hashtags_researched INTEGER NOT NULL DEFAULT 0,
   entries_written     INTEGER NOT NULL DEFAULT 0,
@@ -335,7 +335,7 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
   evidence_count INTEGER NOT NULL DEFAULT 1,
   active         BOOLEAN NOT NULL DEFAULT true,
   origin         TEXT NOT NULL DEFAULT 'manual'
-                 CHECK (origin IN ('brand','research','learned','manual','jarvis')),
+                 CHECK (origin IN ('brand','research','learned','manual','assistant')),
   build_id       UUID REFERENCES knowledge_builds(id) ON DELETE SET NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -379,7 +379,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   trigger      TEXT NOT NULL DEFAULT 'manual',
   status       TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')),
-  -- The JARVIS turn that started this, when it was not a schedule or a click.
+  -- The command plane turn that started this, when it was not a schedule or a click.
   turn_id      UUID,
   started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at  TIMESTAMPTZ,
@@ -489,10 +489,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS lineage_edges_unique
   ON lineage_edges (workspace_id, from_type, from_id, to_type, to_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- JARVIS · the command plane's own record
+-- Ethara · the command plane's own record
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE TABLE IF NOT EXISTS jarvis_conversations (
+CREATE TABLE IF NOT EXISTS assistant_conversations (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   actor        TEXT NOT NULL,
@@ -502,14 +502,14 @@ CREATE TABLE IF NOT EXISTS jarvis_conversations (
   last_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS jarvis_conversations_workspace_last_idx
-  ON jarvis_conversations (workspace_id, last_at DESC);
+CREATE INDEX IF NOT EXISTS assistant_conversations_workspace_last_idx
+  ON assistant_conversations (workspace_id, last_at DESC);
 
-CREATE TABLE IF NOT EXISTS jarvis_turns (
+CREATE TABLE IF NOT EXISTS assistant_turns (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  conversation_id UUID NOT NULL REFERENCES jarvis_conversations(id) ON DELETE CASCADE,
+  conversation_id UUID NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
   seq             INTEGER NOT NULL,
-  speaker         TEXT NOT NULL CHECK (speaker IN ('operator','jarvis')),
+  speaker         TEXT NOT NULL CHECK (speaker IN ('operator','assistant')),
   utterance       TEXT,
   channel         TEXT NOT NULL DEFAULT 'text' CHECK (channel IN ('text','voice','ambient','cron')),
   intent          JSONB,
@@ -524,12 +524,12 @@ CREATE TABLE IF NOT EXISTS jarvis_turns (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS jarvis_turns_conversation_seq_idx
-  ON jarvis_turns (conversation_id, seq);
+CREATE INDEX IF NOT EXISTS assistant_turns_conversation_seq_idx
+  ON assistant_turns (conversation_id, seq);
 
-CREATE TABLE IF NOT EXISTS jarvis_steps (
+CREATE TABLE IF NOT EXISTS assistant_steps (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  turn_id        UUID NOT NULL REFERENCES jarvis_turns(id) ON DELETE CASCADE,
+  turn_id        UUID NOT NULL REFERENCES assistant_turns(id) ON DELETE CASCADE,
   idx            INTEGER NOT NULL,
   tool_id        TEXT NOT NULL,
   risk           TEXT NOT NULL DEFAULT 'safe' CHECK (risk IN ('safe','mutating','irreversible')),
@@ -546,12 +546,12 @@ CREATE TABLE IF NOT EXISTS jarvis_steps (
   finished_at    TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS jarvis_steps_turn_idx
-  ON jarvis_steps (turn_id, idx);
+CREATE INDEX IF NOT EXISTS assistant_steps_turn_idx
+  ON assistant_steps (turn_id, idx);
 
-CREATE TABLE IF NOT EXISTS jarvis_confirmations (
+CREATE TABLE IF NOT EXISTS assistant_confirmations (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  turn_id     UUID NOT NULL REFERENCES jarvis_turns(id) ON DELETE CASCADE,
+  turn_id     UUID NOT NULL REFERENCES assistant_turns(id) ON DELETE CASCADE,
   token       TEXT NOT NULL UNIQUE,
   -- The STORED plan. Resuming runs this, never a re-parse of the utterance,
   -- so what the human approved is exactly what executes.
@@ -564,10 +564,10 @@ CREATE TABLE IF NOT EXISTS jarvis_confirmations (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS jarvis_confirmations_turn_idx
-  ON jarvis_confirmations (turn_id);
+CREATE INDEX IF NOT EXISTS assistant_confirmations_turn_idx
+  ON assistant_confirmations (turn_id);
 
-CREATE TABLE IF NOT EXISTS jarvis_briefs (
+CREATE TABLE IF NOT EXISTS assistant_briefs (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id   UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   trigger        TEXT NOT NULL DEFAULT 'manual' CHECK (trigger IN ('cron','manual')),
@@ -577,8 +577,8 @@ CREATE TABLE IF NOT EXISTS jarvis_briefs (
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS jarvis_briefs_workspace_created_idx
-  ON jarvis_briefs (workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS assistant_briefs_workspace_created_idx
+  ON assistant_briefs (workspace_id, created_at DESC);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- FORWARD-COMPATIBILITY GUARDS
@@ -600,3 +600,31 @@ ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS evidence_count INTEGER NO
 ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS build_id UUID;
 ALTER TABLE scraped_items   ADD COLUMN IF NOT EXISTS capture_source TEXT NOT NULL DEFAULT 'fixture';
 ALTER TABLE posts           ADD COLUMN IF NOT EXISTS publish_mode TEXT NOT NULL DEFAULT 'demo';
+
+-- ── URLs on trend signals ──────────────────────────────────────────────────
+-- A trending keyword or hashtag that cannot be opened is a claim, not a lead.
+-- ADD COLUMN IF NOT EXISTS, so an existing database migrates in place.
+ALTER TABLE hashtags        ADD COLUMN IF NOT EXISTS feed_url       TEXT;
+ALTER TABLE hashtags        ADD COLUMN IF NOT EXISTS top_post_url   TEXT;
+ALTER TABLE hashtags        ADD COLUMN IF NOT EXISTS top_post_title TEXT;
+ALTER TABLE keyword_signals ADD COLUMN IF NOT EXISTS search_url     TEXT;
+ALTER TABLE keyword_signals ADD COLUMN IF NOT EXISTS top_post_url   TEXT;
+ALTER TABLE keyword_signals ADD COLUMN IF NOT EXISTS top_post_title TEXT;
+
+-- ── Facebook as a fourth platform (ADR-006) ────────────────────────────────
+-- CREATE TABLE IF NOT EXISTS leaves an existing table's CHECK untouched, so the
+-- constraint is re-created by name. Idempotent: safe to run on every migrate.
+ALTER TABLE sources ALTER COLUMN kind DROP NOT NULL;
+ALTER TABLE sources DROP CONSTRAINT IF EXISTS sources_kind_check;
+ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK (kind IN ('linkedin','instagram','x','facebook','web'));
+ALTER TABLE sources ALTER COLUMN kind SET NOT NULL;
+ALTER TABLE content_ideas      DROP CONSTRAINT IF EXISTS content_ideas_platform_check;
+ALTER TABLE content_ideas      ADD CONSTRAINT content_ideas_platform_check CHECK (platform IN ('linkedin','instagram','x','facebook'));
+ALTER TABLE drafts             DROP CONSTRAINT IF EXISTS drafts_platform_check;
+ALTER TABLE drafts             ADD CONSTRAINT drafts_platform_check CHECK (platform IN ('linkedin','instagram','x','facebook'));
+ALTER TABLE media_assets       DROP CONSTRAINT IF EXISTS media_assets_platform_check;
+ALTER TABLE media_assets       ADD CONSTRAINT media_assets_platform_check CHECK (platform IN ('linkedin','instagram','x','facebook'));
+ALTER TABLE posts              DROP CONSTRAINT IF EXISTS posts_platform_check;
+ALTER TABLE posts              ADD CONSTRAINT posts_platform_check CHECK (platform IN ('linkedin','instagram','x','facebook'));
+ALTER TABLE platform_analytics DROP CONSTRAINT IF EXISTS platform_analytics_platform_check;
+ALTER TABLE platform_analytics ADD CONSTRAINT platform_analytics_platform_check CHECK (platform IN ('linkedin','instagram','x','facebook'));

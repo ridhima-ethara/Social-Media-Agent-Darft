@@ -1,50 +1,52 @@
 /**
- * The Ethara mark, as path data.
+ * THE ETHARA EMBLEM
  *
- * Kept as data rather than JSX so the same geometry serves the React logo
- * component, the server-side SVG image renderer and the boot sequence without
- * three copies drifting apart.
+ * The company mark is the actual file at `public/brand/emblem.jpeg`, embedded
+ * as a data URI by `scripts/build-brand-assets.ts`. Nothing here draws it —
+ * this module only places it, so the sidebar, the creative renderers on both
+ * tiers, the previews and the favicon show the identical pixels.
  *
- * Viewbox is 64×64 for every path below.
+ * The JPEG is square with white corners; every consumer clips it to its disc.
+ * The emblem is theme-invariant by design: a logo that changed with the theme
+ * would not be the logo.
  */
 
-export const MARK_VIEWBOX = '0 0 64 64'
+import { EMBLEM_DATA_URI, EMBLEM_SOURCE_SIZE } from './emblem-data'
 
-export interface MarkRing {
-  /** Radius in the 64×64 box. */
-  r: number
-  /** Stroke width. */
-  w: number
-  /** Circumference, precomputed for stroke-dasharray draw-in animations. */
-  circumference: number
-  opacity: number
-}
+export { EMBLEM_DATA_URI, EMBLEM_SOURCE_SIZE }
 
-const ring = (r: number, w: number, opacity: number): MarkRing => ({
-  r,
-  w,
-  circumference: Number((2 * Math.PI * r).toFixed(2)),
-  opacity,
-})
+export const EMBLEM_VIEWBOX = '0 0 100 100'
 
-/** Outer to inner. The sign-in and boot animations draw these in order. */
-export const MARK_RINGS: MarkRing[] = [ring(19, 3.5, 1), ring(11, 2, 0.75)]
+/** The disc ground behind the image, for a ring drawn around it. */
+export const EMBLEM_COLOURS = {
+  disc: '#0e1713',
+  ink: '#ffffff',
+} as const
 
-export const MARK_CENTRE = { cx: 32, cy: 32, r: 4.5 }
+let clipCounter = 0
 
 /**
- * The full mark as a single path, for contexts that cannot nest elements
- * (favicons, the OG image, canvas fallbacks).
+ * The emblem as SVG markup, centred at (cx, cy) at `size` px, for contexts that
+ * assemble SVG as a string — the creative renderers and the favicon.
+ *
+ * Each call gets its own clipPath id, so two emblems in one document cannot
+ * collide. Deterministic given the counter, which resets per process.
  */
-export const MARK_PATH =
-  'M32 13a19 19 0 1 0 0 38 19 19 0 0 0 0-38m0 3.5a15.5 15.5 0 1 1 0 31 15.5 15.5 0 0 1 0-31' +
-  'M32 21a11 11 0 1 0 0 22 11 11 0 0 0 0-22m0 2a9 9 0 1 1 0 18 9 9 0 0 1 0-18' +
-  'M32 27.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9'
+export function emblemMarkup(cx: number, cy: number, size: number): string {
+  clipCounter += 1
+  const id = `emblem-clip-${clipCounter}`
+  const x = cx - size / 2
+  const y = cy - size / 2
+  return (
+    `<clipPath id="${id}"><circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${(size / 2).toFixed(2)}"/></clipPath>` +
+    `<image href="${EMBLEM_DATA_URI}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${size.toFixed(2)}" height="${size.toFixed(2)}" clip-path="url(#${id})" preserveAspectRatio="xMidYMid slice"/>`
+  )
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   THE JARVIS CORE
+   THE Ethara CORE
    Three concentric rings plus a 24-mark tick ring. The tick ring doubles as
-   the microphone waveform when JARVIS is listening.
+   the microphone waveform when Ethara is listening.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export const CORE_VIEWBOX = '0 0 100 100'

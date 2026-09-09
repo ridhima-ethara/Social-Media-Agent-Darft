@@ -27,3 +27,9 @@ logs/
 # misc
 coverage/
 .turbo/
+
+# ── Runtime skills are a BUILD ARTIFACT ──────────────────────────────────────
+# packages/skills/ is the versioned source of truth. scripts/build-skills.ts
+# copies it here at build time, and the runtime process runs with cwd set to
+# packages/runtime/ so the Agent SDK finds them. Never edit, never commit.
+packages/runtime/.claude/

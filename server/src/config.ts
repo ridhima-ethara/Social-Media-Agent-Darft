@@ -71,7 +71,7 @@ function has(key: string): boolean {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export type PublishMode = 'demo' | 'live'
-export type JarvisProvider = 'gcp' | 'deterministic'
+export type AssistantProvider = 'gcp' | 'deterministic'
 
 export const config = {
   /* ── Core ───────────────────────────────────────────────────────────────── */
@@ -97,42 +97,42 @@ export const config = {
     },
   },
 
-  /* ── JARVIS · command plane ─────────────────────────────────────────────── */
-  jarvis: {
+  /* ── Ethara · command plane ─────────────────────────────────────────────── */
+  assistant: {
     /**
      * Blank or 'deterministic' runs the built-in grammar parser and template
      * narrator: slightly blunter, fully working, every tool still reachable.
      */
-    get provider(): JarvisProvider {
-      return str('JARVIS_MODEL_PROVIDER').toLowerCase() === 'gcp' ? 'gcp' : 'deterministic'
+    get provider(): AssistantProvider {
+      return str('ASSISTANT_MODEL_PROVIDER').toLowerCase() === 'gcp' ? 'gcp' : 'deterministic'
     },
     get plannerModel(): string {
-      return str('JARVIS_PLANNER_MODEL', 'gemini-2.5-pro')
+      return str('ASSISTANT_PLANNER_MODEL', 'gemini-2.5-pro')
     },
     get narratorModel(): string {
-      return str('JARVIS_NARRATOR_MODEL', 'gemini-2.5-flash')
+      return str('ASSISTANT_NARRATOR_MODEL', 'gemini-2.5-flash')
     },
     get maxPlanSteps(): number {
-      return int('JARVIS_MAX_PLAN_STEPS', 8)
+      return int('ASSISTANT_MAX_PLAN_STEPS', 8)
     },
     get confirmTtlSeconds(): number {
-      return int('JARVIS_CONFIRM_TTL_SECONDS', 180)
+      return int('ASSISTANT_CONFIRM_TTL_SECONDS', 180)
     },
     get historyTurns(): number {
-      return int('JARVIS_HISTORY_TURNS', 12)
+      return int('ASSISTANT_HISTORY_TURNS', 12)
     },
     get briefCron(): string {
-      return str('JARVIS_BRIEF_CRON', '0 9 * * 1-5')
+      return str('ASSISTANT_BRIEF_CRON', '0 9 * * 1-5')
     },
     get watchIntervalMs(): number {
-      return int('JARVIS_WATCH_INTERVAL_MS', 60000)
+      return int('ASSISTANT_WATCH_INTERVAL_MS', 60000)
     },
     /** A server hint only. The browser decides whether speech is available. */
     get voiceEnabled(): boolean {
-      return flag('JARVIS_VOICE_ENABLED', true)
+      return flag('ASSISTANT_VOICE_ENABLED', true)
     },
     get addressStyle(): 'surname' | 'firstname' | 'role' {
-      const raw = str('JARVIS_ADDRESS_STYLE', 'surname')
+      const raw = str('ASSISTANT_ADDRESS_STYLE', 'surname')
       return raw === 'firstname' || raw === 'role' ? raw : 'surname'
     },
   },
@@ -146,16 +146,13 @@ export const config = {
       return str('APIFY_BASE_URL', 'https://api.apify.com/v2')
     },
     get postsActor(): string {
-      return str(
-        'APIFY_LINKEDIN_POSTS_ACTOR',
-        'apimaestro~linkedin-posts-search-scraper-no-cookies',
-      )
+      return str('APIFY_LINKEDIN_POSTS_ACTOR', 'harvestapi~linkedin-post-search')
     },
     get hashtagActor(): string {
-      return str('APIFY_LINKEDIN_HASHTAG_ACTOR', 'apimaestro~linkedin-hashtag-posts-scraper')
+      return str('APIFY_LINKEDIN_HASHTAG_ACTOR', 'harvestapi~linkedin-post-search')
     },
     get profileActor(): string {
-      return str('APIFY_LINKEDIN_PROFILE_ACTOR', 'apimaestro~linkedin-profile-posts-scraper')
+      return str('APIFY_LINKEDIN_PROFILE_ACTOR', 'harvestapi~linkedin-company-posts')
     },
     get runTimeoutMs(): number {
       return int('APIFY_RUN_TIMEOUT_MS', 180000)
@@ -296,23 +293,23 @@ export function integrationStatuses(): {
   parallel: IntegrationStatus
   gcp: IntegrationStatus
   zImage: IntegrationStatus
-  jarvis: IntegrationStatus & { provider: JarvisProvider }
+  assistant: IntegrationStatus & { provider: AssistantProvider }
 } {
   const gcpConfigured = config.gcp.configured
-  const jarvisGcp = config.jarvis.provider === 'gcp'
+  const assistantGcp = config.assistant.provider === 'gcp'
   return {
     apify: statusFor(config.apify.configured, 'APIFY_API_TOKEN'),
     parallel: statusFor(config.parallel.configured, 'PARALLEL_API_KEY'),
     gcp: statusFor(gcpConfigured, 'GCP_API_KEY'),
     zImage: statusFor(config.zImage.configured, 'Z_IMAGE_ENDPOINT'),
-    jarvis: {
-      provider: config.jarvis.provider,
-      configured: jarvisGcp && gcpConfigured,
-      reason: !jarvisGcp
-        ? 'JARVIS_MODEL_PROVIDER is not set to gcp — running on the deterministic parser and template narrator'
+    assistant: {
+      provider: config.assistant.provider,
+      configured: assistantGcp && gcpConfigured,
+      reason: !assistantGcp
+        ? 'ASSISTANT_MODEL_PROVIDER is not set to gcp — running on the deterministic parser and template narrator'
         : gcpConfigured
           ? 'Configured'
-          : 'JARVIS_MODEL_PROVIDER is gcp but GCP_API_KEY is not set — falling back to the deterministic parser',
+          : 'ASSISTANT_MODEL_PROVIDER is gcp but GCP_API_KEY is not set — falling back to the deterministic parser',
     },
   }
 }
@@ -332,7 +329,7 @@ export function describeConfiguration(): string[] {
     `workspace   ${config.core.workspaceSlug}`,
     `publish     ${config.core.publishMode}`,
     `timezone    ${config.core.tz}`,
-    `jarvis      ${s.jarvis.provider}${s.jarvis.configured ? '' : ' (deterministic fallback)'}`,
+    `assistant      ${s.assistant.provider}${s.assistant.configured ? '' : ' (deterministic fallback)'}`,
     `apify       ${s.apify.configured ? 'live' : 'fixtures'}`,
     `parallel    ${s.parallel.configured ? 'live' : 'fixtures'}`,
     `gcp         ${s.gcp.configured ? 'live' : 'template writer'}`,

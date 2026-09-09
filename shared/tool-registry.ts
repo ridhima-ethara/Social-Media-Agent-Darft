@@ -1,5 +1,5 @@
 /**
- * THE TOOL REGISTRY — JARVIS's entire surface of action.
+ * THE TOOL REGISTRY — the command plane's entire surface of action.
  *
  * There is no path from an utterance to the database that does not pass through
  * this file. Every tool declares its risk class, its argument schema and the
