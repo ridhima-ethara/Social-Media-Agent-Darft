@@ -28,7 +28,6 @@
     "agents:run": "backend/.venv/bin/python backend/workflows/social_media_workflow.py",
     "agents:seed": "backend/.venv/bin/python backend/seed_brain.py",
     "agents:brain": "backend/.venv/bin/python backend/api.py brain",
-    "apify:probe": "tsx server/scripts/apify-probe.ts",
     "verify": "tsx scripts/verify.ts"
   },
   "dependencies": {

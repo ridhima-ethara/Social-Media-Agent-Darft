@@ -1,13 +1,18 @@
 /**
  * CRAWL4AI — keyword-driven, platform-scoped open-web capture.
  *
- * THE ONLY SCRAPING ADAPTER. Every live post the pipeline sees, on every
- * platform, comes from this module. There is no paid connector and no bundled
- * fixture corpus behind it — see the module note in `backend/tools/crawl.py`
- * for exactly what that means and does not mean per platform: LinkedIn and X
- * indexing is real and searchable via `site:`; Instagram render almost
- * nothing to a logged-out fetch, and that emptiness is reported, not papered
- * over with an invented post.
+ * THE ONLY SCRAPING ADAPTER. Every post the pipeline sees, on every platform,
+ * comes from this module. There is no paid connector behind it and no bundled
+ * fixture corpus underneath it: when a keyword returns nothing, the run says
+ * so rather than substituting invented material.
+ *
+ * PLATFORM SCOPING. `platform` narrows the search to one domain via a `site:`
+ * query — see the module note in `backend/tools/crawl.py` for exactly what that
+ * reads and what it does not. LinkedIn and X index a great deal of public
+ * content that a search engine will surface; Instagram and Facebook index far
+ * less, and that thinness is reported as an empty result, never papered over.
+ * `platform: undefined` reads the open web instead, which is what the
+ * knowledge-research path wants: a topic reading not tied to one platform.
  *
  * WHY A SUBPROCESS, NOT `fetchJson`. crawl4ai drives a headless browser, which
  * is a local process rather than an endpoint. `fetchJson` is the only HTTP path
@@ -16,14 +21,14 @@
  * its result from a temp file so the sidecar's progress log can never corrupt
  * the payload.
  *
- * ON THE ENGAGEMENT FIELDS (constraint 2 — `N/A` is never `0`). A web page has
- * no reaction count, and the sidecar refuses to invent one: it returns no
+ * ON THE ENGAGEMENT FIELDS (constraint 2 — `N/A` is never `0`). A crawled page
+ * has no reaction count, and the sidecar refuses to invent one: it returns no
  * engagement fields at all. `RawPost` requires the trio, so they arrive as 0 —
- * but these posts are captured with `sourceType: 'Website'`, and
- * `credibilityBase()` scores that tier on provenance (80) rather than on
- * engagement. The zeros are therefore never read as "this performed badly";
- * they are read as "this is not a social artefact". That distinction is carried
- * on the record itself via `sourceName`, so it survives into the UI.
+ * but these posts carry `metricsAvailable: false`, and `credibilityBase()`
+ * scores them on provenance rather than on engagement. The zeros are therefore
+ * never read as "this performed badly"; they are read as "this is not a
+ * metrics-bearing artefact". That distinction is carried on the record itself,
+ * so it survives into the UI.
  *
  * The bodies are untrusted. They reach nothing without passing through
  * `prepareEvidence()` at the point of capture, in `agents/scraping/handlers.ts`.
@@ -55,6 +60,18 @@ export interface RawPost {
   /** The keyword whose query surfaced this post. */
   keyword: string
   sourceName: string
+  /**
+   * The platform this row was captured FOR — `null` for the open-web tier.
+   * Recorded rather than re-derived from the URL, so a consumer never has to
+   * parse a host to know which platform lane an item belongs to.
+   */
+  platform: Platform | null
+  /**
+   * Whether the source could state engagement figures. Always false today,
+   * because a search-indexed page carries none. Present so that the zeros in
+   * the three count fields are readable as "not applicable" rather than "zero".
+   */
+  metricsAvailable: boolean
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -64,11 +81,8 @@ const BACKEND_DIR = join(HERE, '..', '..', '..', 'backend')
 export interface Crawl4aiSearchInput {
   keyword: string
   /**
-   * Scopes the search to one platform's domain via a `site:` query — see the
-   * module note in `backend/tools/crawl.py`. Omitted (or `undefined`) reads
-   * the open web instead, which is what the hashtag-expansion and knowledge
-   * research paths want: a hashtag or topic reading that is not itself tied
-   * to one platform's indexed content.
+   * Scopes the search to one platform's domain via a `site:` query. Omitted
+   * reads the open web instead.
    */
   platform?: Platform
   /** Pages to crawl for this keyword. */
@@ -91,6 +105,7 @@ interface WebEvidenceRow {
   capturedAt: string
   hashtags: string[]
   metricsAvailable: boolean
+  platform: string | null
 }
 
 interface CrawlPayload {
@@ -130,10 +145,16 @@ async function runSidecar(
     outPath,
   ]
 
+  // Blank is the sidecar's own spelling of "open web", so an unscoped search
+  // and a scoped one differ by a value rather than by the shape of the call.
+  if (input.platform !== undefined) args.push('--platform', input.platform)
+
   if (!config.crawl4ai.headless) args.push('--headed')
 
+  const scope = input.platform ?? 'open web'
+
   try {
-    const stderr = await new Promise<string>((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       // `cwd` is the backend dir so `-m tools.crawl` resolves, mirroring how
       // the runtime process sets cwd for the Agent SDK.
       const child = spawn(config.crawl4ai.python, args, {
@@ -150,7 +171,7 @@ async function runSidecar(
         reject(
           new AdapterError(
             adapterId,
-            `the crawl4ai sidecar exceeded ${config.crawl4ai.timeoutMs}ms for “${input.keyword}”`,
+            `the crawl4ai sidecar exceeded ${config.crawl4ai.timeoutMs}ms for “${input.keyword}” on ${scope}`,
           ),
         )
       }, config.crawl4ai.timeoutMs)
@@ -179,7 +200,7 @@ async function runSidecar(
         if (settled) return
         settled = true
         if (code === 0) {
-          resolve(errBuffer)
+          resolve()
           return
         }
         reject(
@@ -192,8 +213,6 @@ async function runSidecar(
         )
       })
     })
-
-    void stderr
 
     let parsed: CrawlPayload
     try {
@@ -213,40 +232,43 @@ async function runSidecar(
  * Maps a crawled page onto `RawPost`.
  *
  * `postedAt` uses the page's own stated date when it has one and the capture
- * time otherwise — and `sourceName` records which of the two it was, because a
- * freshness score computed from a capture time is a different claim from one
- * computed from a publication date, and the operator is entitled to know which
- * they are looking at.
+ * time otherwise — and `authorHeadline` records which of the two it was,
+ * because a freshness score computed from a capture time is a different claim
+ * from one computed from a publication date, and the operator is entitled to
+ * know which they are looking at.
  */
-function toRawPost(row: WebEvidenceRow, keyword: string): RawPost {
+function toRawPost(row: WebEvidenceRow, input: Crawl4aiSearchInput): RawPost {
   const dated = row.publishedAt !== null && row.publishedAt !== ''
+  const platform = input.platform ?? null
   return {
     externalId: row.externalId,
     text: row.text,
     authorName: row.authorName || row.siteName,
     authorHeadline: dated ? row.siteName : `${row.siteName} · no publication date stated`,
-    // Not a follower count and not claimed as one. A website has no followers.
+    // Not a follower count and not claimed as one. A crawled page has none.
     authorFollowers: 0,
     url: row.url,
     postedAt: dated ? (row.publishedAt as string) : row.capturedAt,
-    // See the module note: a page has no reactions. Scored on provenance.
+    // See the module note: a crawled page has no reactions. Scored on provenance.
     reactions: 0,
     comments: 0,
     reposts: 0,
     // Whatever the sidecar reported, and nothing more. There is deliberately no
     // `extractHashtagsFromText` fallback here: that helper exists for social
-    // bodies, where a `#token` IS a hashtag. On a web page a `#token` is a URL
-    // fragment — running it would resurrect `#cite_note` from Wikipedia
+    // bodies, where a `#token` IS a hashtag. On a rendered page a `#token` is a
+    // URL fragment — running it would resurrect `#cite_note` from Wikipedia
     // footnotes and publish it as audience vocabulary.
     hashtags: row.hashtags,
-    keyword,
+    keyword: input.keyword,
     sourceName: `crawl4ai · ${row.siteName}`,
+    platform,
+    metricsAvailable: row.metricsAvailable === true,
   }
 }
 
 export const crawl4aiSearch: ServiceAdapter<Crawl4aiSearchInput, RawPost[]> = {
   id: 'crawl4ai.search',
-  label: 'crawl4ai · open web (local)',
+  label: 'crawl4ai · headless capture (local)',
 
   isConfigured(): boolean {
     return config.crawl4ai.configured
@@ -261,21 +283,23 @@ export const crawl4aiSearch: ServiceAdapter<Crawl4aiSearchInput, RawPost[]> = {
 
     const payload = await runSidecar(input, this.id)
     const rows = payload.posts ?? []
+    const scope = input.platform ?? 'the open web'
 
-    // An empty live result throws rather than reporting a successful zero, so
-    // the caller falls back and names the reason — the same choice `apify.ts`
-    // makes, and for the same reason: "nothing found" and "nothing worked" look
-    // identical downstream unless one of them is an error.
+    // An empty result throws rather than reporting a successful zero, so the
+    // caller names the reason: "nothing found" and "nothing worked" look
+    // identical downstream unless one of them is an error. There is nothing to
+    // fall back TO any more — the caller records the gap and carries on with
+    // the platforms that did answer.
     if (rows.length === 0) {
       const first = payload.errors?.[0]
       throw new AdapterError(
         this.id,
         first
-          ? `no usable pages for “${input.keyword}” — ${first}`
-          : `no usable pages for “${input.keyword}”`,
+          ? `no usable pages for “${input.keyword}” on ${scope} — ${first}`
+          : `no usable pages for “${input.keyword}” on ${scope}`,
       )
     }
 
-    return rows.map((row) => toRawPost(row, input.keyword))
+    return rows.map((row) => toRawPost(row, input))
   },
 }

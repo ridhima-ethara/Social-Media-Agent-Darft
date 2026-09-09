@@ -25,12 +25,15 @@ import {
   type KnowledgeEntryRow,
 } from '../../db/repo'
 import {
+  AdapterError,
+  crawl4aiSearch,
   mapWithConcurrency,
-  parallelFixtureFindings,
   parallelResearch,
   RESEARCH_DOMAIN,
   withFallback,
+  type ResearchFinding,
 } from '../../integrations'
+import { config } from '../../config'
 import {
   clamp,
   clampChars,
@@ -109,15 +112,53 @@ registerSkill<KnowledgePayload>('knowledge.research.search', async (payload, ctx
   const targets = payload.targets ?? []
   if (targets.length === 0) return { raw: [], researchSource: 'fixture' as const }
 
+  /**
+   * Tier 2 of the research chain. When Parallel cannot answer, crawl4ai reads
+   * the open web for the tag itself — real, citable pages instead of nothing.
+   *
+   * Every page captured for one hashtag becomes ONE finding rather than one
+   * each, because the pages ARE the citations: `knowledge.research.extract`
+   * discards any entry citing fewer than `minSources` independent URLs, and a
+   * per-page finding could never clear that bar however many pages were read.
+   * Grouping them makes the citation count mean what the rule assumes it means.
+   */
+  async function webResearch(tag: string, displayTag: string): Promise<ResearchFinding[]> {
+    const rows = await crawl4aiSearch.run({
+      // `#RewardModeling` is a tag, not a query. Split on the camel-case seams
+      // so the engine sees the words a person would have typed.
+      keyword: displayTag.replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim(),
+      maxItems: Math.min(maxResults, config.crawl4ai.maxPagesPerKeyword),
+      maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+    })
+    if (rows.length === 0) return []
+    return [
+      {
+        hashtag: tag,
+        title: `Open-web reading on ${displayTag}`,
+        // The bodies stay whole: the extract step is what trims and dedupes,
+        // and trimming twice would cut a claim away from the sentence that
+        // qualifies it.
+        content: rows.map((r) => r.text).join('\n\n'),
+        category: 'Research',
+        citations: rows.map((r) => ({
+          title: r.authorHeadline || r.sourceName,
+          url: r.url,
+          publishedAt: r.postedAt.slice(0, 10),
+        })),
+      },
+    ]
+  }
+
   const maxParallel = Math.max(1, ctx.num('maxParallel', 4))
   const windowDays = ctx.num('windowDays', 14)
   const processor = ctx.str('processor', 'base')
   const maxResults = ctx.num('maxResults', 10)
   const retries = ctx.num('retries', 2)
-  const now = new Date()
 
   const reasons: string[] = []
   let anyLive = false
+  /** True once the open-web tier produced a citable reading for any hashtag. */
+  let webServed = false
 
   const perTag = await mapWithConcurrency(targets, maxParallel, async (target) => {
     ctx.emit('activity', `Researching #${target.displayTag}`, {
@@ -149,7 +190,23 @@ registerSkill<KnowledgePayload>('knowledge.research.search', async (payload, ctx
         processor,
         maxResults,
       },
-      () => parallelFixtureFindings(target.tag, now),
+      async () => {
+        // A failure HERE is recorded and returns nothing. There is no third
+        // tier: an uncited claim never enters the Knowledge Base, so "no
+        // findings" is the correct answer, not a substituted one.
+        try {
+          const findings = await webResearch(target.tag, target.displayTag)
+          if (findings.length > 0) webServed = true
+          return findings
+        } catch (error) {
+          const reason =
+            error instanceof AdapterError
+              ? error.toReason()
+              : `crawl4ai failed — ${error instanceof Error ? error.message : String(error)}`
+          if (!reasons.includes(reason)) reasons.push(reason)
+          return []
+        }
+      },
       (reason) => {
         if (!reasons.includes(reason)) reasons.push(reason)
       },
@@ -168,17 +225,25 @@ registerSkill<KnowledgePayload>('knowledge.research.search', async (payload, ctx
   })
 
   const raw = perTag.flat()
-  const researchSource: 'live' | 'fixture' = anyLive ? 'live' : 'fixture'
+  // A crawled page IS a live reading of the web, so a run served by tier 2 is
+  // stamped live. `'fixture'` survives only as the storage value for "neither
+  // tier answered", which now means the run found nothing rather than that it
+  // invented something.
+  const researchSource: 'live' | 'fixture' = anyLive || webServed ? 'live' : 'fixture'
 
-  if (researchSource === 'fixture' && reasons.length > 0) {
-    ctx.emit('activity', `Research ran on the bundled fixtures — ${reasons[0]}`, {
-      status: 'warn',
-      reason: reasons[0],
-    })
+  if (reasons.length > 0) {
+    ctx.emit(
+      'activity',
+      webServed
+        ? `Parallel did not serve every hashtag — ${reasons[0]}. Read the open web with ${crawl4aiSearch.label} instead.`
+        : `Research found nothing citable — ${reasons[0]}`,
+      { status: 'warn', reason: reasons[0], via: webServed ? crawl4aiSearch.id : 'none' },
+    )
   }
 
   ctx.log(
-    `${raw.length} raw finding(s) across ${targets.length} hashtag(s) from ${researchSource === 'live' ? 'the live web' : 'the bundled research fixtures'}`,
+    `${raw.length} raw finding(s) across ${targets.length} hashtag(s) via ` +
+      (anyLive ? parallelResearch.label : webServed ? crawl4aiSearch.label : 'no reachable source'),
   )
 
   return {

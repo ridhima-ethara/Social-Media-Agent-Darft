@@ -350,6 +350,9 @@ async function persistCorpus(
       validation: p.validation,
       verdictReason: p.verdictReason,
       captureSource: p.captureSource,
+      platform: p.platform,
+      metricsAvailable: p.metricsAvailable,
+      brandRelevance: p.brandRelevance,
       postedAt: p.postedAt,
     })),
   )
@@ -399,6 +402,8 @@ async function persistVerdicts(
       postCount: c.postCount,
       totalEngagement: c.totalEngagement,
       engagementPerPost: c.engagementPerPost,
+      brandRelevance: c.brandRelevance,
+      platforms: c.platforms,
       relevance: c.relevance,
       credibility: c.credibility,
       freshness: c.freshness,

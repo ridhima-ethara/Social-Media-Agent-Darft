@@ -112,7 +112,7 @@ export const PHRASEBOOK: PhrasebookEntry[] = [
     situation: 'limit',
     shape: 'plain, once, with the reason and the alternative',
     example:
-      'Apify is not configured, so that ran on the bundled corpus. Set `APIFY_API_TOKEN` and I will run it live.',
+      'Instagram and Facebook returned nothing for four of the twelve keywords — they index very little to a logged-out crawl. LinkedIn and the open web carried the run.',
   },
   {
     situation: 'brief',
@@ -124,7 +124,7 @@ export const PHRASEBOOK: PhrasebookEntry[] = [
     situation: 'failure',
     shape: 'what failed + what already stands + the one thing that would fix it',
     example:
-      'The Scraping Agent failed on `reward modeling` — Apify timed out twice. The other eleven keywords completed and their items are saved. Raising `retries` to 3 would likely clear it.',
+      'The Scraping Agent failed on `reward modeling` — the crawl4ai sidecar timed out twice. The other eleven keywords completed and their pages are saved. Raising `retries` to 3, or lowering `Pages per keyword`, would likely clear it.',
   },
   {
     situation: 'clarify',
@@ -154,7 +154,7 @@ export const NARRATION_TEMPLATES = {
   clarify: '{question}',
   unknown: '{opener} {detail}',
   fallbackNotice: '{service} is not configured, so that ran on {mode}. {fix}',
-  standalone: 'Standalone — I am reading local demo data.',
+  standalone: 'Standalone — I cannot reach the API, so I have nothing to read.',
 } as const
 
 export function renderTemplate(

@@ -142,6 +142,30 @@ export function normaliseTag(tag: string): string {
   return tag.replace(/^#/, '').toLowerCase()
 }
 
+/**
+ * Pulls `#tokens` out of a body.
+ *
+ * A SOCIAL affordance only. In a post a `#token` is a hashtag the author chose;
+ * on a rendered web page it is a URL fragment, and treating Wikipedia's footnote
+ * anchors as audience vocabulary once put `#cite_note` into a caption. Callers
+ * gate this on the item actually being a social artefact — see the note in
+ * `integrations/crawl4ai.ts`.
+ *
+ * Leading digits are rejected because `#1` is a rank, not a topic.
+ */
+export function extractHashtagsFromText(text: string): string[] {
+  const found = text.match(/#[A-Za-z][A-Za-z0-9_]{1,48}/g) ?? []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of found) {
+    const key = normaliseTag(raw)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(raw.replace(/^#/, ''))
+  }
+  return out
+}
+
 export function titleCaseWords(input: string): string {
   return input
     .split(/\s+/)

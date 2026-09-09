@@ -284,7 +284,7 @@ export async function composeBrief(
   if (build && build.entries_written > 0) {
     changes.push({
       label: `The research build added ${build.entries_written} cited entr${build.entries_written === 1 ? 'y' : 'ies'}`,
-      detail: `${build.hashtags_researched} hashtags researched, ${build.sources_cited} sources cited, ${build.research_source === 'fixture' ? 'from the bundled fixtures' : 'from the live web'}`,
+      detail: `${build.hashtags_researched} hashtags researched, ${build.sources_cited} sources cited, ${build.research_source === 'fixture' ? 'though no source answered' : 'from the live web'}`,
       severity: 'info',
     })
   }

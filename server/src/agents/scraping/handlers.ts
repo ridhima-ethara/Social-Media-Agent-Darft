@@ -1,43 +1,51 @@
 /**
  * THE SCRAPING AGENT — stage `discover`
  *
- * Reads the keyword set, asks Apify what LinkedIn has been saying about each
- * term, harvests the hashtags out of those bodies, and takes an independent
- * reading of the strongest tags from their own feeds.
+ * Reads the keyword set and asks crawl4ai what the web has been saying about
+ * each term — once per platform lane (LinkedIn, Instagram, X, Facebook) and
+ * once against the open web — then harvests the hashtags out of the bodies that
+ * carry them and takes an independent reading of the strongest tags.
  *
- * Every external call goes through an adapter with a fixture fallback, and every
- * artefact is stamped with which implementation produced it. With an empty
- * `.env` this agent produces a complete, believable corpus and says so.
+ * ONE SOURCE, NO CORPUS. crawl4ai is the only capture path. There is no paid
+ * connector and no bundled fixture corpus behind it, which means an empty
+ * result is reported as an empty result: a keyword that returned nothing on
+ * Instagram says so, and the run continues on the lanes that answered. What the
+ * pipeline shows is what was actually on the web at capture time, or nothing.
+ *
+ * BRAND AND KNOWLEDGE ALIGNMENT AT CAPTURE. A `site:` search returns whatever
+ * the engine indexed, which is wider than what this company publishes about.
+ * Each captured page is therefore scored against the brand topic set and the
+ * live Knowledge Base vocabulary before it is admitted, and anything that
+ * aligns with neither is dropped with the reason recorded. That score travels
+ * on the record as `brandRelevance`, so the Validation Agent inherits the
+ * evidence rather than re-deriving it.
+ *
+ * Every artefact is stamped with which implementation produced it and which
+ * platform lane it came from.
  */
 
-import { GENERIC_HASHTAGS } from '../../../../shared/brand-voice'
+import { BRAND_TOPICS, GENERIC_HASHTAGS } from '../../../../shared/brand-voice'
 import { synonymsFor } from '../../../../shared/keywords'
-import type { SkillContext } from '../../../../shared/agent-contract'
+import { PLATFORMS, type Platform, type SkillContext } from '../../../../shared/agent-contract'
 import { config } from '../../config'
 import {
   AdapterError,
-  apifyFixtureCompetitorPosts,
-  apifyFixtureHashtagFeed,
-  apifyFixturePosts,
-  apifyHashtagFeed,
-  apifyPostSearch,
-  apifyProfilePosts,
   crawl4aiSearch,
-  extractHashtagsFromText,
   mapWithConcurrency,
-  withFallback,
   type RawPost,
 } from '../../integrations'
 import { prepareEvidence } from '../../../../packages/runtime/src/evidence'
-import { COMPETITORS } from '../../integrations/fixtures/competitors'
-import { listKeywords, listSources, recentExternalIds } from '../../db/repo'
+import { listKeywords, listKnowledge, listSources, recentExternalIds } from '../../db/repo'
 import {
   clampChars,
+  contentWords,
   credibilityBase,
   credibilityLabel,
   engagementOf,
+  extractHashtagsFromText,
   headlineFrom,
   hoursSince,
+  matchedTopics,
   normalise,
   normaliseTag,
   velocityOf,
@@ -53,6 +61,111 @@ import type {
 } from '../skills/index'
 
 const GENERIC_SET = new Set(GENERIC_HASHTAGS.map((t) => normaliseTag(t)))
+
+/**
+ * The knob name that switches each platform lane on, in the order the lanes are
+ * captured. LinkedIn leads because it is both the primary publishing surface
+ * and by far the best indexed of the four.
+ */
+const PLATFORM_KNOBS: ReadonlyArray<{ platform: Platform; knob: string; label: string }> = [
+  { platform: 'linkedin', knob: 'includeLinkedin', label: 'LinkedIn' },
+  { platform: 'instagram', knob: 'includeInstagram', label: 'Instagram' },
+  { platform: 'x', knob: 'includeX', label: 'X' },
+  { platform: 'facebook', knob: 'includeFacebook', label: 'Facebook' },
+]
+
+/**
+ * Which `sourceType` a lane's items are recorded under.
+ *
+ * A page indexed on a platform's own domain IS a social artefact — a public
+ * post, article or company page — so it is typed `Social` and inherits that
+ * tier's credibility. A page found on the open web is not, and is typed
+ * `Website`, which `credibilityBase()` scores on provenance instead. Neither
+ * carries engagement figures; see the note in `integrations/crawl4ai.ts` on why
+ * the zeros must never be read as "this performed badly".
+ */
+function sourceTypeFor(platform: Platform | null): string {
+  return platform === null ? 'Website' : 'Social'
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BRAND AND KNOWLEDGE ALIGNMENT
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The vocabulary a captured page is judged against: the declared brand topics,
+ * plus whatever the Knowledge Base has actually learned.
+ *
+ * The Knowledge Base half is what keeps this current. Brand topics are a fixed
+ * declaration written once; the KB moves every Sunday, so a term the company
+ * has since started publishing about counts as aligned without anyone editing
+ * a constant.
+ */
+interface AlignmentVocabulary {
+  topics: string[]
+  knowledgeTerms: Set<string>
+  knowledgeEntries: number
+}
+
+async function loadAlignmentVocabulary(workspaceId: string): Promise<AlignmentVocabulary> {
+  const entries = await listKnowledge(workspaceId, { activeOnly: true, limit: 400 })
+  const knowledgeTerms = new Set<string>()
+
+  for (const entry of entries) {
+    for (const tag of entry.tags) knowledgeTerms.add(tag.toLowerCase())
+    if (entry.hashtag_display) knowledgeTerms.add(entry.hashtag_display.toLowerCase())
+    // Titles carry the claim's subject in the operator's own words; bodies are
+    // long and would dilute the set into ordinary English.
+    for (const word of contentWords(entry.title)) knowledgeTerms.add(word)
+  }
+
+  return { topics: BRAND_TOPICS, knowledgeTerms, knowledgeEntries: entries.length }
+}
+
+interface Alignment {
+  score: number
+  matchedTopics: string[]
+  knowledgeHits: number
+  keywordInBody: boolean
+}
+
+/**
+ * How well a captured body aligns with what this company talks about, 0–100.
+ *
+ * Three independent signals, deliberately additive: presence raises the score
+ * and absence never subtracts, because a page can be squarely on-topic while
+ * using none of the exact words in one of the three sets. The keyword that
+ * surfaced the page is the weakest of the three on its own — a search engine
+ * matched it, so its presence is close to guaranteed — which is why it is
+ * capped well below the other two rather than dominating them.
+ */
+function alignmentOf(
+  text: string,
+  keyword: string,
+  vocabulary: AlignmentVocabulary,
+): Alignment {
+  const haystack = text.toLowerCase()
+  const words = new Set(contentWords(text))
+
+  const topics = matchedTopics(text, 6)
+  let knowledgeHits = 0
+  for (const term of vocabulary.knowledgeTerms) {
+    if (words.has(term) || (term.includes(' ') && haystack.includes(term))) knowledgeHits += 1
+  }
+
+  const keywordInBody = haystack.includes(keyword.toLowerCase())
+
+  const topicScore = Math.min(55, topics.length * 14)
+  const knowledgeScore = Math.min(30, knowledgeHits * 6)
+  const keywordScore = keywordInBody ? 15 : 0
+
+  return {
+    score: Math.min(100, topicScore + knowledgeScore + keywordScore),
+    matchedTopics: topics,
+    knowledgeHits,
+    keywordInBody,
+  }
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    1 · scraping.keyword.resolve
@@ -91,6 +204,14 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
       (belowFloor > 0 ? `, ${belowFloor} below the ${minWeight}% weight floor` : ''),
   )
 
+  if (keywords.length === 0) {
+    ctx.emit(
+      'activity',
+      'No keyword cleared the weight floor. Add or re-weight terms under Settings → Keywords.',
+      { status: 'warn' },
+    )
+  }
+
   return { keywords }
 })
 
@@ -101,64 +222,66 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
 registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) => {
   const failIfNoSource = ctx.bool('failIfNoSource', false)
 
-  const configured = apifyPostSearch.isConfigured()
+  const configured = crawl4aiSearch.isConfigured()
   const mode: 'live' | 'fixture' = configured ? 'live' : 'fixture'
   const rows = await listSources(ctx.workspaceId)
 
+  // Every source in the registry is reached the same way now: crawl4ai either
+  // runs or it does not. Reporting per-source reachability would imply a
+  // per-source credential that no longer exists.
   const sources: SourceConnection[] = rows
     .filter((s) => s.enabled)
     .map((s) => ({
       name: s.name,
       kind: s.kind,
       sourceType: s.source_type,
-      reachable: configured || s.kind !== 'linkedin',
-      reason: configured ? 'Configured' : apifyPostSearch.unavailableReason(),
+      reachable: configured,
+      reason: configured ? `Reachable via ${crawl4aiSearch.label}` : crawl4aiSearch.unavailableReason(),
     }))
 
-  const unreachable = configured ? [] : [apifyPostSearch.label]
-
-  // Tier 2 of the capture chain. Reported here rather than discovered at fetch
-  // time, so the operator knows before the run starts what will actually answer.
-  const webConfigured = crawl4aiSearch.isConfigured()
+  const unreachable = configured ? [] : [crawl4aiSearch.label]
 
   if (!configured) {
-    const reason = apifyPostSearch.unavailableReason()
-    // Fail in the open: name the reason, name what will answer instead, carry on.
+    const reason = crawl4aiSearch.unavailableReason()
     ctx.emit(
       'activity',
-      webConfigured
-        ? `Apify is not configured — ${reason}. Falling through to ${crawl4aiSearch.label} for live keyword capture.`
-        : `Apify is not configured — ${reason}. Running on the bundled LinkedIn corpus.`,
-      { status: 'warn', mode, reason, fallsTo: webConfigured ? crawl4aiSearch.id : 'fixtures' },
+      `crawl4ai is not configured — ${reason}. Nothing can be captured this run.`,
+      { status: 'warn', mode, reason },
     )
-    if (failIfNoSource && !webConfigured) {
+    // With no corpus to fall back to, an unconfigured crawler means an empty
+    // run whatever this knob says. It is still honoured, because failing at the
+    // source is a clearer report than four empty lanes downstream.
+    if (failIfNoSource) {
       throw new Error(
-        `No live source available — ${reason}. Switch off "Fail when no source is reachable" to run on the bundled corpus.`,
+        `No capture source available — ${reason}. Set CRAWL4AI_PYTHON to the interpreter of the backend venv.`,
       )
     }
   } else {
-    ctx.log(`Apify reachable · ${config.apify.postsActor}`)
-  }
-
-  if (webConfigured) {
-    ctx.log(`crawl4ai reachable · ${config.crawl4ai.searchEngines.join(', ')}`)
+    ctx.log(
+      `crawl4ai reachable · ${config.crawl4ai.searchEngines.join(', ')} · ` +
+        `up to ${config.crawl4ai.maxPagesPerKeyword} pages per keyword per lane`,
+    )
   }
 
   return { mode, sources, unreachable }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   3 · scraping.linkedin.fetch
+   3 · scraping.linkedin.fetch — the platform-wise capture
+   ───────────────────────────────────────────────────────────────────────────
+   The id keeps its LinkedIn spelling on purpose: a skill id is a storage key
+   in `agent_skills` and `skill_runs`, and renaming it would orphan every run
+   already recorded against it. What it DOES is the four platform lanes plus
+   the open web; the registry name and summary say so.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function toScrapedPost(
   raw: RawPost,
   keywordId: string | null,
-  captureSource: 'live' | 'fixture',
-  fallbackReason: string | undefined,
-  sourceType: string,
+  alignment: Alignment,
 ): ScrapedPost {
   const engagement = engagementOf(raw)
+  const sourceType = sourceTypeFor(raw.platform)
   return {
     externalId: raw.externalId,
     text: raw.text,
@@ -172,12 +295,11 @@ function toScrapedPost(
     reactions: raw.reactions,
     comments: raw.comments,
     reposts: raw.reposts,
-    // Deriving tags from the body is a SOCIAL affordance: in a LinkedIn post a
-    // `#token` is a hashtag the author chose, and Apify sometimes omits the
-    // array even though the text has them. On a web page a `#token` is a URL
+    // Deriving tags from the body is a SOCIAL affordance: in a post a `#token`
+    // is a hashtag the author chose. On an open-web page a `#token` is a URL
     // fragment — Wikipedia's footnote and section anchors — and treating those
-    // as audience vocabulary put `#cite_note` into a caption. So the fallback
-    // applies to social sources only; a website that reports no tags has none.
+    // as audience vocabulary once put `#cite_note` into a caption. So the
+    // fallback applies to the platform lanes only.
     hashtags:
       raw.hashtags.length > 0
         ? raw.hashtags
@@ -188,11 +310,18 @@ function toScrapedPost(
     keywordId,
     sourceName: raw.sourceName,
     sourceType,
+    platform: raw.platform,
+    metricsAvailable: raw.metricsAvailable,
+    brandRelevance: alignment.score,
+    alignedTopics: alignment.matchedTopics,
+    knowledgeHits: alignment.knowledgeHits,
     engagement,
     engagementScore: 0,
     velocity: 0,
-    captureSource,
-    ...(fallbackReason === undefined ? {} : { fallbackReason }),
+    // Every row now comes off a real crawl. `'fixture'` remains in the union
+    // because it is a persisted storage value on `scraped_items`, but nothing
+    // in the product writes it any more.
+    captureSource: 'live',
     relevance: 0,
     credibility: 'Medium',
     credibilityScore: 55,
@@ -208,141 +337,145 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   const keywords = payload.keywords ?? []
   if (keywords.length === 0) throw new Error('No keywords resolved — nothing to fetch.')
 
-  const maxItems = ctx.num('maxItemsPerKeyword', 50)
-  const datePosted = ctx.str('datePosted', 'past-week') as 'past-24h' | 'past-week' | 'past-month'
-  const sortBy = ctx.str('sortBy', 'date') as 'relevance' | 'date'
-  const retries = ctx.num('retries', 2)
-  const minAuthorFollowers = ctx.num('minAuthorFollowers', 0)
-  const maxParallel = Math.max(1, ctx.num('maxParallel', 4))
-  const runOffset = payload.runOffset ?? 0
-  const now = new Date()
+  if (!crawl4aiSearch.isConfigured()) {
+    throw new Error(
+      `Cannot capture — ${crawl4aiSearch.unavailableReason()}. crawl4ai is the only source; there is no corpus to fall back to.`,
+    )
+  }
 
-  const fallbackReasons: string[] = []
-  let anyLive = false
+  const maxItems = ctx.num('maxItemsPerKeyword', 8)
+  const retries = ctx.num('retries', 1)
+  const minBrandRelevance = ctx.num('minBrandRelevance', 20)
+  const maxParallel = Math.max(1, ctx.num('maxParallel', 2))
+  const includeOpenWeb = ctx.bool('includeOpenWeb', true)
 
-  const perKeyword = await mapWithConcurrency(keywords, maxParallel, async (keyword) => {
-    ctx.emit('activity', `Scraping LinkedIn for “${keyword.term}”`, {
+  // `undefined` is the open-web lane, which is how the adapter spells it too.
+  const lanes: Array<{ platform: Platform | undefined; label: string }> = [
+    ...PLATFORM_KNOBS.filter((p) => ctx.bool(p.knob, true)).map((p) => ({
+      platform: p.platform as Platform | undefined,
+      label: p.label,
+    })),
+    ...(includeOpenWeb ? [{ platform: undefined, label: 'Open web' }] : []),
+  ]
+
+  if (lanes.length === 0) {
+    throw new Error('Every capture lane is switched off — turn on at least one platform or the open web.')
+  }
+
+  const vocabulary = await loadAlignmentVocabulary(ctx.workspaceId)
+  ctx.log(
+    `Aligning against ${vocabulary.topics.length} brand topics and ` +
+      `${vocabulary.knowledgeEntries} Knowledge Base entr${vocabulary.knowledgeEntries === 1 ? 'y' : 'ies'}`,
+  )
+
+  const laneReasons: string[] = []
+  /** Kept per lane so the run console can say WHERE the material came from. */
+  const perLaneCounts = new Map<string, number>()
+  let offBrand = 0
+
+  // The work unit is one keyword on one lane. Flattening the pair means the
+  // concurrency ceiling governs actual browser page-loads rather than keywords,
+  // which is the resource that is genuinely scarce on a local machine.
+  const jobs = keywords.flatMap((keyword) => lanes.map((lane) => ({ keyword, lane })))
+
+  const perJob = await mapWithConcurrency(jobs, maxParallel, async ({ keyword, lane }) => {
+    ctx.emit('activity', `Scraping ${lane.label} for “${keyword.term}”`, {
       status: 'running',
       keyword: keyword.term,
+      platform: lane.platform ?? 'open-web',
     })
 
-    // Tier 2 of the capture chain. When Apify cannot serve this keyword,
-    // crawl4ai reads the open web for it before the bundled corpus is
-    // considered — real evidence beats believable evidence, and law 9 asks the
-    // degraded path to still be useful rather than merely non-fatal.
-    let webServed = false
-    let webReason: string | undefined
-
-    async function captureFromWebOrCorpus(): Promise<RawPost[]> {
-      if (!crawl4aiSearch.isConfigured()) {
-        return apifyFixturePosts(keyword.term, maxItems, runOffset, now)
+    let rows: RawPost[] = []
+    try {
+      let lastError: unknown
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+          rows = await crawl4aiSearch.run({
+            keyword: keyword.term,
+            ...(lane.platform === undefined ? {} : { platform: lane.platform }),
+            // The operator's per-keyword cap still applies, bounded by the
+            // crawler's own page ceiling — fifty browser page-loads per keyword
+            // per lane is not a reasonable ask of a local machine.
+            maxItems: Math.min(maxItems, config.crawl4ai.maxPagesPerKeyword),
+            maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+          })
+          lastError = undefined
+          break
+        } catch (error) {
+          lastError = error
+          if (attempt === retries) break
+          await new Promise((r) => setTimeout(r, 600 * 2 ** attempt))
+        }
       }
-      try {
-        const rows = await crawl4aiSearch.run({
-          keyword: keyword.term,
-          // The operator's per-keyword cap still applies, bounded by the
-          // crawler's own page ceiling — fifty browser page-loads per keyword
-          // is not a reasonable default for a local machine.
-          maxItems: Math.min(maxItems, config.crawl4ai.maxPagesPerKeyword),
-          maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
-        })
-        webServed = true
-        return rows
-      } catch (error) {
-        webReason =
-          error instanceof AdapterError
-            ? error.toReason()
-            : `crawl4ai failed — ${error instanceof Error ? error.message : String(error)}`
-        return apifyFixturePosts(keyword.term, maxItems, runOffset, now)
-      }
+      if (lastError !== undefined) throw lastError
+    } catch (error) {
+      // An empty lane is normal — Instagram and Facebook index very little to a
+      // logged-out crawl. It is reported and the run carries on; there is
+      // nothing to substitute and nothing is substituted.
+      const reason =
+        error instanceof AdapterError
+          ? error.toReason()
+          : `crawl4ai failed — ${error instanceof Error ? error.message : String(error)}`
+      if (!laneReasons.includes(reason)) laneReasons.push(reason)
+      ctx.emit('activity', `${lane.label} · ${keyword.term}: nothing captured`, {
+        status: 'warn',
+        keyword: keyword.term,
+        platform: lane.platform ?? 'open-web',
+        reason,
+      })
+      return []
     }
 
-    // withRetry lives inside the adapter's run for the live path; the retries
-    // knob is threaded through so the operator's number is the one that applies.
-    const outcome = await withFallback(
-      {
-        ...apifyPostSearch,
-        run: async (input) => {
-          let lastError: unknown
-          for (let attempt = 0; attempt <= retries; attempt += 1) {
-            try {
-              return await apifyPostSearch.run(input)
-            } catch (error) {
-              lastError = error
-              if (attempt === retries) break
-              await new Promise((r) => setTimeout(r, 400 * 2 ** attempt))
-            }
-          }
-          throw lastError
-        },
-      },
-      { keyword: keyword.term, maxItems, datePosted, sortBy, minAuthorFollowers },
-      captureFromWebOrCorpus,
-      (reason) => {
-        if (!fallbackReasons.includes(reason)) fallbackReasons.push(reason)
-      },
-    )
-
-    if (webReason !== undefined && !fallbackReasons.includes(webReason)) {
-      fallbackReasons.push(webReason)
+    const posts: ScrapedPost[] = []
+    for (const raw of rows) {
+      const alignment = alignmentOf(raw.text, keyword.term, vocabulary)
+      if (alignment.score < minBrandRelevance) {
+        offBrand += 1
+        continue
+      }
+      posts.push(toScrapedPost(raw, keyword.id, alignment))
     }
 
-    // A crawled page IS live capture, so it is stamped as such. It is not a
-    // social artefact, so it is typed 'Website' and scored on provenance
-    // rather than on engagement it cannot have.
-    const keywordCapture: 'live' | 'fixture' =
-      outcome.source === 'live' || webServed ? 'live' : 'fixture'
-    const sourceType = webServed ? 'Website' : 'Social'
-
-    if (keywordCapture === 'live') anyLive = true
-
-    // The follower floor is a LinkedIn quality bar. Applying it to websites
-    // would silently discard every crawled page, because a website has no
-    // followers — the absence of a number is not a low number.
-    const kept =
-      sourceType === 'Social'
-        ? outcome.value.filter((p) => p.authorFollowers >= minAuthorFollowers)
-        : outcome.value
-
-    const recordReason = webServed
-      ? `${outcome.fallbackReason ?? 'Apify did not serve this keyword'} — captured from the open web with crawl4ai instead`
-      : outcome.fallbackReason
-
-    const posts = kept.map((raw) =>
-      toScrapedPost(raw, keyword.id, keywordCapture, recordReason, sourceType),
-    )
+    perLaneCounts.set(lane.label, (perLaneCounts.get(lane.label) ?? 0) + posts.length)
 
     for (const post of posts) {
       ctx.emit('item.scraped', post.title, {
         keyword: keyword.term,
-        engagement: post.engagement,
+        platform: post.platform ?? 'open-web',
         source: post.sourceName,
         externalId: post.externalId,
+        brandRelevance: post.brandRelevance,
         captureSource: post.captureSource,
       })
     }
 
     ctx.emit(
       'activity',
-      webServed
-        ? `${keyword.term}: ${posts.length} pages from the open web (crawl4ai)`
-        : `${keyword.term}: ${posts.length} posts`,
+      `${lane.label} · ${keyword.term}: ${posts.length} page${posts.length === 1 ? '' : 's'} kept of ${rows.length}`,
       {
         status: 'ok',
         keyword: keyword.term,
+        platform: lane.platform ?? 'open-web',
         count: posts.length,
-        source: keywordCapture,
-        // Names WHICH implementation answered, not just whether one did — rule
-        // 6 wants the evidence behind the decision, and "live" alone hides it.
-        via: webServed ? crawl4aiSearch.label : apifyPostSearch.label,
+        captured: rows.length,
+        // Names WHICH implementation answered, not just that one did — rule 6
+        // wants the evidence behind the decision.
+        via: crawl4aiSearch.label,
       },
     )
 
     return posts
   })
 
-  const posts = perKeyword.flat()
-  const captureSource: 'live' | 'fixture' = anyLive && fallbackReasons.length === 0 ? 'live' : anyLive ? 'live' : 'fixture'
+  const posts = perJob.flat()
+
+  if (posts.length === 0) {
+    throw new Error(
+      laneReasons.length > 0
+        ? `Nothing was captured on any lane — ${laneReasons[0]}`
+        : 'Nothing was captured on any lane, and no lane reported a reason.',
+    )
+  }
 
   // Constraint 5: scraped bodies are untrusted. They are wrapped and scanned
   // here, at the point of capture, so nothing downstream can reach a model with
@@ -350,7 +483,7 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   const evidence = prepareEvidence(
     posts.map((post) => ({
       id: post.externalId ?? post.title,
-      source: post.sourceName ?? 'LinkedIn',
+      source: post.sourceName ?? 'crawl4ai',
       ...(post.url ? { url: post.url } : {}),
       ...(post.authorName ? { author: post.authorName } : {}),
       content: post.text ?? post.snippet ?? '',
@@ -372,16 +505,22 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
     )
   }
 
+  const breakdown = [...perLaneCounts.entries()]
+    .filter(([, n]) => n > 0)
+    .map(([label, n]) => `${label} ${n}`)
+    .join(' · ')
+
   ctx.log(
-    `${posts.length} posts across ${keywords.length} keywords` +
-      (fallbackReasons.length > 0 ? ` · ${fallbackReasons.length} keyword(s) fell back to fixtures` : ''),
+    `${posts.length} page(s) across ${keywords.length} keyword(s) and ${lanes.length} lane(s)` +
+      (breakdown === '' ? '' : ` — ${breakdown}`) +
+      (offBrand > 0 ? ` · ${offBrand} dropped below the ${minBrandRelevance}% brand-alignment floor` : ''),
   )
 
   return {
     posts,
     postsBeforeDedupe: posts.length,
-    captureSource,
-    captureFallbackReasons: fallbackReasons,
+    captureSource: 'live' as const,
+    captureFallbackReasons: laneReasons,
     /** The wrapped, escaped block. The only form in which a model may read these bodies. */
     evidenceText: evidence.text,
     injectionAttempts: evidence.injectionAttempts,
@@ -397,6 +536,7 @@ registerSkill<PipelinePayload>('scraping.hashtag.harvest', (payload, ctx) => {
   const minOccurrences = ctx.num('minOccurrences', 2)
   const dropGeneric = ctx.bool('dropGeneric', true)
   const maxPerKeyword = ctx.num('maxPerKeyword', 25)
+  const deriveFromTopics = ctx.bool('deriveFromTopics', true)
 
   interface Accumulator {
     tag: string
@@ -404,19 +544,42 @@ registerSkill<PipelinePayload>('scraping.hashtag.harvest', (payload, ctx) => {
     casings: Map<string, number>
     postCount: number
     totalEngagement: number
+    /** Alignment stands in for engagement when ranking metric-less pages. */
+    totalRelevance: number
     firstSeenAt: string
     lastSeenAt: string
     keywords: Map<string, number>
-    /** The strongest post carrying the tag, by engagement. */
-    topPost: { url: string; title: string; engagement: number } | null
+    platforms: Set<string>
+    /** The best post carrying the tag, by brand alignment then engagement. */
+    topPost: { url: string; title: string; score: number } | null
   }
 
   const acc = new Map<string, Accumulator>()
   let generic = 0
 
+  /**
+   * Which tags a post contributes.
+   *
+   * Platform posts contribute their own `#tokens`. Open-web pages have none —
+   * see `_hashtags_for_web_page` in the sidecar for why inventing them from
+   * `#` fragments was a bug — so their brand-topic matches stand in instead.
+   * That is a derivation the Analysis Agent's own rules already sanction: the
+   * topic set is declared vocabulary, not scraped text read as a directive.
+   */
+  function tagsOf(post: ScrapedPost): string[] {
+    if (post.hashtags.length > 0) return post.hashtags
+    if (post.sourceType === 'Social') return extractHashtagsFromText(post.text)
+    if (!deriveFromTopics) return []
+    return (post.alignedTopics ?? []).map((topic) =>
+      topic
+        .split(/[\s-]+/)
+        .map((w) => (w.length === 0 ? w : (w[0] as string).toUpperCase() + w.slice(1)))
+        .join(''),
+    )
+  }
+
   for (const post of posts) {
-    const tags = post.hashtags.length > 0 ? post.hashtags : extractHashtagsFromText(post.text)
-    for (const rawTag of tags) {
+    for (const rawTag of tagsOf(post)) {
       const key = normaliseTag(rawTag)
       if (key.length < 2) continue
       if (dropGeneric && GENERIC_SET.has(key)) {
@@ -431,9 +594,11 @@ registerSkill<PipelinePayload>('scraping.hashtag.harvest', (payload, ctx) => {
           casings: new Map(),
           postCount: 0,
           totalEngagement: 0,
+          totalRelevance: 0,
           firstSeenAt: post.postedAt,
           lastSeenAt: post.postedAt,
           keywords: new Map(),
+          platforms: new Set(),
           topPost: null,
         }
         acc.set(key, entry)
@@ -443,8 +608,15 @@ registerSkill<PipelinePayload>('scraping.hashtag.harvest', (payload, ctx) => {
       entry.casings.set(display, (entry.casings.get(display) ?? 0) + 1)
       entry.postCount += 1
       entry.totalEngagement += post.engagement
-      if (!entry.topPost || post.engagement > entry.topPost.engagement) {
-        entry.topPost = { url: post.url, title: post.title, engagement: post.engagement }
+      entry.totalRelevance += post.brandRelevance ?? 0
+      entry.platforms.add(post.platform ?? 'open-web')
+
+      // Engagement is unavailable on a crawled page, so the tie-break that
+      // decides "the strongest post carrying this tag" runs on alignment and
+      // falls back to engagement only where a source actually stated it.
+      const score = (post.brandRelevance ?? 0) + post.engagement
+      if (!entry.topPost || score > entry.topPost.score) {
+        entry.topPost = { url: post.url, title: post.title, score }
       }
       if (post.postedAt < entry.firstSeenAt) entry.firstSeenAt = post.postedAt
       if (post.postedAt > entry.lastSeenAt) entry.lastSeenAt = post.postedAt
@@ -467,7 +639,11 @@ registerSkill<PipelinePayload>('scraping.hashtag.harvest', (payload, ctx) => {
   const candidates: HashtagCandidate[] = []
   for (const [term, entries] of byKeyword) {
     const kept = entries
-      .sort((a, b) => b.totalEngagement - a.totalEngagement || b.postCount - a.postCount)
+      .sort(
+        (a, b) =>
+          b.totalRelevance + b.totalEngagement - (a.totalRelevance + a.totalEngagement) ||
+          b.postCount - a.postCount,
+      )
       .slice(0, Math.max(1, maxPerKeyword))
 
     for (const entry of kept) {
@@ -480,7 +656,10 @@ registerSkill<PipelinePayload>('scraping.hashtag.harvest', (payload, ctx) => {
         keywordId: keywordIdByTerm.get(term) ?? null,
         postCount: entry.postCount,
         totalEngagement: entry.totalEngagement,
-        engagementPerPost: Math.round((entry.totalEngagement / Math.max(1, entry.postCount)) * 100) / 100,
+        engagementPerPost:
+          Math.round((entry.totalEngagement / Math.max(1, entry.postCount)) * 100) / 100,
+        brandRelevance: Math.round(entry.totalRelevance / Math.max(1, entry.postCount)),
+        platforms: [...entry.platforms],
         firstSeenAt: entry.firstSeenAt,
         lastSeenAt: entry.lastSeenAt,
         surfacedBy: [...entry.keywords.keys()],
@@ -506,7 +685,7 @@ registerSkill<PipelinePayload>('scraping.hashtag.harvest', (payload, ctx) => {
       tag: candidate.tag,
       keyword: candidate.keyword,
       postCount: candidate.postCount,
-      engagement: candidate.totalEngagement,
+      platforms: candidate.platforms,
     })
   }
 
@@ -527,46 +706,60 @@ registerSkill<PipelinePayload>('scraping.hashtag.expand', async (payload, ctx) =
 
   const candidates = payload.hashtagCandidates ?? []
   if (candidates.length === 0) return {}
+  if (!crawl4aiSearch.isConfigured()) {
+    ctx.log(`Hashtag feeds not read — ${crawl4aiSearch.unavailableReason()}`)
+    return {}
+  }
 
-  const expandTop = ctx.num('expandTop', 15)
-  const itemsPerHashtag = ctx.num('itemsPerHashtag', 25)
-  const runOffset = payload.runOffset ?? 0
-  const now = new Date()
+  const expandTop = ctx.num('expandTop', 6)
+  const itemsPerHashtag = ctx.num('itemsPerHashtag', 4)
+  const maxParallel = Math.max(1, ctx.num('maxParallel', 2))
 
   const targets = [...candidates]
-    .sort((a, b) => b.totalEngagement - a.totalEngagement)
-    .slice(0, Math.max(1, expandTop))
+    .sort((a, b) => (b.brandRelevance ?? 0) - (a.brandRelevance ?? 0) || b.postCount - a.postCount)
+    .slice(0, Math.max(0, expandTop))
 
   const byTag = new Map(candidates.map((c) => [c.tag, c]))
-  let liveReadings = 0
+  let readings = 0
 
-  await mapWithConcurrency(targets, 4, async (candidate) => {
-    const outcome = await withFallback(
-      apifyHashtagFeed,
-      { hashtag: candidate.tag, maxItems: itemsPerHashtag },
-      () => apifyFixtureHashtagFeed(candidate.tag, itemsPerHashtag, runOffset, now),
-    )
-
-    if (outcome.source === 'live') liveReadings += 1
-
+  await mapWithConcurrency(targets, maxParallel, async (candidate) => {
     const target = byTag.get(candidate.tag)
     if (!target) return
 
+    // The tag is read as a search term rather than as a feed URL: the feed
+    // pages themselves are login-walled and render nothing to a logged-out
+    // crawl, whereas the indexed posts that carry the tag are readable.
+    const query = candidate.displayTag.replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim()
+
+    let rows: RawPost[]
+    try {
+      rows = await crawl4aiSearch.run({
+        keyword: query,
+        maxItems: Math.min(itemsPerHashtag, config.crawl4ai.maxPagesPerKeyword),
+        maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+      })
+    } catch {
+      // An independent reading that could not be taken simply is not taken.
+      // Leaving the keyword-scoped figures untouched is the honest outcome.
+      return
+    }
+
+    readings += 1
+
     // An independent reading, not biased by the keyword query that surfaced it.
-    target.independentPostCount = outcome.value.length
-    target.independentEngagement = outcome.value.reduce((total, p) => total + engagementOf(p), 0)
-    target.expandedSource = outcome.source
+    target.independentPostCount = rows.length
+    target.independentEngagement = rows.reduce((total, p) => total + engagementOf(p), 0)
+    target.expandedSource = 'live'
 
     // Merge the independent reading in rather than replacing the keyword-scoped
     // one: both are evidence, and the union is the truer volume.
-    const merged = Math.max(target.postCount, outcome.value.length)
-    target.postCount = merged
+    target.postCount = Math.max(target.postCount, rows.length)
     target.totalEngagement = Math.max(target.totalEngagement, target.independentEngagement)
     target.engagementPerPost =
       Math.round((target.totalEngagement / Math.max(1, target.postCount)) * 100) / 100
 
-    if (outcome.value.length > 0) {
-      const dates = outcome.value.map((p) => p.postedAt).sort()
+    if (rows.length > 0) {
+      const dates = rows.map((p) => p.postedAt).sort()
       if ((dates[0] as string) < target.firstSeenAt) target.firstSeenAt = dates[0] as string
       const last = dates[dates.length - 1] as string
       if (last > target.lastSeenAt) target.lastSeenAt = last
@@ -574,8 +767,9 @@ registerSkill<PipelinePayload>('scraping.hashtag.expand', async (payload, ctx) =
   })
 
   ctx.log(
-    `${targets.length} hashtag feed(s) read independently` +
-      (liveReadings === 0 ? ' from the bundled corpus' : ` · ${liveReadings} live`),
+    readings === 0
+      ? `No hashtag could be read independently of the keyword that surfaced it`
+      : `${readings} of ${targets.length} hashtag(s) read independently`,
   )
 
   return { hashtagCandidates: candidates }
@@ -593,6 +787,7 @@ registerSkill<PipelinePayload>('scraping.engagement.capture', (payload, ctx) => 
   const windowHours = ctx.num('velocityWindowHours', 72)
   const now = new Date()
 
+  const withMetrics = posts.filter((p) => p.metricsAvailable === true)
   const batchMax = posts.reduce((max, p) => Math.max(max, p.engagement), 0)
 
   for (const post of posts) {
@@ -603,9 +798,26 @@ registerSkill<PipelinePayload>('scraping.engagement.capture', (payload, ctx) => 
       : Math.min(100, post.engagement)
   }
 
-  const peak = posts.reduce((best, p) => (p.velocity > best.velocity ? p : best), posts[0] as ScrapedPost)
+  // Constraint 2 in the one place it is easiest to violate. When no source
+  // stated a figure, the batch maximum is 0 and every score is 0 — which is
+  // "not measurable", not "nothing performed". Saying so here stops that zero
+  // being read as a verdict in the run console.
+  if (withMetrics.length === 0) {
+    ctx.log(
+      `Engagement is not available for this batch — a search-indexed page states no reaction count. ` +
+        `Ranking runs on brand alignment, freshness and provenance instead.`,
+    )
+    return { posts }
+  }
+
+  const peak = posts.reduce(
+    (best, p) => (p.velocity > best.velocity ? p : best),
+    posts[0] as ScrapedPost,
+  )
   ctx.log(
-    `Engagement normalised against a batch maximum of ${batchMax}; fastest mover is “${peak.title}” at ${peak.velocity}/hour`,
+    `Engagement normalised against a batch maximum of ${batchMax}; ` +
+      `fastest mover is “${peak.title}” at ${peak.velocity}/hour ` +
+      `(${withMetrics.length} of ${posts.length} item(s) carried figures)`,
   )
 
   return { posts }
@@ -616,42 +828,63 @@ registerSkill<PipelinePayload>('scraping.engagement.capture', (payload, ctx) => 
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<PipelinePayload>('scraping.competitor.track', async (_payload, ctx) => {
-  const tier = ctx.str('tier', 'P0+P1')
   const postsPer = ctx.num('postsPerCompetitor', 3)
-  const now = new Date()
+  const maxParallel = Math.max(1, ctx.num('maxParallel', 2))
 
-  const allowedTiers =
-    tier === 'P0 only' ? ['P0'] : tier === 'All' ? ['P0', 'P1', 'P2'] : ['P0', 'P1']
+  // The competitor set is whatever the operator registered under
+  // Settings → Keywords & Sources. There is no bundled list: a fabricated
+  // competitor produces a fabricated saturation reading, and the Analysis
+  // Agent would then decline real opportunities on the strength of it.
+  const rows = await listSources(ctx.workspaceId)
+  const competitors = rows.filter((s) => s.enabled && s.source_type === 'Competitor')
 
-  const selected = COMPETITORS.filter((c) => allowedTiers.includes(c.tier))
-  if (selected.length === 0) {
-    ctx.log('No competitors match the selected tier')
+  if (competitors.length === 0) {
+    ctx.emit(
+      'activity',
+      'No competitor sources are registered, so saturation is not measured this run. Add them under Settings → Keywords & Sources.',
+      { status: 'warn' },
+    )
+    ctx.log('No competitor sources registered — competitor tracking skipped')
     return { competitorPosts: [] }
   }
 
-  const results = await mapWithConcurrency(selected, 4, async (competitor) => {
-    const outcome = await withFallback(
-      apifyProfilePosts,
-      {
-        handle: competitor.handle,
-        competitorName: competitor.name,
-        maxItems: postsPer,
-      },
-      () => apifyFixtureCompetitorPosts(competitor.name, postsPer, now),
-    )
-    return outcome.value.map<CompetitorPostRecord>((p) => ({
-      competitor: p.competitor,
+  if (!crawl4aiSearch.isConfigured()) {
+    ctx.log(`Competitors not read — ${crawl4aiSearch.unavailableReason()}`)
+    return { competitorPosts: [] }
+  }
+
+  const results = await mapWithConcurrency(competitors, maxParallel, async (competitor) => {
+    let rows2: RawPost[]
+    try {
+      rows2 = await crawl4aiSearch.run({
+        keyword: competitor.name,
+        platform: 'linkedin',
+        maxItems: Math.min(postsPer, config.crawl4ai.maxPagesPerKeyword),
+        maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+      })
+    } catch {
+      return []
+    }
+
+    return rows2.map<CompetitorPostRecord>((p) => ({
+      competitor: competitor.name,
       text: p.text,
-      format: p.format,
-      engagementIndex: p.engagementIndex,
+      // The format of an indexed page is not knowable from the page, and
+      // guessing it would put a fabricated attribute on a real record.
+      format: 'Unknown',
+      // Not an engagement index: no figure was stated. Brand alignment is what
+      // is actually measurable here, and the Analysis Agent reads it as volume.
+      engagementIndex: 0,
       postedAt: p.postedAt,
-      topics: p.topics,
-      tier: competitor.tier,
+      topics: matchedTopics(p.text, 4),
+      tier: 'Registered',
     }))
   })
 
   const competitorPosts = results.flat()
-  ctx.log(`${competitorPosts.length} competitor posts across ${selected.length} accounts (${tier})`)
+  ctx.log(
+    `${competitorPosts.length} competitor page(s) across ${competitors.length} registered account(s)`,
+  )
 
   return { competitorPosts }
 })
@@ -667,8 +900,8 @@ registerSkill<PipelinePayload>('scraping.dedupe.prefilter', async (payload, ctx)
   const historyDays = ctx.num('historyDays', 14)
   const seen = await recentExternalIds(ctx.workspaceId, historyDays)
 
-  // Within-batch identity as well as against history: the same post can arrive
-  // twice from two keyword queries.
+  // Within-batch identity as well as against history: the same page can arrive
+  // twice from two keyword queries, or from two platform lanes.
   const batch = new Set<string>()
   const kept: ScrapedPost[] = []
   let droppedHistory = 0
@@ -691,7 +924,7 @@ registerSkill<PipelinePayload>('scraping.dedupe.prefilter', async (payload, ctx)
   ctx.log(
     dropped === 0
       ? `No repeats in the last ${historyDays} days`
-      : `${dropped} already-captured post(s) filtered — ${droppedHistory} seen within ${historyDays} days, ${droppedBatch} repeated inside this batch`,
+      : `${dropped} already-captured page(s) filtered — ${droppedHistory} seen within ${historyDays} days, ${droppedBatch} repeated inside this batch`,
   )
 
   return { posts: kept }
@@ -706,4 +939,4 @@ export function baseCredibilityFor(post: { sourceType: string }, ctx: SkillConte
   return credibilityBase(post.sourceType)
 }
 
-export { credibilityLabel }
+export { credibilityLabel, PLATFORMS }

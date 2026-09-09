@@ -21,24 +21,7 @@ export {
 } from './adapter'
 
 export {
-  apifyFixtureCompetitorPosts,
-  apifyFixtureHashtagFeed,
-  apifyFixturePosts,
-  apifyHashtagFeed,
-  apifyPostSearch,
-  apifyProfilePosts,
-  extractHashtagsFromText,
-  rawPostEngagement,
-  type ApifyHashtagInput,
-  type ApifyPostSearchInput,
-  type ApifyProfileInput,
-  type CompetitorPost,
-  type RawPost,
-} from './apify'
-
-export {
   RESEARCH_DOMAIN,
-  parallelFixtureFindings,
   parallelResearch,
   researchObjective,
   type ParallelSearchInput,
@@ -68,10 +51,9 @@ export {
   type OllamaTextInput,
 } from './ollama'
 
-export { crawl4aiSearch, type Crawl4aiSearchInput } from './crawl4ai'
+export { crawl4aiSearch, type Crawl4aiSearchInput, type RawPost } from './crawl4ai'
 
 import { describeAdapter, type AdapterReport } from './adapter'
-import { apifyHashtagFeed, apifyPostSearch, apifyProfilePosts } from './apify'
 import { crawl4aiSearch } from './crawl4ai'
 import { gcpImage, gcpText } from './gcp-llm'
 import { ollamaImage, ollamaText } from './ollama'
@@ -80,9 +62,6 @@ import { parallelResearch } from './parallel'
 /** Every adapter in the product, for a single reachability sweep. */
 export function allAdapters() {
   return [
-    apifyPostSearch,
-    apifyHashtagFeed,
-    apifyProfilePosts,
     crawl4aiSearch,
     parallelResearch,
     gcpText,
@@ -94,7 +73,7 @@ export function allAdapters() {
 
 export interface IntegrationReport {
   adapters: AdapterReport[]
-  /** True when every adapter is unconfigured — the fully offline demo state. */
+  /** True when every adapter is unconfigured — nothing live can be reached. */
   fullyOffline: boolean
   configuredCount: number
 }

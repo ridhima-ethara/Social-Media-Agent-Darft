@@ -117,7 +117,7 @@ export function AgentActivity() {
             <Btn
               variant="ghost"
               onClick={() => {
-                setAgent('scraping', { status: 'failed', current_task: 'Apify timed out twice on reward modeling' })
+                setAgent('scraping', { status: 'failed', current_task: 'The crawl4ai sidecar timed out twice on reward modeling' })
               }}
             >
               Simulate failure

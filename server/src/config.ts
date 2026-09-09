@@ -3,8 +3,8 @@
  *
  * Every value is read LAZILY, at call time — never captured at import time.
  * That is what lets an adapter answer `isConfigured()` honestly after the
- * process has started, and what makes the whole product explorable with a
- * completely empty `.env`.
+ * process has started, without any part of the product having to be restarted
+ * to notice that a key was filled in.
  */
 
 import { config as loadDotenv } from 'dotenv'
@@ -152,37 +152,6 @@ export const config = {
     get addressStyle(): 'surname' | 'firstname' | 'role' {
       const raw = str('ASSISTANT_ADDRESS_STYLE', 'surname')
       return raw === 'firstname' || raw === 'role' ? raw : 'surname'
-    },
-  },
-
-  /* ── Scraping · Apify ───────────────────────────────────────────────────── */
-  apify: {
-    get token(): string {
-      return str('APIFY_API_TOKEN')
-    },
-    get baseUrl(): string {
-      return str('APIFY_BASE_URL', 'https://api.apify.com/v2')
-    },
-    get postsActor(): string {
-      return str('APIFY_LINKEDIN_POSTS_ACTOR', 'harvestapi~linkedin-post-search')
-    },
-    get hashtagActor(): string {
-      return str('APIFY_LINKEDIN_HASHTAG_ACTOR', 'harvestapi~linkedin-post-search')
-    },
-    get profileActor(): string {
-      return str('APIFY_LINKEDIN_PROFILE_ACTOR', 'harvestapi~linkedin-company-posts')
-    },
-    get runTimeoutMs(): number {
-      return int('APIFY_RUN_TIMEOUT_MS', 180000)
-    },
-    get maxItemsPerKeyword(): number {
-      return int('APIFY_MAX_ITEMS_PER_KEYWORD', 50)
-    },
-    get memoryMbytes(): number {
-      return int('APIFY_MEMORY_MBYTES', 1024)
-    },
-    get configured(): boolean {
-      return has('APIFY_API_TOKEN')
     },
   },
 
@@ -416,7 +385,6 @@ function statusFor(configured: boolean, envKey: string): IntegrationStatus {
 }
 
 export function integrationStatuses(): {
-  apify: IntegrationStatus
   parallel: IntegrationStatus
   gcp: IntegrationStatus
   ollama: IntegrationStatus & { textModel: string; imageModel: string }
@@ -453,7 +421,6 @@ export function integrationStatuses(): {
     (assistantProvider === 'ollama' && ollamaConfigured)
 
   return {
-    apify: statusFor(config.apify.configured, 'APIFY_API_TOKEN'),
     parallel: statusFor(config.parallel.configured, 'PARALLEL_API_KEY'),
     gcp: statusFor(gcpConfigured, 'GCP_API_KEY'),
     ollama: {
@@ -512,9 +479,8 @@ export function describeConfiguration(): string[] {
     `text        ${s.text.resolved}${s.text.resolved === 'template' ? '' : ` · ${s.text.resolved === 'ollama' ? config.ollama.textModel : config.gcp.textModel}`}`,
     `ollama      ${s.ollama.configured ? `live · ${config.ollama.baseUrl}` : 'not configured'}`,
     `mflux       ${s.mflux.configured ? `live · ${s.mflux.model}` : 'not configured'}`,
-    `crawl4ai    ${s.crawl4ai.configured ? 'live' : 'not configured'}`,
-    `apify       ${s.apify.configured ? 'live' : 'fixtures'}`,
-    `parallel    ${s.parallel.configured ? 'live' : 'fixtures'}`,
+    `crawl4ai    ${s.crawl4ai.configured ? 'live' : 'NOT CONFIGURED — nothing can be scraped'}`,
+    `parallel    ${s.parallel.configured ? 'live' : 'not configured'}`,
     `gcp         ${s.gcp.configured ? 'live' : 'template writer'}`,
     `z-image     ${s.zImage.configured ? 'live' : 'not configured'}`,
   ]

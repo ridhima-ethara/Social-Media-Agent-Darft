@@ -154,7 +154,7 @@ export interface ConnectorHealth {
   id: string
   label: string
   configured: boolean
-  /** A human sentence, e.g. "APIFY_API_TOKEN is not set". */
+  /** A human sentence, e.g. "CRAWL4AI_PYTHON is not set". */
   reason: string
   /** The env key that would switch it on. Empty for purely local connectors. */
   envKey: string

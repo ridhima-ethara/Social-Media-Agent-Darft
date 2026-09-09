@@ -23,7 +23,7 @@ import {
   type CommandFrame,
 } from './lib/assistant'
 import { speak as speakAloud, stopSpeaking, voiceEnabled } from './lib/voice'
-import { DEMO_NOTICES, DEMO_STATE } from './data/demo'
+import { EMPTY_STATE } from './data/empty'
 import type {
   ActivityEvent,
   AgentId,
@@ -276,9 +276,9 @@ function applyTheme(theme: Theme): void {
   }
 }
 
-/** Deep-clones the demo payload so mutations never write back into the module. */
-function freshDemoState(): StatePayload {
-  return structuredClone(DEMO_STATE)
+/** Deep-clones the empty payload so mutations never write back into the module. */
+function freshEmptyState(): StatePayload {
+  return structuredClone(EMPTY_STATE)
 }
 
 /**
@@ -345,7 +345,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
    THE STORE
    ═══════════════════════════════════════════════════════════════════════════ */
 
-const INITIAL = freshDemoState()
+const INITIAL = freshEmptyState()
 
 export const useStore = create<Store>((set, get) => ({
   ...stripAssistant(INITIAL),
@@ -362,7 +362,7 @@ export const useStore = create<Store>((set, get) => ({
 
   apiMode: 'probing',
   apiHealth: null,
-  integrations: DEMO_STATE.mode.integrations,
+  integrations: EMPTY_STATE.mode.integrations,
   hydrated: false,
 
   toasts: [],
@@ -378,12 +378,12 @@ export const useStore = create<Store>((set, get) => ({
     railOpen: false,
     listening: false,
     speaking: false,
-    conversationId: DEMO_STATE.assistant.conversation?.id ?? null,
-    turns: DEMO_STATE.assistant.turns,
+    conversationId: null,
+    turns: [],
     activePlan: null,
     pendingConfirm: null,
-    notices: DEMO_NOTICES,
-    brief: DEMO_STATE.assistant.brief,
+    notices: [],
+    brief: null,
     suggestions: [],
     lastEntity: null,
     streaming: false,
@@ -440,7 +440,9 @@ export const useStore = create<Store>((set, get) => ({
 
   /**
    * Probes `/health`, merges `/state`, and fails soft: on any failure the app
-   * stays fully usable on the bundled dataset and says so.
+   * stays usable and empty, and says exactly why it is empty. There is no
+   * bundled dataset to fall back to — showing one would mean showing figures
+   * no run produced.
    */
   connectToRuntime: async () => {
     const health = await detectApi()
@@ -450,7 +452,7 @@ export const useStore = create<Store>((set, get) => ({
         apiMode: 'standalone',
         apiHealth: null,
         hydrated: true,
-        integrations: DEMO_STATE.mode.integrations,
+        integrations: EMPTY_STATE.mode.integrations,
       })
       return
     }
@@ -476,13 +478,13 @@ export const useStore = create<Store>((set, get) => ({
         },
       })
     } catch (error) {
-      // The health check passed but the aggregate read did not. Keep the demo
-      // data rather than blanking the UI, and say exactly why.
+      // The health check passed but the aggregate read did not. Say exactly
+      // why rather than leaving an empty screen unexplained.
       set({ apiMode: 'standalone', hydrated: true })
       get().toast(
         `Connected to ${API_BASE} but could not read state — ${
           error instanceof Error ? error.message : 'unknown error'
-        } Showing local demo data.`,
+        } Nothing is displayed, because there is nothing to display.`,
         'warn',
         "If another project is on this port, set VITE_API_URL to this server's port.",
       )

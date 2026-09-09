@@ -15,14 +15,17 @@ import { KeywordBoard } from '../components/keyword-board'
 import { listVoices, setVoiceEnabled, speak, voiceSupport } from '../lib/voice'
 import { Badge, Btn, FacebookGlyph, InstagramGlyph, LinkedinGlyph, XGlyph } from '../components/ui'
 
-const APIFY_ACTORS = [
-  { label: 'LinkedIn posts search', value: 'apimaestro~linkedin-posts-search-scraper-no-cookies' },
-  { label: 'LinkedIn hashtag posts', value: 'apimaestro~linkedin-hashtag-posts-scraper' },
-  { label: 'LinkedIn profile posts', value: 'apimaestro~linkedin-profile-posts-scraper' },
+/** The lanes the Scraping Agent captures, in the order it runs them. */
+const CAPTURE_LANES = [
+  { label: 'LinkedIn', value: 'site:linkedin.com' },
+  { label: 'Instagram', value: 'site:instagram.com' },
+  { label: 'X', value: 'site:x.com OR site:twitter.com' },
+  { label: 'Facebook', value: 'site:facebook.com' },
+  { label: 'Open web', value: 'unscoped — platform domains excluded' },
 ]
 
 const SERVICES = [
-  { id: 'apify', label: 'Apify · LinkedIn scraping', env: 'APIFY_API_TOKEN' },
+  { id: 'crawl4ai', label: 'crawl4ai · all scraping', env: 'CRAWL4AI_PYTHON' },
   { id: 'parallel', label: 'Parallel Web Systems · deep research', env: 'PARALLEL_API_KEY' },
   { id: 'gcp', label: 'Google Cloud · Gemini and Imagen', env: 'GCP_API_KEY' },
   { id: 'z-image', label: 'Z-Image Turbo', env: 'Z_IMAGE_ENDPOINT' },
@@ -177,18 +180,25 @@ export function SettingsPage() {
           <div className="card mt-3 p-4">
             <h3 className="display text-sm">Sources</h3>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <span className="text-[11.5px] text-ink-3">Apify</span>
-              <Badge tone={statusOf('apify').configured ? 'good' : 'warn'}>
-                {statusOf('apify').configured ? 'Configured' : `Not configured — ${statusOf('apify').reason}`}
+              <span className="text-[11.5px] text-ink-3">crawl4ai</span>
+              <Badge tone={statusOf('crawl4ai').configured ? 'good' : 'warn'}>
+                {statusOf('crawl4ai').configured
+                  ? 'Configured'
+                  : `Not configured — ${statusOf('crawl4ai').reason}`}
               </Badge>
             </div>
 
+            <p className="mt-1.5 text-[11px] leading-relaxed text-ink-3">
+              Every keyword is captured once per lane. Instagram and Facebook index little to a
+              logged-out crawl, so those lanes are often thin — that is reported, never filled in.
+            </p>
+
             <div className="mt-2 space-y-1.5">
-              {APIFY_ACTORS.map((actor) => (
-                <label key={actor.value} className="block">
-                  <span className="text-[10px] uppercase tracking-[0.08em] text-ink-3">{actor.label}</span>
+              {CAPTURE_LANES.map((lane) => (
+                <label key={lane.label} className="block">
+                  <span className="text-[10px] uppercase tracking-[0.08em] text-ink-3">{lane.label}</span>
                   <input
-                    value={actor.value}
+                    value={lane.value}
                     readOnly
                     className="mono mt-0.5 w-full cursor-default rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[11px] text-ink-3 outline-none"
                   />
@@ -198,9 +208,9 @@ export function SettingsPage() {
 
             <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
               {[
-                { label: 'Max items per keyword', value: 50 },
-                { label: 'Run timeout', value: '180s' },
-                { label: 'Memory', value: '1024 MB' },
+                { label: 'Pages per keyword, per lane', value: 8 },
+                { label: 'Run timeout', value: '300s' },
+                { label: 'Search engines', value: 'DuckDuckGo, Bing' },
               ].map((limit) => (
                 <div key={limit.label} className="rounded-lg border border-line bg-surface-2 px-2.5 py-2">
                   <p className="text-[10px] uppercase tracking-[0.08em] text-ink-3">{limit.label}</p>

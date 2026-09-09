@@ -24,6 +24,7 @@ import {
   fmt,
   timeAgo,
 } from '../components/ui'
+import type { Platform } from '@shared/agent-contract'
 import type { Hashtag, ScrapedItem, ValidationVerdict } from '../types'
 
 type TabId = 'keywords' | 'hashtags' | 'scraped' | 'validation' | 'analysis'
@@ -34,6 +35,25 @@ const VERDICT_TONE: Record<ValidationVerdict, 'good' | 'warn' | 'neutral' | 'cri
   duplicate: 'neutral',
   rejected: 'critical',
   pending: 'neutral',
+}
+
+/**
+ * How a capture lane is named in the UI.
+ *
+ * `null` is the OPEN-WEB lane, not a missing value — an item captured by the
+ * unscoped search genuinely belongs to no platform, and rendering it as an em
+ * dash would read as "we failed to record this".
+ */
+function platformLabel(platform: Platform | null): string {
+  if (platform === null) return 'Open web'
+  return PLATFORM_LABEL[platform]
+}
+
+const PLATFORM_LABEL: Record<Platform, string> = {
+  linkedin: 'LinkedIn',
+  instagram: 'Instagram',
+  x: 'X',
+  facebook: 'Facebook',
 }
 
 const VERDICT_LABEL: Record<ValidationVerdict, string> = {
@@ -461,7 +481,7 @@ function ScrapedTab() {
             <tr className="border-b border-line text-[10px] uppercase tracking-[0.08em] text-ink-3">
               <th className="px-4 py-2 font-medium">Topic</th>
               <th className="px-3 py-2 font-medium">Source</th>
-              <th className="px-3 py-2 font-medium">Type</th>
+              <th className="px-3 py-2 font-medium">Platform</th>
               <th className="px-3 py-2 font-medium">Keyword</th>
               <th className="px-3 py-2 font-medium">Engagement</th>
               <th className="px-3 py-2 font-medium">Relevance</th>
@@ -482,9 +502,19 @@ function ScrapedTab() {
                     <span className="mt-0.5 block truncate text-[11px] text-ink-3">{item.snippet}</span>
                   </td>
                   <td className="px-3 py-2 text-ink-3">{item.source_name}</td>
-                  <td className="px-3 py-2 text-ink-3">{item.source_type}</td>
+                  <td className="px-3 py-2 text-ink-3">{platformLabel(item.platform)}</td>
                   <td className="px-3 py-2 text-ink-3">{item.keyword_term}</td>
-                  <td className="tabular px-3 py-2 text-ink-2">{fmt(item.engagement)}</td>
+                  {/* Constraint 2: a source that stated no figure has none. An
+                      em dash is the honest cell; a zero would read as a verdict. */}
+                  <td className="tabular px-3 py-2 text-ink-2">
+                    {item.metrics_available ? (
+                      fmt(item.engagement)
+                    ) : (
+                      <span className="text-ink-3" title="This source states no engagement figures">
+                        —
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 py-2">
                     <span
                       className="tabular font-medium"
@@ -609,7 +639,9 @@ function AnalysisTab() {
     <div className="stagger-fade grid gap-3 lg:grid-cols-2">
       {top.map((item, i) => {
         const tag = hashtagFor(item)
-        const brandRelevance = Math.min(99, item.relevance + 4)
+        // The score the Scraping Agent computed at capture, not a derivation
+        // of the Validation Agent's relevance. Two different measurements.
+        const brandRelevance = item.brand_relevance
         const trendScore = tag?.hashtag_score ?? Math.round(item.relevance * 0.92)
 
         return (
@@ -629,9 +661,12 @@ function AnalysisTab() {
             <div className="mt-3 grid grid-cols-2 gap-1.5 sm:grid-cols-3">
               <Metric label="Brand relevance" value={`${brandRelevance}%`} />
               <Metric label="Trend score" value={trendScore} />
-              <Metric label="Engagement" value={fmt(item.engagement)} />
-              <Metric label="Format" value={item.engagement > 2_000 ? 'Thought Leadership' : 'Short Post'} />
-              <Metric label="Platform" value="LinkedIn" />
+              <Metric
+                label="Engagement"
+                value={item.metrics_available ? fmt(item.engagement) : 'Not stated'}
+              />
+              <Metric label="Source" value={item.source_type ?? '—'} />
+              <Metric label="Platform" value={platformLabel(item.platform)} />
               <Metric
                 label="Best day"
                 value={new Date(item.posted_at ?? item.scraped_at).toLocaleDateString('en-GB', { weekday: 'long' })}

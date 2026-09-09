@@ -305,7 +305,13 @@ registerSkill<PipelinePayload>('validation.relevance.score', (payload, ctx) => {
     // Topic overlap can only RAISE relevance. The absence of a keyword is not
     // evidence of irrelevance, so nothing here subtracts.
     const hits = countTopicMatches(`${post.text} ${post.hashtags.join(' ')}`)
-    post.relevance = clamp(baseRelevance + hits * 14, 0, 100)
+    const topical = clamp(baseRelevance + hits * 14, 0, 100)
+    // The Scraping Agent already scored this body against the brand topics AND
+    // the live Knowledge Base at capture. Reading that score rather than
+    // re-deriving half of it means a page that echoes what the company has
+    // actually learned is not marked irrelevant for missing a declared topic
+    // word — and it keeps the two agents from disagreeing about the same body.
+    post.relevance = Math.max(topical, post.brandRelevance ?? 0)
   }
 
   for (const candidate of candidates) {
@@ -511,7 +517,14 @@ registerSkill<PipelinePayload>('validation.verdict.route', (payload, ctx) => {
       credibility: post.credibility,
       existingReason: post.verdictReason,
       label: `“${post.title}”`,
-      evidence: `relevance ${post.relevance}%, credibility ${post.credibility} (${post.credibilityScore}), ${post.engagement} engagements`,
+      // Constraint 2: a source that states no reaction count has none, and
+      // “0 engagements” would read as a performance verdict rather than as an
+      // absent measurement.
+      evidence:
+        `relevance ${post.relevance}%, credibility ${post.credibility} (${post.credibilityScore}), ` +
+        (post.metricsAvailable
+          ? `${post.engagement} engagements`
+          : 'engagement not stated by the source'),
       topics: matchedTopics(post.text),
       acceptThreshold,
       rejectThreshold,

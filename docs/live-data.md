@@ -1,8 +1,9 @@
-# Going live — what each agent needs to stop using demo data
+# Going live — what each agent needs
 
-Every agent already runs. What decides whether it reads **live** or **fixture** data is whether its
-connector is configured. Set the key, restart the server, and the agent switches — the code path is
-identical either way, only the binding changes, and every artefact says which it was.
+Every agent already runs. There is no demo dataset anywhere in the product: what a screen shows is
+what a run captured, or nothing. Scraping is live today via crawl4ai and needs no key; the remaining
+connectors below improve what the pipeline does with what it captured, and each one says on the
+artefact whether it answered.
 
 Check what is live right now: `GET /api/health` → `integrations`, or **Settings → Prototype mode**.
 
@@ -10,16 +11,16 @@ Check what is live right now: `GET /api/health` → `integrations`, or **Setting
 
 | Agent | What it needs live | Connector / key | Cost | Status today |
 |---|---|---|---|---|
-| **Scraping** | LinkedIn posts, hashtag feeds, competitor pages | Apify · `APIFY_API_TOKEN` (`docs/apify.md`) | free tier: $5/mo ≈ 2,500 posts | **Ready** — set the key |
+| **Scraping** | Posts across LinkedIn, Instagram, X, Facebook and the open web | crawl4ai · `CRAWL4AI_PYTHON` (keyless, local) | free — a headless browser on this machine | **Live already** — and the only scraping path |
 | **Validation** | Nothing external. Scores what Scraping captured | — | — | Live already |
 | **Analysis** | Nothing external | — | — | Live already |
-| **Knowledge** | Deep research on the top 25 hashtags | Parallel · `PARALLEL_API_KEY` **or** the keyless sources | Parallel paid; arXiv / Semantic Scholar / PwC / GDELT **free** | **Ready** — keyless sources probe live today; Parallel is optional |
+| **Knowledge** | Deep research on the top 25 hashtags | Parallel · `PARALLEL_API_KEY`; crawl4ai reads the open web when it is absent | Parallel paid; crawl4ai free | **Live already** on crawl4ai; Parallel adds synthesis |
 | **Calendar** | This account's own hour-by-hour engagement history | Analytics readings (below) | — | Live once Analytics is |
 | **Caption** | A language model, grounded in the Knowledge Base | Gemini · `GCP_API_KEY` (or Vertex: `GCP_PROJECT_ID` + `GCP_SERVICE_ACCOUNT_JSON`) | Gemini Flash free tier covers this volume | **Ready** — set the key; the template writer is the fallback |
 | **Image** | A background painter (the brand layer is always local) | Imagen · `GCP_API_KEY` **or** Z-Image · `Z_IMAGE_ENDPOINT` | Imagen paid per image; Z-Image self-hosted free | **Ready** — `brand-svg` alone is a complete fallback |
 | **Review** | Nothing external. Twenty rules, computed | — | — | Live already |
 | **Publishing** | Platform APIs | `LINKEDIN_ACCESS_TOKEN` · `INSTAGRAM_ACCESS_TOKEN` · `X_ACCESS_TOKEN` · `FACEBOOK_ACCESS_TOKEN` + `PUBLISH_MODE=live` | free (LinkedIn/Meta) · X paid tier | **Adapter interface exists; live dispatch not wired** (see below) |
-| **Analytics** | Post metrics and monthly rollups | Platform analytics APIs (same tokens) | free with the token | **Not wired** — readings are seeded/simulated |
+| **Analytics** | Post metrics and monthly rollups | Platform analytics APIs (same tokens) | free with the token | **Not wired** — and nothing is seeded in its place, so the screens are empty until it is |
 | **Learning** | Nothing external. Reads Analytics + human decisions | — | — | Live once Analytics is |
 | **Command plane** | Intent parsing + narration | Gemini · `ASSISTANT_MODEL_PROVIDER=gcp` + `GCP_API_KEY` | free tier | **Ready** — the deterministic parser is the fallback |
 
@@ -28,8 +29,9 @@ Analytics — are where real integration work remains.
 
 ## Order of operations
 
-1. **Apify first.** It is the source of everything downstream and the cheapest to prove.
-   `APIFY_API_TOKEN` → `npm run apify:probe -- --live` → Run SocialAI.
+1. **crawl4ai first**, and it is already done on a machine that ran `npm run setup`: install the
+   backend venv and `playwright install chromium`, set `CRAWL4AI_PYTHON`, then Run Discovery. It is
+   the source of everything downstream, and it costs nothing.
 2. **Gemini next.** One key turns on Caption, Image backgrounds and the command plane's model
    parser. `GCP_API_KEY` from AI Studio; free tier is enough.
 3. **Research** already probes live (arXiv returned real results in `npm run connectors`). Add
@@ -61,12 +63,12 @@ renderer produces data URIs today, so live publishing to those two also needs an
 | Skill / server | What it does here |
 |---|---|
 | `packages/skills/*/SKILL.md` | The behavioural spec each agent runs under — built into `packages/runtime/.claude/skills/` by `npm run build-skills` |
-| `.mcp.json` → Apify MCP | Lets a Claude Code session search the Store, read an actor's schema, and call an actor without leaving the terminal |
 | `packages/mcp/*` | Typed connectors: similarity (local), research-sources (keyless), kb, render, publisher |
 | `npm run connectors` | Proves reachability instead of asserting it |
 
 ## What "live" changes in the UI
 
-Nothing moves. The same screens render; the badges flip from `fixture` to `live`, the fallback
-banners disappear, and the Settings → Prototype mode card shows each service as `live`. That is the
-design: falling back changes which implementation is bound, never which code path runs.
+Nothing moves. The same screens render; the fallback banners disappear and the Settings card shows
+each service as `live`. That is the design: binding a different implementation changes which one
+answers, never which code path runs. What it will never do is fill a screen — with no key and no
+run, the screens are empty, and that is the honest reading.

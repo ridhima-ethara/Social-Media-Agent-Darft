@@ -50,11 +50,36 @@ export interface ScrapedPost {
   keywordId: string | null
   sourceName: string
   sourceType: string
+  /**
+   * Which platform lane captured it — `null` for the open-web lane. Recorded
+   * at capture rather than re-derived from the URL downstream.
+   */
+  platform: Platform | null
+  /**
+   * Whether the source stated engagement figures. False for everything a
+   * search-indexed crawl returns, which is what makes the three count fields
+   * readable as "not applicable" rather than as zero (constraint 2).
+   */
+  metricsAvailable: boolean
+  /**
+   * 0–100. How well the body aligns with the brand topic set and the live
+   * Knowledge Base, scored at capture by `scraping.linkedin.fetch`. Anything
+   * below the run's floor never became a record at all.
+   */
+  brandRelevance: number
+  /** Which brand topics the body actually touched — the evidence for the score. */
+  alignedTopics: string[]
+  /** How many Knowledge Base terms it echoed. */
+  knowledgeHits: number
   /** Filled by `scraping.engagement.capture`. */
   engagement: number
   engagementScore: number
   velocity: number
-  /** Which implementation produced it, and why, when it fell back. */
+  /**
+   * Which implementation produced it. Always `'live'` now that crawl4ai is the
+   * only source; `'fixture'` survives as a persisted storage value on
+   * `scraped_items` for rows written before that was true.
+   */
   captureSource: 'live' | 'fixture'
   fallbackReason?: string
   /* Scored by the Validation Agent. */
@@ -76,6 +101,10 @@ export interface HashtagCandidate {
   postCount: number
   totalEngagement: number
   engagementPerPost: number
+  /** Mean brand alignment of the pages carrying the tag, 0–100. */
+  brandRelevance: number
+  /** Which lanes surfaced it — `'open-web'` for the unscoped tier. */
+  platforms: string[]
   firstSeenAt: string
   lastSeenAt: string
   /** Every keyword whose query surfaced this tag. */
@@ -85,7 +114,7 @@ export interface HashtagCandidate {
   /** The strongest post that carried it, by engagement. */
   topPostUrl: string | null
   topPostTitle: string | null
-  /** Set by `scraping.hashtag.expand` when the tag's own feed was read. */
+  /** Set by `scraping.hashtag.expand` when the tag was read independently. */
   independentPostCount?: number
   independentEngagement?: number
   expandedSource?: 'live' | 'fixture'

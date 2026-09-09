@@ -80,7 +80,7 @@ names a package that does not exist yet, say so rather than guessing.
 | `packages/contracts` | **Equivalent** | `shared/agent-contract.ts` — zero dependencies, keep it that way |
 | `packages/mcp/similarity` | **Equivalent** | `similarity()` in `shared/brand-voice.ts` — Dice over content-word bigrams, computed never judged |
 | `packages/agents/NN-<id>/{spec,prompt}.ts` | **Done** — twelve folders, roster assembled from them, `graph.ts` derives the order | handlers live beside them in `server/src/agents/<id>/handlers.ts`; `agent:check` enforces folder↔registry↔handlers agreement |
-| `packages/mcp/{kb,research-sources,render,publisher,similarity}` | **Done** — typed connectors, `npm run connectors` audits them | the server's own adapters remain in `server/src/integrations/`; Apify per https://apify.com/agents.md |
+| `packages/mcp/{kb,research-sources,render,publisher,similarity}` | **Done** — typed connectors, `npm run connectors` audits them | the server's own adapters remain in `server/src/integrations/` |
 | `packages/orchestrator` | **Not started** | `server/src/orchestrator.ts` — sequential, in-process (phase 1 shape already) |
 | `evals/suites/` | **Not started** | every SKILL.md now has the `Boundaries` list the suites derive from |
 | `docs/architecture-v2.md`, `docs/agent-contract.md` | **Not started** | generated equivalents in `specs/architecture.md` and `specs/agents/` |
@@ -162,7 +162,7 @@ server/src/
   agents/<id>/handlers.ts   the 91 handlers, one file per agent, registered by id
   agents/skills/_register.ts one import per agent, in pipeline order; index.ts holds the payload types
   assistant/            perceive → interpret → plan → confirm → dispatch → narrate → verify → remember
-  integrations/      Apify · Parallel · GCP · image models, each with a fixture fallback
+  integrations/      crawl4ai (all scraping) · Parallel · GCP · image models
   db/                raw SQL only — no ORM, no query builder
 
 src/               the web app
@@ -182,9 +182,11 @@ src/               the web app
 2. **No hardcoded tunables.** Every number an operator might want to change is a
    declared `ConfigField` with a plain-language `description`, read through
    `ctx.config`. A constant in a handler is a knob the operator cannot see.
-3. **Every external service is behind an adapter** with `isConfigured()`,
-   `unavailableReason()` and a deterministic offline fallback stamped
-   `{ source: 'live' | 'fixture', fallbackReason }`.
+3. **Every external service is behind an adapter** with `isConfigured()` and
+   `unavailableReason()`. Where a degraded path exists it is another real
+   implementation, stamped `{ source, fallbackReason }` — never invented data.
+   Scraping has no degraded path at all: crawl4ai answers or the run reports
+   what it could not capture.
 4. **Nothing is ever deleted.** Rejections keep their reason; duplicates set
    `duplicate_of_id`; knowledge deactivates; ideas are withdrawn; drafts
    increment `revision`.
@@ -196,9 +198,11 @@ src/               the web app
    confirmation.** Resuming replays the *stored plan*, never a re-parse.
 8. **State is server-truth; events are notifications.** The client reconciles by
    refetching `/state`, never by replaying the SSE log.
-9. **Degrade, never fail.** No API → demo data. No service key → fixtures,
-   labelled. No image model → the local brand renderer, labelled. The mode is
-   always visible.
+9. **Degrade honestly, never fabricate.** No image model → the local brand
+   renderer, labelled. No research key → crawl4ai reads the open web, labelled.
+   No crawl4ai → nothing is captured, and the run says so. An empty screen is a
+   correct answer; a plausible one nothing measured is not. The mode is always
+   visible.
 10. **Every motion respects `prefers-reduced-motion`, and no colour is
     hard-coded in a component.**
 11. **Real TypeScript.** `strict: true`, no `any` in an exported signature, no

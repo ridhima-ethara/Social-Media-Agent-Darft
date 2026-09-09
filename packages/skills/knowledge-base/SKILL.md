@@ -54,7 +54,7 @@ all in one store with one retrieval path.
 
 | Situation | Correct behaviour |
 |---|---|
-| The research service is unconfigured | Build from fixtures; stamp every entry with the reason |
+| The research service is unconfigured | Read the open web with crawl4ai instead; stamp every entry with the reason. Never write an uncited entry |
 | A hashtag returns one source | Discard the candidate entry and report the discard |
 | Two entries disagree on a figure | Apply the strategy, or escalate both, holding both |
 | Retrieval finds nothing for a topic | Return empty; the caller writes ungrounded and says so |

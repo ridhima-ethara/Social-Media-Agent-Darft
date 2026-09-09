@@ -155,7 +155,6 @@ export function createApiRouter(): Router {
       registry: REGISTRY_SUMMARY,
       tools: TOOL_SUMMARY,
       integrations: {
-        apify: { configured: statuses.apify.configured, reason: statuses.apify.reason },
         crawl4ai: { configured: statuses.crawl4ai.configured, reason: statuses.crawl4ai.reason },
         parallel: { configured: statuses.parallel.configured, reason: statuses.parallel.reason },
         gcp: { configured: statuses.gcp.configured, reason: statuses.gcp.reason },

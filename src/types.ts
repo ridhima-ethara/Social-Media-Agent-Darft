@@ -133,6 +133,19 @@ export interface ScrapedItem {
   validation: ValidationVerdict
   verdict_reason: string | null
   capture_source: 'live' | 'fixture'
+  /**
+   * Which lane captured it. `null` is the open-web lane — a real value, not a
+   * gap, so render it as "Open web" rather than as an em dash.
+   */
+  platform: Platform | null
+  /**
+   * Whether the source stated engagement figures. When false, the four count
+   * fields above mean *not applicable* and must not be rendered as a
+   * performance reading of zero.
+   */
+  metrics_available: boolean
+  /** 0-100 alignment with the brand topics and the Knowledge Base, at capture. */
+  brand_relevance: number
   posted_at: string | null
   scraped_at: string
 }
@@ -147,6 +160,10 @@ export interface Hashtag {
   post_count: number
   total_engagement: number
   engagement_per_post: string
+  /** Mean brand alignment of the pages carrying the tag. */
+  brand_relevance: number
+  /** Which lanes surfaced it; `'open-web'` for the unscoped tier. */
+  platforms: string[]
   relevance: number
   credibility: string
   freshness: number

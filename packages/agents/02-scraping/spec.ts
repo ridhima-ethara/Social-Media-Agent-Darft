@@ -4,7 +4,8 @@
  * The seven fields every agent conforms to, plus the skill that specifies its
  * behaviour, the tools it may hold, and the runtime skills it executes.
  *
- * Stage: Discover · Scrape LinkedIn for movement across the keyword set.
+ * Stage: Discover · Crawl LinkedIn, Instagram, X, Facebook and the open web
+ *                    for movement across the keyword set.
  *
  * Related files:
  *   spec      packages/skills/content-scraper/SKILL.md          — the behavioural specification
@@ -19,14 +20,15 @@ export const spec: AgentSpec = {
   id: 'scraping',
   name: 'Scraping Agent',
   stage: 'discover',
-  role: 'Captures public LinkedIn activity for the keyword set.',
+  role: 'Captures public activity for the keyword set across four platforms and the open web, via crawl4ai.',
   description:
-    'Gathers. Does not judge. Every scraped body is wrapped as untrusted evidence before it reaches a model, and every exclusion is counted rather than silently dropped.',
+    'Gathers. Does not judge. Admits only what aligns with the brand topic set and the Knowledge Base, wraps every captured body as untrusted evidence before it reaches a model, and counts every exclusion rather than silently dropping it. A lane that returns nothing returns nothing — there is no corpus behind it.',
   consumes: [
     'keyword set',
+    'knowledge base',
   ],
   produces: [
-    'raw posts',
+    'captured pages, per platform',
     'hashtag candidates',
   ],
   handsOffTo: [

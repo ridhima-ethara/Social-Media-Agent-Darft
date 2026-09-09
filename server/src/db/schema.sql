@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS hashtags (
   post_count          INTEGER NOT NULL DEFAULT 0,
   total_engagement    INTEGER NOT NULL DEFAULT 0,
   engagement_per_post NUMERIC(10,2) NOT NULL DEFAULT 0,
+  -- Mean brand alignment of the pages carrying the tag. On a corpus with no
+  -- stated engagement this is what ranking actually runs on.
+  brand_relevance     SMALLINT NOT NULL DEFAULT 0,
+  -- Which lanes surfaced it; 'open-web' for the unscoped tier.
+  platforms           TEXT[] NOT NULL DEFAULT '{}',
   relevance           SMALLINT NOT NULL DEFAULT 0,
   credibility         TEXT NOT NULL DEFAULT 'Medium' CHECK (credibility IN ('High','Medium','Low')),
   freshness           SMALLINT NOT NULL DEFAULT 0,
@@ -147,6 +152,16 @@ CREATE TABLE IF NOT EXISTS scraped_items (
   verdict_reason   TEXT,
   -- Which implementation produced this row. Surfaced in the UI, always.
   capture_source   TEXT NOT NULL DEFAULT 'fixture' CHECK (capture_source IN ('live','fixture')),
+  -- Which platform lane captured it. NULL is the open-web lane and is a real
+  -- value, not a missing one — hence no default and no NOT NULL.
+  platform         TEXT CHECK (platform IN ('linkedin','instagram','x','facebook')),
+  -- Whether the source stated engagement figures. FALSE is what makes the four
+  -- count columns above readable as "not applicable" rather than as zero: a
+  -- search-indexed page has no reaction count, and never had one.
+  metrics_available BOOLEAN NOT NULL DEFAULT false,
+  -- How well the body aligned with the brand topics and the Knowledge Base,
+  -- scored at capture. Anything below the run's floor never became a row.
+  brand_relevance  SMALLINT NOT NULL DEFAULT 0,
   posted_at        TIMESTAMPTZ,
   scraped_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   validated_at     TIMESTAMPTZ
@@ -156,6 +171,9 @@ CREATE INDEX IF NOT EXISTS scraped_items_workspace_scraped_idx
   ON scraped_items (workspace_id, scraped_at DESC);
 CREATE INDEX IF NOT EXISTS scraped_items_workspace_validation_idx
   ON scraped_items (workspace_id, validation);
+-- The per-platform breakdown the console renders is a filter on this.
+CREATE INDEX IF NOT EXISTS scraped_items_workspace_platform_idx
+  ON scraped_items (workspace_id, platform);
 -- Unique, not merely indexed: a re-run must UPDATE the item it already captured
 -- rather than stack a second copy. This is the conflict target `persistScrapedItems`
 -- upserts on.

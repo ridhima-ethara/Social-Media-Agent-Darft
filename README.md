@@ -105,9 +105,9 @@ Copy `server/.env.example` to `server/.env`. Every key may be left blank.
 
 | Blank key | What happens |
 |---|---|
-| `APIFY_API_TOKEN` | LinkedIn scraping reads the bundled fixture corpus, stamped `fixture` |
+| `CRAWL4AI_PYTHON` | **Nothing is captured at all.** This is the only scraping path; there is no corpus behind it |
 | `FACEBOOK_ACCESS_TOKEN` (and the other platform tokens) | Publishing runs in demo mode; every receipt says so |
-| `PARALLEL_API_KEY` | Research reads the bundled research corpus, with the reason on every entry |
+| `PARALLEL_API_KEY` | Research reads the open web with crawl4ai instead, with the reason on every entry |
 | `GCP_API_KEY` | Captions come from the deterministic template writer |
 | `GCP_API_KEY` + `Z_IMAGE_ENDPOINT` | Creatives render locally with the brand renderer |
 | `ASSISTANT_MODEL_PROVIDER` | Ethara runs on the built-in grammar parser — blunter, fully working |
@@ -116,38 +116,48 @@ Every fallback is **labelled in the UI**, on the card it affected. The mode is a
 health endpoint reports the database, the publish mode and the command plane provider, and the header, the
 telemetry ticker and Settings all surface it.
 
-### Apify — live LinkedIn trends
+### crawl4ai — the only scraping path
 
-Set `APIFY_API_TOKEN` in `server/.env` (from <https://console.apify.com/settings/integrations>) and the
-Scraping Agent runs live. The setup follows <https://apify.com/agents.md>: the token travels as
-`Authorization: Bearer`, never in the query string; cost caps (`maxItems`) go in the query, never the
-input body; a run that outgrows the synchronous window is started asynchronously and polled.
+Every post the pipeline sees comes from a local, keyless crawl. `CRAWL4AI_PYTHON` points at the
+interpreter of `backend/.venv`, and the Scraping Agent spawns `backend/tools/crawl.py` as a sidecar
+— crawl4ai drives a headless browser, which is a local process rather than an endpoint.
 
-The default actors are the ones with documented output shapes:
+Each keyword is captured once **per lane**:
 
-| Job | Actor | Input |
+| Lane | Query | What it actually reads |
 |---|---|---|
-| Keyword post search | `harvestapi~linkedin-post-search` | `searchQueries`, `maxPosts`, `sortBy`, `postedLimit` |
-| Hashtag feed | same actor, query `#tag` | an independent volume reading |
-| Competitor pages | `harvestapi~linkedin-company-posts` | `targetUrls`, `maxPosts` |
+| LinkedIn | `<keyword> site:linkedin.com` | public posts, Pulse articles and company pages the engine indexed |
+| Instagram | `<keyword> site:instagram.com` | very little — Instagram is login-walled to a logged-out crawl |
+| X | `<keyword> (site:x.com OR site:twitter.com)` | indexed public posts |
+| Facebook | `<keyword> site:facebook.com` | public pages; likewise thin |
+| Open web | unscoped, platform domains excluded | where the substantive material usually is |
 
-Every trending keyword and hashtag carries the URLs to open it: the LinkedIn content search or
-hashtag feed, and the strongest post that carried it. They show on Content Intelligence, come back
-from `GET /api/trends`, and export as CSV from `GET /api/trends.csv`.
+Two things this deliberately does **not** do. It does not invent engagement figures: a
+search-indexed page states no reaction count, so `metricsAvailable` is false and the count fields
+stay at zero meaning *not applicable*, never *performed badly*. And it does not fill an empty lane:
+Instagram returning nothing for a keyword is a real finding about Instagram, and it is reported as
+one.
+
+Every captured page is scored at capture against the brand topic set **and** the live Knowledge
+Base, and anything aligning with neither is dropped with the count recorded. That score travels on
+the record as `brandRelevance`, so the Validation Agent inherits the evidence rather than
+re-deriving it.
 
 ```bash
-npm run apify:probe            # token + actors, no paid run
-npm run apify:probe -- --live  # plus one search capped at 3 results
+backend/.venv/bin/pip install -r backend/requirements.txt
+backend/.venv/bin/python -m playwright install chromium
+# One lane, by hand:
+backend/.venv/bin/python -m tools.crawl --keywords "RLHF" --platform linkedin --max-pages 3
 ```
 
-`.mcp.json` registers Apify's MCP server for Claude Code, so an agent session can search the Store
-and read an actor's input schema without leaving the terminal.
+Every trending keyword and hashtag carries the URLs to open it, and the strongest page that carried
+it. They show on Content Intelligence, come back from `GET /api/trends`, and export as CSV from
+`GET /api/trends.csv`.
 
 ### Going live, agent by agent
 
-`docs/live-data.md` lists, per agent, the connector and key that switches it from fixtures to live
-data, what it costs, and what still has to be built for live publishing and analytics.
-`docs/apify.md` covers the scraping side in detail, including how to run it on the free tier.
+`docs/live-data.md` lists, per agent, the connector and key it needs, what it costs, and what still
+has to be built for live publishing and analytics.
 
 ### Degradation
 

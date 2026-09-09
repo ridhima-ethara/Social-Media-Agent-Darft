@@ -399,9 +399,12 @@ tool('pipeline.run', async (args, ctx) => {
       ideas: result.ideas,
     },
     render: 'kpi',
-    ...(s.source === 'fixture' && s.fallbackReasons.length > 0
+    // Lanes that returned nothing are named even on a successful run: a
+    // platform that indexed no page for a keyword is a real finding about that
+    // platform, not a hidden degradation.
+    ...(s.fallbackReasons.length > 0
       ? {
-          fallbackReason: `That ran on the bundled LinkedIn corpus — ${s.fallbackReasons[0]}. Set APIFY_API_TOKEN and I will run it live.`,
+          fallbackReason: `Some capture lanes returned nothing — ${s.fallbackReasons[0]}.`,
         }
       : {}),
     postcondition: {

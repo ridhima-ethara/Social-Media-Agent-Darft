@@ -220,7 +220,7 @@ export interface ServiceAdapter<TIn, TOut> {
   readonly label: string
   /** Reads env LAZILY, at call time — never at import time. */
   isConfigured(): boolean
-  /** A human sentence, e.g. "APIFY_API_TOKEN is not set". */
+  /** A human sentence, e.g. "CRAWL4AI_PYTHON is not set". */
   unavailableReason(): string
   /** Throws on non-2xx or an unparseable body. Callers catch and fall back. */
   run(input: TIn): Promise<TOut>

@@ -6,15 +6,16 @@
  * marketing. The objective text is part of the contract: the extraction step
  * downstream depends on getting cited claims back rather than prose.
  *
- * Blank `PARALLEL_API_KEY` ⇒ the bundled research corpus. Either way, an entry
- * that cannot cite `minSources` independent URLs is discarded downstream — an
- * uncited claim never enters the Knowledge Base.
+ * Blank `PARALLEL_API_KEY` ⇒ no research runs at all. There is no bundled
+ * corpus behind this: an entry that cannot cite `minSources` independent URLs
+ * is discarded downstream, and an uncited claim never enters the Knowledge
+ * Base — which is precisely why there is nothing to substitute when the
+ * adapter cannot answer.
  */
 
 import type { ServiceAdapter } from '../../../shared/agent-contract'
 import { config } from '../config'
 import { AdapterError, fetchJson } from './adapter'
-import { type FixtureResearch, researchFor } from './fixtures/research'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    SHAPES
@@ -46,7 +47,7 @@ export interface ParallelSearchInput {
 
 /**
  * The objective sent to Parallel. Kept as a function so the wording is in one
- * place and the fixture path can be reasoned about against the same question.
+ * place, and so the question the Knowledge Base was built from stays quotable.
  */
 export function researchObjective(hashtag: string, domain: string, windowDays: number): string {
   const tag = hashtag.replace(/^#/, '')
@@ -222,42 +223,6 @@ function deriveTitle(body: string, hashtag: string): string {
   if (trimmed.length >= 24 && trimmed.length <= 120) return trimmed.replace(/[.]$/, '')
   const tag = hashtag.replace(/^#/, '').replace(/([a-z])([A-Z])/g, '$1 $2')
   return `Recent findings on ${tag}`
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   THE FIXTURE PATH
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function fixtureToFinding(entry: FixtureResearch, now: Date): ResearchFinding {
-  return {
-    hashtag: entry.hashtag,
-    title: entry.title,
-    content: entry.content,
-    category: entry.category,
-    citations: entry.sources.map((s) => {
-      const at = new Date(now)
-      at.setDate(at.getDate() - s.publishedDaysAgo)
-      return {
-        title: s.title,
-        url: s.url,
-        publishedAt: at.toISOString().slice(0, 10),
-      }
-    }),
-  }
-}
-
-/**
- * The offline research for one hashtag.
- *
- * Returns an empty array when the corpus has nothing, so the extraction step
- * can honestly record "no findings" rather than inventing an uncited entry.
- * That is the same behaviour as a live call that found nothing citable.
- */
-export function parallelFixtureFindings(
-  hashtag: string,
-  now = new Date(),
-): ResearchFinding[] {
-  return researchFor(hashtag).map((entry) => fixtureToFinding(entry, now))
 }
 
 /** The six declared research domains, for scoping the objective. */

@@ -41,6 +41,11 @@ const KEY_ALIASES: Record<string, Record<string, string>> = {
     maxItems: 'maxItemsPerKeyword',
     dateRange: 'datePosted',
   },
+  // `datePosted`, `sortBy` and `minAuthorFollowers` were connector parameters,
+  // not knobs with a crawl4ai equivalent: a search engine is asked for a query,
+  // not for a sort order or a follower floor. A stored row still carrying them
+  // resolves to nothing, which is correct — the registry no longer declares
+  // them, so `resolveConfig` drops what it cannot map.
   'validation.keyword.trend': {
     // Was `topN` while there was only one "top" in the product.
     topN: 'topKeywords',
@@ -95,13 +100,6 @@ const VALUE_ALIASES: Record<string, Record<string, Record<string, string>>> = {
       day: 'past-24h',
       week: 'past-week',
       month: 'past-month',
-    },
-  },
-  'scraping.competitor.track': {
-    tier: {
-      p0: 'P0 only',
-      'p0+p1': 'P0+P1',
-      all: 'All',
     },
   },
   'knowledge.conflict.resolve': {

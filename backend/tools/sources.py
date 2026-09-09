@@ -17,12 +17,10 @@ import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from core.schema import HashtagCandidate, Platform, RawPost
 
-FIXTURES = Path(__file__).resolve().parent.parent / "data" / "fixtures.json"
 TIMEOUT = 20
 
 # Reddit rejects generic agents. This is the format its API documents.
@@ -42,60 +40,6 @@ def _get_json(url: str, headers: dict[str, str] | None = None) -> Any:
 
 
 # ── Sources ────────────────────────────────────────────────────────────────
-
-def _apify_configured() -> bool:
-    return bool(os.environ.get("APIFY_API_TOKEN"))
-
-
-def _fetch_apify(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
-    """
-    LinkedIn via Apify. Bearer header, cost cap in the query string — never the
-    body, so a misconfigured actor cannot run past the cap.
-    """
-    actor = os.environ.get("APIFY_LINKEDIN_POSTS_ACTOR", "harvestapi~linkedin-post-search")
-    base = os.environ.get("APIFY_BASE_URL", "https://api.apify.com/v2")
-    url = f"{base}/actors/{actor}/run-sync-get-dataset-items?maxItems={max_items}"
-    body = json.dumps({
-        "searchQueries": [keyword],
-        "maxPosts": max_items,
-        "sortBy": "date",
-        "postedLimit": "week" if window_days <= 7 else "month",
-    }).encode()
-    request = urllib.request.Request(
-        url, data=body,
-        headers={
-            "Authorization": f"Bearer {os.environ['APIFY_API_TOKEN']}",
-            "Content-Type": "application/json",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310
-        items = json.loads(response.read().decode("utf-8"))
-
-    posts: list[RawPost] = []
-    for item in items if isinstance(items, list) else items.get("items", []):
-        text = item.get("content") or item.get("text") or ""
-        link = item.get("linkedinUrl") or item.get("url") or ""
-        if not text or not link:
-            continue
-        engagement = item.get("engagement") or {}
-        author = item.get("author") or {}
-        posts.append(RawPost(
-            external_id=str(item.get("id") or link),
-            text=text,
-            url=link,
-            author_name=author.get("name", ""),
-            author_headline=author.get("info", ""),
-            posted_at=(item.get("postedAt") or {}).get("date", ""),
-            reactions=int(engagement.get("likes") or 0),
-            comments=int(engagement.get("comments") or 0),
-            reposts=int(engagement.get("shares") or 0),
-            hashtags=extract_hashtags(text),
-            keyword=keyword,
-            source_name="LinkedIn · Apify",
-            platform=Platform.LINKEDIN,
-        ))
-    return posts
-
 
 def _fetch_reddit(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
     """Reddit's public JSON. Keyless and free — no token, no cost."""
@@ -171,9 +115,11 @@ def _crawl4ai_configured() -> bool:
     return True
 
 
-def _fetch_crawl4ai(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
+def _crawl(keyword: str, max_items: int, platform: str | None) -> list[RawPost]:
     """
-    The open web, via crawl4ai. Keyless: it searches, then reads the results.
+    One crawl4ai capture, scoped to `platform` or unscoped for the open web.
+
+    Keyless: it searches, then reads the results.
 
     ON THE ENGAGEMENT FIELDS. A web page has no reaction count. `RawPost`
     defaults the trio to 0 and this function leaves them there rather than
@@ -181,9 +127,9 @@ def _fetch_crawl4ai(keyword: str, max_items: int, window_days: int) -> list[RawP
     from a website, so nothing downstream reads those zeros as a performance
     reading (constraint 2 — N/A is never 0).
 
-    `window_days` is accepted for signature parity with the other sources and
-    is not honoured: a search engine decides its own recency, and pretending to
-    filter on a date the page may not state would be a fabricated constraint.
+    Recency is not filtered here: a search engine decides its own, and
+    pretending to filter on a date the page may not state would be a fabricated
+    constraint. That is why `window_days` never reaches this function.
     """
     import asyncio
 
@@ -204,6 +150,7 @@ def _fetch_crawl4ai(keyword: str, max_items: int, window_days: int) -> list[RawP
             max_pages=min(max_items, pages),
             max_chars=chars,
             delay_ms=int(os.environ.get("CRAWL4AI_DELAY_MS", "400")),
+            platform=platform,
         )
     )
 
@@ -218,27 +165,37 @@ def _fetch_crawl4ai(keyword: str, max_items: int, window_days: int) -> list[RawP
             # The page's own stated date when it has one, the capture time
             # otherwise — never one dressed as the other.
             posted_at=row.get("publishedAt") or row.get("capturedAt", ""),
-            hashtags=row.get("hashtags") or extract_hashtags(row["text"]),
+            # A crawled page's `#tokens` are URL fragments, not hashtags —
+            # see `_hashtags_for_web_page` in `crawl.py`. Whatever the sidecar
+            # reported is what is recorded, and nothing is derived from prose.
+            hashtags=row.get("hashtags") or [],
             keyword=keyword,
             source_name=f"crawl4ai · {row.get('siteName', 'web')}",
+            **({"platform": Platform(platform)} if platform else {}),
         ))
     return posts
 
 
-def _fetch_fixtures(keyword: str, max_items: int) -> list[RawPost]:
-    """The bundled corpus. A supported configuration, not a stub."""
-    if not FIXTURES.exists():
-        return []
-    rows = json.loads(FIXTURES.read_text(encoding="utf-8"))
-    posts = [RawPost(**row) for row in rows]
-    matched = [p for p in posts if keyword.lower() in f"{p.text} {p.keyword}".lower()]
-    chosen = (matched or posts)[:max_items]
-    return [p.model_copy(update={"keyword": keyword}) for p in chosen]
+def _lane(platform: str | None):
+    """Binds one platform lane to the shared `(keyword, max_items, window_days)` signature."""
+
+    def fetch(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
+        del window_days  # See `_crawl`: recency is the engine's to decide.
+        return _crawl(keyword, max_items, platform)
+
+    return fetch
 
 
+#: Every lane, in capture order. The four platforms are crawl4ai searches
+#: scoped by `site:`; `web` is the same crawler unscoped. Reddit and Hacker News
+#: keep their own keyless APIs, which return real engagement figures that a
+#: search-indexed page cannot.
 SOURCES = {
-    "linkedin": (_fetch_apify, "Apify · LinkedIn", "APIFY_API_TOKEN"),
-    "crawl4ai": (_fetch_crawl4ai, "crawl4ai · open web", ""),
+    "linkedin": (_lane("linkedin"), "crawl4ai · LinkedIn", ""),
+    "instagram": (_lane("instagram"), "crawl4ai · Instagram", ""),
+    "x": (_lane("x"), "crawl4ai · X", ""),
+    "facebook": (_lane("facebook"), "crawl4ai · Facebook", ""),
+    "web": (_lane(None), "crawl4ai · open web", ""),
     "reddit": (_fetch_reddit, "Reddit", ""),
     "hackernews": (_fetch_hackernews, "Hacker News", ""),
 }
@@ -247,7 +204,8 @@ SOURCES = {
 #: unavailable — crawl4ai needs its package and its browser — and reporting it
 #: as ready because no key is missing would be a lie of omission.
 PROBES: dict[str, Any] = {
-    "crawl4ai": _crawl4ai_configured,
+    key: _crawl4ai_configured
+    for key in ("linkedin", "instagram", "x", "facebook", "web")
 }
 
 
@@ -287,7 +245,7 @@ def available_sources() -> dict[str, Any]:
     return {
         "sources": rows,
         "live_sources": live,
-        "mode": "live" if live else "fixture",
+        "mode": "live" if live else "none",
     }
 
 
@@ -296,8 +254,9 @@ def fetch_posts(keywords: list[str], max_items: int = 50, window_days: int = 14)
     Captures posts for each keyword from every reachable source.
 
     One source failing never fails the run: it is named in `unreachable`, and
-    the rest carry on. A keyword with no live source falls back to the bundled
-    corpus with the reason recorded.
+    the rest carry on. There is nothing behind these sources — no bundled
+    corpus — so a keyword no source could answer contributes nothing, and the
+    reason says which sources were tried.
     """
     captured: list[dict[str, Any]] = []
     unreachable: list[str] = []
@@ -317,17 +276,15 @@ def fetch_posts(keywords: list[str], max_items: int = 50, window_days: int = 14)
                 if reason not in unreachable:
                     unreachable.append(reason)
 
-    if not captured:
-        for keyword in keywords:
-            captured.extend(p.model_dump() for p in _fetch_fixtures(keyword, max_items))
-
     return {
         "posts": captured,
         "post_count": len(captured),
         "keywords_scanned": len(keywords),
-        "source": "live" if any_live else "fixture",
+        "source": "live" if any_live else "none",
         "unreachable": unreachable,
-        "fallback_reason": None if any_live else "No live source was reachable; the bundled corpus was used.",
+        "fallback_reason": None
+        if any_live
+        else "No source returned anything for these keywords. Nothing was substituted.",
     }
 
 

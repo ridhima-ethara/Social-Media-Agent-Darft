@@ -82,19 +82,12 @@ export function PipelineTheater() {
   const script = useMemo(() => {
     const rows: FeedRow[] = []
 
-    rows.push({
-      kind: 'note',
-      id: 'note-mode',
-      text: 'APIFY_API_TOKEN is not set, so this run is reading the bundled LinkedIn corpus. Set the token and I will run it live.',
-      tone: 'warn',
-    })
-
     for (const item of scraped.slice(0, 26)) {
       rows.push({
         kind: 'capture',
         id: `cap-${item.id}`,
         keyword: item.keyword_term ?? '—',
-        source: item.source_name ?? 'LinkedIn',
+        source: item.source_name ?? 'crawl4ai',
         title: item.title,
         engagement: item.engagement,
         relevance: item.relevance,

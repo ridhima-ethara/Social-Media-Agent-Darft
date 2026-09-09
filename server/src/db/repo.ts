@@ -364,6 +364,11 @@ export interface ScrapedItemRow {
   validation: ValidationVerdict
   verdict_reason: string | null
   capture_source: 'live' | 'fixture'
+  /** The lane that captured it. `null` IS the open-web lane, not a gap. */
+  platform: Platform | null
+  /** False for everything a search-indexed crawl returns — see the schema note. */
+  metrics_available: boolean
+  brand_relevance: number
   posted_at: string | null
   scraped_at: string
 }
@@ -1786,6 +1791,9 @@ export interface ScrapedItemInsert {
   validation: ValidationVerdict
   verdictReason: string
   captureSource: 'live' | 'fixture'
+  platform: Platform | null
+  metricsAvailable: boolean
+  brandRelevance: number
   postedAt: string
 }
 
@@ -1811,13 +1819,17 @@ export async function persistScrapedItems(
          source_name, source_type, author_name, author_headline, author_followers,
          hashtags, engagement, reactions, comments, reposts,
          relevance, credibility, freshness, is_duplicate,
-         validation, verdict_reason, capture_source, posted_at, validated_at
+         validation, verdict_reason, capture_source,
+         platform, metrics_available, brand_relevance,
+         posted_at, validated_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8,
          $9, $10, $11, $12, $13,
          $14, $15, $16, $17, $18,
          $19, $20, $21, $22,
-         $23, $24, $25, $26,
+         $23, $24, $25,
+         $26, $27, $28,
+         $29,
          CASE WHEN $23 = 'pending' THEN NULL ELSE now() END
        )
        ON CONFLICT (workspace_id, external_id) DO UPDATE SET
@@ -1833,6 +1845,9 @@ export async function persistScrapedItems(
          validation = EXCLUDED.validation,
          verdict_reason = EXCLUDED.verdict_reason,
          capture_source = EXCLUDED.capture_source,
+         platform = EXCLUDED.platform,
+         metrics_available = EXCLUDED.metrics_available,
+         brand_relevance = EXCLUDED.brand_relevance,
          validated_at = CASE WHEN EXCLUDED.validation = 'pending' THEN NULL ELSE now() END
        RETURNING id`,
       [
@@ -1861,6 +1876,9 @@ export async function persistScrapedItems(
         item.validation,
         item.verdictReason,
         item.captureSource,
+        item.platform,
+        item.metricsAvailable,
+        item.brandRelevance,
         item.postedAt,
       ],
     )
@@ -1882,6 +1900,8 @@ export interface HashtagInsert {
   postCount: number
   totalEngagement: number
   engagementPerPost: number
+  brandRelevance: number
+  platforms: string[]
   relevance: number
   credibility: string
   freshness: number
@@ -1909,13 +1929,13 @@ export async function persistHashtagCandidates(
     const row = await queryOne<{ id: string }>(
       `INSERT INTO hashtags (
          workspace_id, tag, display_tag, keyword_id, run_id,
-         post_count, total_engagement, engagement_per_post,
+         post_count, total_engagement, engagement_per_post, brand_relevance, platforms,
          relevance, credibility, freshness, hashtag_score, rank,
          validation, verdict_reason, in_top_set,
          first_seen_at, last_seen_at, feed_url, top_post_url, top_post_title, validated_at
        ) VALUES (
          $1, $2, $3, $4, $5,
-         $6, $7, $8,
+         $6, $7, $8, $22, $23,
          $9, $10, $11, $12, $13,
          $14, $15, $16,
          $17, $18, $19, $20, $21,
@@ -1927,6 +1947,8 @@ export async function persistHashtagCandidates(
          post_count = EXCLUDED.post_count,
          total_engagement = EXCLUDED.total_engagement,
          engagement_per_post = EXCLUDED.engagement_per_post,
+         brand_relevance = EXCLUDED.brand_relevance,
+         platforms = EXCLUDED.platforms,
          relevance = EXCLUDED.relevance,
          credibility = EXCLUDED.credibility,
          freshness = EXCLUDED.freshness,
@@ -1963,6 +1985,8 @@ export async function persistHashtagCandidates(
         c.feedUrl,
         c.topPostUrl,
         c.topPostTitle,
+        c.brandRelevance,
+        c.platforms,
       ],
     )
     if (row) idByTag.set(c.tag, row.id)
