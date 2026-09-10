@@ -28,7 +28,7 @@ import {
   nearestPostingTime,
   PLATFORM_LABEL,
   seededFor,
-  startOfWeek,
+  planningStart,
   weekdayName,
   type ContentFormat,
 } from '../corpus'
@@ -368,17 +368,60 @@ registerSkill<PipelinePayload>('calendar.platform.select', (payload, ctx) => {
   const primaryPlatform = ctx.str('primaryPlatform', 'linkedin') as Platform
   const alternateThreshold = ctx.num('alternateThreshold', 55)
 
+  /*
+   * WHICH PLATFORMS MAY BE CHOSEN AT ALL.
+   *
+   * `primaryPlatform` only ever added +1 as a tie-break, so it expressed a
+   * preference and excluded nothing: a Carousel scores higher on Instagram than
+   * on LinkedIn in the fit matrix, so it went to Instagram however the
+   * preference was set. An operator who had "set it to LinkedIn" then found
+   * Instagram, X and Facebook ideas on the calendar and was right to call it a
+   * bug. This is the actual restriction.
+   *
+   * An unparseable or empty list falls back to every platform WITH a stated
+   * reason rather than silently placing nothing — an empty calendar with no
+   * explanation is the worse failure.
+   */
+  const configured = ctx
+    .str('enabledPlatforms', PLATFORMS.join(','))
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => part !== '')
+
+  const unknown = configured.filter((part) => !PLATFORMS.includes(part as Platform))
+  const enabled = configured.filter((part): part is Platform => PLATFORMS.includes(part as Platform))
+
+  if (unknown.length > 0) {
+    ctx.emit('activity', `Ignoring unknown platform id(s) in Platforms in play: ${unknown.join(', ')}.`, {
+      status: 'warn',
+    })
+  }
+
+  const inPlay: Platform[] = enabled.length > 0 ? enabled : [...PLATFORMS]
+  if (enabled.length === 0) {
+    ctx.emit(
+      'activity',
+      'Platforms in play named no valid platform, so every platform is considered this run.',
+      { status: 'warn' },
+    )
+  }
+
+  // The tie-break only means anything if it is one of the platforms in play.
+  const tieBreak = inPlay.includes(primaryPlatform) ? primaryPlatform : (inPlay[0] as Platform)
+
   const ideas = payload.ideas ?? []
 
   for (const idea of ideas) {
     const fit = FORMAT_PLATFORM_FIT[idea.format as ContentFormat] ?? FORMAT_PLATFORM_FIT['Thought Leadership']
 
-    const scored = PLATFORMS.map((platform) => ({
-      platform,
-      // A tie breaks toward the declared primary platform rather than toward
-      // whichever key the object happened to list first.
-      score: fit[platform] + (platform === primaryPlatform ? 1 : 0),
-    })).sort((a, b) => b.score - a.score)
+    const scored = inPlay
+      .map((platform) => ({
+        platform,
+        // A tie breaks toward the declared platform rather than toward
+        // whichever key the object happened to list first.
+        score: fit[platform] + (platform === tieBreak ? 1 : 0),
+      }))
+      .sort((a, b) => b.score - a.score)
 
     const winner = scored[0] as { platform: Platform; score: number }
     idea.platform = winner.platform
@@ -397,6 +440,7 @@ registerSkill<PipelinePayload>('calendar.platform.select', (payload, ctx) => {
   ctx.log(
     'Platforms: ' +
       [...tally.entries()].map(([p, n]) => `${n} × ${PLATFORM_LABEL[p]}`).join(', ') +
+      ` · in play ${inPlay.map((p) => PLATFORM_LABEL[p]).join(', ')}` +
       ` · alternates listed above ${alternateThreshold}%`,
   )
 
@@ -424,7 +468,8 @@ registerSkill<PipelinePayload>('calendar.slot.optimize', (payload, ctx) => {
     .sort((a, b) => b.weight - a.weight)
 
   const bestHour = admissible[0] ?? { hour: 10, weight: HOUR_WEIGHTS[10] as number }
-  const weekStart = startOfWeek(new Date())
+  // Never before today: a slot in a day that has gone cannot be published.
+  const weekStart = planningStart()
 
   // Deterministic spreading: day offsets walk the week, so two runs of the same
   // corpus place the same ideas on the same days.
@@ -505,7 +550,9 @@ registerSkill<PipelinePayload>('calendar.cadence.balance', (payload, ctx) => {
   const ideas = payload.ideas ?? []
   if (ideas.length === 0) return {}
 
-  const weekStart = startOfWeek(new Date())
+  // The same base the placement used, so the weekly count below measures the
+  // window that was actually planned rather than one starting before it.
+  const weekStart = planningStart()
   const perDay = new Map<string, number>()
   const perDayPlatform = new Map<string, number>()
   let moved = 0
@@ -653,8 +700,10 @@ registerSkill<PipelinePayload>('calendar.crossplatform.adapt', (payload, ctx) =>
    8 · calendar.rank.select — THE TOP-10 RULE
    ═══════════════════════════════════════════════════════════════════════════ */
 
-registerSkill<PipelinePayload>('calendar.rank.select', (payload, ctx) => {
-  const topPerPlatform = ctx.num('topPerPlatform', 10)
+registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
+  // The registry declares 5. A different fallback here meant a run without the
+  // knob resolved silently placed twice as many.
+  const topPerPlatform = ctx.num('topPerPlatform', 5)
   const confidenceWeight = ctx.num('rankConfidenceWeight', 45) / 100
   const relevanceWeight = ctx.num('rankRelevanceWeight', 35) / 100
   const trendWeight = ctx.num('rankTrendWeight', 20) / 100
@@ -675,28 +724,54 @@ registerSkill<PipelinePayload>('calendar.rank.select', (payload, ctx) => {
     )
   }
 
+  /*
+   * THE CAP IS A PROPERTY OF THE CALENDAR, NOT OF A RUN.
+   *
+   * This ranked `payload.ideas` alone, so every run promoted its own top
+   * `topPerPlatform` with no knowledge of what was already scheduled. Fifteen
+   * runs therefore produced nineteen LinkedIn primaries against a declared cap
+   * of five — each run individually correct, the calendar collectively wrong.
+   *
+   * Existing primaries are counted first and the run fills only the headroom
+   * that is left. Ideas this run already owns are excluded from that count, so
+   * re-running discovery re-ranks its own work instead of counting it twice.
+   */
+  const onCalendar = await listIdeas(ctx.workspaceId, { limit: 400 })
+  // Title plus platform is how a stored idea is recognised — `persistIdeas`
+  // upserts on it, so it is the same identity the write path uses.
+  const own = new Set(ideas.map((i) => `${i.title.toLowerCase()}|${i.platform}`))
+  const heldByPlatform = new Map<Platform, number>()
+  for (const row of onCalendar) {
+    if (row.calendar_slot !== 'primary') continue
+    if (row.status === 'rejected') continue
+    // Skip what this run is re-scoring, or it would be counted twice.
+    if (own.has(`${row.title.toLowerCase()}|${row.platform}`)) continue
+    heldByPlatform.set(row.platform, (heldByPlatform.get(row.platform) ?? 0) + 1)
+  }
+
   // Per platform INDEPENDENTLY. A strong LinkedIn week must not consume the
   // Instagram slots.
   const primaries: string[] = []
   for (const platform of PLATFORMS) {
-    const own = ideas
+    const held = heldByPlatform.get(platform) ?? 0
+    const headroom = Math.max(0, topPerPlatform - held)
+
+    const forPlatform = ideas
       .filter((i) => i.platform === platform)
       .sort((a, b) => b.priorityScore - a.priorityScore || a.title.localeCompare(b.title))
 
-    own.forEach((idea, index) => {
-      idea.platformRank = index + 1
-      idea.calendarSlot = index < topPerPlatform ? 'primary' : 'suggestion'
+    forPlatform.forEach((idea, index) => {
+      idea.platformRank = held + index + 1
+      idea.calendarSlot = index < headroom ? 'primary' : 'suggestion'
       if (idea.calendarSlot === 'primary') primaries.push(idea.key)
     })
 
+    const placed = Math.min(forPlatform.length, headroom)
     ctx.emit(
       'idea.ranked',
-      `${PLATFORM_LABEL[platform]}: ${Math.min(own.length, topPerPlatform)} on the calendar, ${Math.max(0, own.length - topPerPlatform)} in suggestions`,
-      {
-        platform,
-        primary: Math.min(own.length, topPerPlatform),
-        suggestions: Math.max(0, own.length - topPerPlatform),
-      },
+      `${PLATFORM_LABEL[platform]}: ${placed} placed, ${Math.max(0, forPlatform.length - headroom)} to suggestions` +
+        (held > 0 ? ` · ${held} already on the calendar of ${topPerPlatform}` : ''),
+      { platform, primary: placed, suggestions: Math.max(0, forPlatform.length - headroom), held },
     )
   }
 

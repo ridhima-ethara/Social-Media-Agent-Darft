@@ -5,7 +5,13 @@
  * registry declares for `caption`, and `npm run agent:check` fails if not.
  */
 
-import { BRAND, deriveHashtags, enforceBrandVoice } from '../../../../shared/brand-voice'
+import {
+  BRAND,
+  deriveHashtags,
+  enforceBrandVoice,
+  platformVoiceInstruction,
+  topicInProse,
+} from '../../../../shared/brand-voice'
 import type { Platform } from '../../../../shared/agent-contract'
 import {
   temperatureFromPercent,
@@ -147,7 +153,7 @@ registerSkill<CaptionPayload>('generation.caption.problem', (payload, ctx) => {
   const figure = quantify ? firstFigure(grounding) : null
 
   const sentences: string[] = [
-    `Most teams treat ${payload.sourceTopic.toLowerCase()} as a tuning exercise.`,
+    `Most teams treat ${topicInProse(payload.sourceTopic)} as a tuning exercise.`,
     'It is a measurement problem first: what you reward is what you get, and the reward is usually a proxy for the thing you actually wanted.',
   ]
 
@@ -163,10 +169,61 @@ registerSkill<CaptionPayload>('generation.caption.problem', (payload, ctx) => {
   return { problem }
 })
 
+/*
+ * A measurement is only usable in a caption if it is a SENTENCE.
+ *
+ * The old rule was `content.match(/[^.]*\d+...[^.]*\./)` — the first span
+ * carrying a digit, from raw knowledge text. Once the Knowledge Base held
+ * research PDFs, that span was routinely not prose, and it went into the post
+ * verbatim. Two captions actually shipped with:
+ *
+ *   "The gap shows up in the numbers — Original Raw Workload
+ *    forpandas-dev__pandas-56508 import timeit import statistics
+ *    import pandas as pd import numpy as np np"
+ *
+ *   "The gap shows up in the numbers — Enhancing LLM-based Code Evaluation …
+ *    ICER 2025, August 3–6, 2025, Charlottesville, Virginia, United States
+ *    "Selected rubric" Solution 1 "Feedback with marks" 1"
+ *
+ * — a code block and a conference header. So the gates below are about SHAPE,
+ * not topic: a caption may quote a finding, and may never paste a fragment of a
+ * document. When nothing qualifies the caller already has an honest fallback
+ * ("the gap only shows up once the model is in front of real traffic"), which is
+ * always better than pasting something unreadable.
+ */
+
+/** Tokens that mean the text is source code or a file path, never prose. */
+const NOT_PROSE =
+  /(\b(?:import|def|class|return|const|let|var|function|null|true|false)\b|[{}<>|]|=>|::|__|\(\)|;\s|\w+\.\w+\(|\/\w+\/|_{2,}|\bpd\.|\bnp\.)/
+
+/** Tokens that mean it is bibliographic or a figure label, not a finding. */
+const NOT_A_FINDING =
+  /(\b(?:figure|fig|table|tbl|appendix|eq|equation|section|chapter|vol|pp|doi|arxiv|isbn|proceedings|conference|workshop|symposium|copyright|permission|licen[cs]e)\b|©|https?:|\bet al\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\s*[–-]\s*\d{1,2}\b)/i
+
 function firstFigure(grounding: GroundingEntry[]): string | null {
   for (const entry of grounding) {
-    const match = entry.content.match(/[^.]*\d+(?:\.\d+)?%?[^.]*\./)
-    if (match) return match[0].trim().replace(/\.$/, '')
+    // Split on sentence ends only, so a fragment can never masquerade as one.
+    for (const raw of entry.content.split(/(?<=[.!?])\s+/)) {
+      const candidate = raw.trim().replace(/\s+/g, ' ')
+
+      if (!/\d/.test(candidate)) continue
+      // A line break inside a "sentence" means the source was laid out, not written.
+      if (/[\n\r]/.test(raw)) continue
+      if (candidate.length < 40 || candidate.length > 180) continue
+      if (candidate.split(' ').length < 7) continue
+      // Prose is mostly letters and spaces. Code, tables and headers are not.
+      const prose = (candidate.match(/[a-z ]/gi) ?? []).length / candidate.length
+      if (prose < 0.75) continue
+      if (candidate.split('"').length - 1 > 1) continue
+      if (NOT_PROSE.test(candidate)) continue
+      if (NOT_A_FINDING.test(candidate)) continue
+      // It has to read like a claim about a quantity, not merely contain a year.
+      if (/^(?:\d|\W)/.test(candidate)) continue
+      if (!/\d+(?:\.\d+)?\s*(?:%|percent|x\b|times|points?|posts?|hours?|days?|weeks?|months?|tokens?|users?|teams?|models?|runs?|cases?|tasks?)/i.test(candidate))
+        continue
+
+      return candidate.replace(/[.!?]$/, '')
+    }
   }
   return null
 }
@@ -184,6 +241,9 @@ registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, 
   const grounding = payload.grounding ?? []
   const systemInstruction = [
     payload.voiceInstruction ?? '',
+    // The declared per-platform difference. Without it the same finding came
+    // back as near-identical copy on all four channels.
+    platformVoiceInstruction(payload.platform),
     citeGrounding && grounding.length > 0
       ? `Ground every claim in these entries and do not invent figures:\n${grounding
           .map((g) => `· ${g.title} (${g.confidence} confidence): ${g.content}`)
@@ -268,9 +328,9 @@ registerSkill<CaptionPayload>('generation.caption.close', (payload, ctx) => {
   const bannedCta = ctx.bool('bannedCta', true)
 
   const closes: Record<string, string> = {
-    Implication: `The implication for anyone shipping ${payload.sourceTopic.toLowerCase()}: measure the behaviour you actually want, then reward it. Everything else is downstream of that.`,
+    Implication: `The implication for anyone shipping ${topicInProse(payload.sourceTopic)}: measure the behaviour you actually want, then reward it. Everything else is downstream of that.`,
     'Open question': `The open question is which of these results survive contact with production traffic. We are running that experiment now.`,
-    'Forward look': `The next twelve months of ${payload.sourceTopic.toLowerCase()} will be decided by evaluation, not by model size.`,
+    'Forward look': `The next twelve months of ${topicInProse(payload.sourceTopic)} will be decided by evaluation, not by model size.`,
     None: '',
   }
 
@@ -296,8 +356,14 @@ registerSkill<CaptionPayload>('generation.caption.hashtags', (payload, ctx) => {
   // it cannot escape it.
   const count = Math.min(Math.max(requested, BRAND.hashtags.min), BRAND.hashtags.max)
 
+  /*
+   * `deriveHashtags` returns bare names. They must carry the hash here, because
+   * the brand enforcer finds the block by matching `#tag` — an unprefixed block
+   * is invisible to it, survives untouched, and the enforcer then appends a
+   * second, prefixed one. The post ships with its tags twice.
+   */
   const derived = deriveHashtags(`${payload.sourceTopic} ${payload.title}`, count)
-  const tags = [...derived]
+  const tags = derived.map((tag) => `#${tag.replace(/^#/, '')}`)
 
   if (useSourceHashtag && payload.hashtag) {
     const source = `#${payload.hashtag.replace(/^#/, '')}`
@@ -342,8 +408,47 @@ registerSkill<CaptionPayload>('generation.caption.adapt', (payload, ctx) => {
       .join(' ')
     body = `${clampChars(lead, room).trim()}${tags ? `\n${tags}` : ''}`
   } else {
-    const withTags = payload.hashtagBlock ? `${body}\n\n${payload.hashtagBlock}` : body
-    body = withTags.length <= limit ? withTags : `${clampChars(body, limit - (payload.hashtagBlock?.length ?? 0) - 4)}\n\n${payload.hashtagBlock ?? ''}`
+    const tags = payload.hashtagBlock ?? ''
+    const sep = preserveLineBreaks ? '\n\n' : ' '
+    const assemble = (explanation: string): string => {
+      const blocks = [payload.hook, payload.problem, explanation, payload.close].filter(
+        (p): p is string => typeof p === 'string' && p.trim().length > 0,
+      )
+      const text = blocks.join(sep)
+      return tags === '' ? text : `${text}${sep}${tags}`
+    }
+
+    const whole = assemble(payload.explanation ?? '')
+    if (whole.length <= limit) {
+      body = whole
+    } else {
+      // Trimming from the end amputates the close, and the close is the block
+      // that carries the point of the post — a caption that stops mid-argument
+      // and jumps to hashtags is a broken post, not a shorter one. The
+      // explanation is the compressible block, so it absorbs the overflow and
+      // the hook, problem, close and hashtags all survive whole.
+      const skeleton = assemble('')
+      const room = limit - skeleton.length - sep.length
+      const trimmed = room > 0 ? clampChars(payload.explanation ?? '', room) : ''
+      const rebuilt = assemble(trimmed)
+      if (rebuilt.length <= limit) {
+        body = rebuilt
+        ctx.log(
+          trimmed === ''
+            ? `Over the ${limit}-character ${payload.platform} limit — the explanation was dropped so the hook, problem and close stay whole`
+            : `Explanation compressed to fit the ${limit}-character ${payload.platform} limit; hook, problem and close are intact`,
+        )
+      } else {
+        // Even the skeleton overruns. Nothing structural can be preserved, so
+        // this reports what it had to do rather than doing it quietly.
+        body = `${clampChars(assemble(''), Math.max(1, limit - tags.length - sep.length))}${
+          tags === '' ? '' : `${sep}${tags}`
+        }`
+        ctx.log(
+          `The hook, problem and close alone exceed the ${limit}-character ${payload.platform} limit, so the caption was cut short. Shorten the hook or raise the limit in Agent Studio.`,
+        )
+      }
+    }
   }
 
   // Unconditional. Whatever wrote the text, this is the last thing that touches

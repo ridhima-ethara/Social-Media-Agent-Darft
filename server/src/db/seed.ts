@@ -19,7 +19,7 @@
  */
 
 import { AGENTS } from '../../../shared/agent-registry'
-import { BRAND, brandRulesAsKnowledge } from '../../../shared/brand-voice'
+import { BRAND, brandCorpusAsKnowledge, brandRulesAsKnowledge } from '../../../shared/brand-voice'
 import { SEED_KEYWORDS } from '../../../shared/keywords'
 
 import { config } from '../config'
@@ -214,19 +214,35 @@ async function seedAgentState(workspaceId: string): Promise<void> {
 
 /* ── The brand, as knowledge ───────────────────────────────────────────────
    The brand rules live in the same table as everything the product learns, so
-   switching a brand entry off genuinely stops it influencing generation — and
-   so the Scraping Agent's brand-alignment scoring has something to read on the
-   very first run, before any research build has happened.
+   switching a brand entry off genuinely stops it influencing generation.
+
+   Two different things are seeded here, and the distinction is load-bearing:
+
+     the RULES   how to write. Tagged `brand-rule`, and deliberately EXCLUDED
+                 from the Scraping Agent's alignment vocabulary — otherwise
+                 "hashtag", "punctuation" and "vocabulary" would read as
+                 on-brand subject matter and a compliance document would end up
+                 deciding which articles are relevant.
+
+     the CORPUS  what we know and talk about. Tagged `brand-corpus` and carrying
+                 domain vocabulary, so the Scraping Agent has something real to
+                 score against on the very first run, before any research build
+                 has happened, and so rule 6 has key points to trace claims to.
    ────────────────────────────────────────────────────────────────────────── */
 
 async function seedBrandKnowledge(workspaceId: string): Promise<void> {
-  for (const rule of brandRulesAsKnowledge()) {
+  const rows = [
+    ...brandRulesAsKnowledge().map((r) => ({ ...r, source: 'Brand definition' })),
+    ...brandCorpusAsKnowledge().map((r) => ({ ...r, source: 'Brand corpus' })),
+  ]
+
+  for (const row of rows) {
     await query(
       `INSERT INTO knowledge_entries
          (workspace_id, title, category, content, source, sources, confidence,
           evidence_count, active, origin, tags)
-       VALUES ($1,$2,$3,$4,'Brand definition','[]'::jsonb,$5,1,true,'brand',$6)`,
-      [workspaceId, rule.title, rule.category, rule.content, rule.confidence, ['brand']],
+       VALUES ($1,$2,$3,$4,$5,'[]'::jsonb,$6,1,true,'brand',$7)`,
+      [workspaceId, row.title, row.category, row.content, row.source, row.confidence, row.tags],
     )
     tally('knowledge_entries')
   }

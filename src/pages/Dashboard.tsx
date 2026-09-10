@@ -7,7 +7,7 @@
  */
 
 import { useMemo, useState } from 'react'
-import { Check, Sparkles, X } from 'lucide-react'
+import { Maximize2, Sparkles } from 'lucide-react'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
 import { PlayButton } from '../components/play-button'
@@ -32,37 +32,23 @@ import { answerFromAnalytics } from '../lib/ai'
 import { exportCombined, exportPerPost } from '../lib/export'
 import type { Platform } from '../types'
 
-type PlatformTab = Platform | 'matrix'
+type PlatformTab = Platform
 
-const RECOMMENDATIONS = [
-  {
-    n: '01',
-    title: 'Lead with the correction, not the context',
-    body: 'Posts that open on what conventional practice gets wrong reach 22–31% above the trailing average. Posts that open on context sit at or below it.',
-    impact: 'High',
-    confidence: 92,
-  },
-  {
-    n: '02',
-    title: 'Put the hardest number in line two',
-    body: 'The three strongest posts of the month all placed their strongest figure in the second line, and that figure is what reshare quotes carried.',
-    impact: 'High',
-    confidence: 88,
-  },
-  {
-    n: '03',
-    title: 'Move Thursday’s carousel to Tuesday',
-    body: 'Tuesday 10:30 carries 34% higher median reach on this account over four weeks. Thursday 09:00 is second, and is already occupied.',
-    impact: 'Medium',
-    confidence: 81,
-  },
-  {
-    n: '04',
-    title: 'Alternate the economics and research framings',
-    body: 'The cost-per-solved-task post recorded the strongest CTO-segment engagement of the quarter. Research framings reach researchers; economics framings reach buyers.',
-    impact: 'Medium',
-    confidence: 76,
-  },
+/**
+ * The brand definition, which is configuration rather than something learned.
+ *
+ * Excluded by name so anything else counts as a lesson. The panel used to
+ * whitelist four outcome categories instead — and every one of them happened to
+ * be absent, so it rendered its empty state while six real entries the Learning
+ * Agent had written sat one category away. A whitelist here fails silently every
+ * time the agents produce a category nobody thought to list.
+ */
+const BRAND_DEFINITION_CATEGORIES = [
+  'Brand Corpus',
+  'Brand Voice',
+  'Brand Guideline',
+  'Visual Identity',
+  'Compliance Rule',
 ]
 
 const SUGGESTED_QUESTIONS = [
@@ -79,24 +65,43 @@ export function Dashboard() {
   const published = useStore((s) => s.published)
   const ideas = useStore((s) => s.ideas)
   const knowledge = useStore((s) => s.knowledge)
+  const knowledgeCounts = useStore((s) => s.knowledgeCounts)
   const activity = useStore((s) => s.activity)
   const scrapeRun = useStore((s) => s.scrapeRun)
-  const brief = useStore((s) => s.assistant.brief)
   const setPage = useStore((s) => s.setPage)
   const openReview = useStore((s) => s.openReview)
   const openTheater = useStore((s) => s.openTheater)
   const runScraping = useStore((s) => s.runScraping)
-  const addKnowledge = useStore((s) => s.addKnowledge)
-  const sendCommand = useStore((s) => s.sendCommand)
   const openBar = useStore((s) => s.openBar)
 
   const months = useMemo(
     () => [...new Set(analytics.map((a) => a.month))].sort().reverse(),
     [analytics],
   )
-  const [month, setMonth] = useState(() => months[0] ?? '')
+  /*
+   * The chosen month, not the stored one. `analytics` arrives after mount, so a
+   * `useState(months[0])` initialiser ran while the list was still empty and
+   * stayed on '' forever — the select then showed the newest month while every
+   * figure on the page filtered on a month that matched nothing.
+   */
+  const [picked, setPicked] = useState<string | null>(null)
+  const month = picked !== null && months.includes(picked) ? picked : (months[0] ?? '')
   const [platformTab, setPlatformTab] = useState<PlatformTab>('linkedin')
-  const [briefDismissed, setBriefDismissed] = useState(false)
+
+  /**
+   * The lessons the Learning Agent actually wrote, newest first.
+   *
+   * Only categories that record something observed: a brand rule is
+   * configuration, not a finding, so it does not belong in a panel about what
+   * the account has learned.
+   */
+  const learned = useMemo(
+    () =>
+      knowledge
+        .filter((entry) => entry.active && !BRAND_DEFINITION_CATEGORIES.includes(entry.category))
+        .slice(0, 4),
+    [knowledge],
+  )
 
   const monthRows = analytics.filter((a) => a.month === month)
   const linkedin = monthRows.find((a) => a.platform === 'linkedin')
@@ -157,22 +162,24 @@ export function Dashboard() {
         title="Dashboard"
         subtitle="How Ethara.AI's social presence is performing, and what the agents are doing about it."
         agents={['assistant', 'scraping', 'calendar', 'publishing', 'analytics']}
-        askPrompt={`How did ${linkedin?.label ?? 'this month'} perform?`}
         actions={
           <>
             {reported ? <Badge tone="good">Reported platform data</Badge> : null}
-            <select
-              value={month}
-              onChange={(event) => setMonth(event.target.value)}
-              aria-label="Month"
-              className="rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[12px] outline-none focus:border-accent"
-            >
-              {months.map((key) => (
-                <option key={key} value={key}>
-                  {analytics.find((a) => a.month === key)?.label ?? key}
-                </option>
-              ))}
-            </select>
+            {/* No month is a real state: an empty picker is a control that does nothing. */}
+            {months.length > 0 ? (
+              <select
+                value={month}
+                onChange={(event) => setPicked(event.target.value)}
+                aria-label="Month"
+                className="rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[12px] outline-none focus:border-accent"
+              >
+                {months.map((key) => (
+                  <option key={key} value={key}>
+                    {analytics.find((a) => a.month === key)?.label ?? key}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <DownloadMenu
               options={[
                 {
@@ -204,54 +211,30 @@ export function Dashboard() {
         }
       />
 
-      {/* ── Ethara briefing strip ─────────────────────────────────────────── */}
-      {brief && !briefDismissed ? (
-        <section className="glass anim-fade-up mb-4 flex flex-wrap items-center gap-3 rounded-xl px-4 py-3">
-          <AssistantCore state="dormant" size={32} />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              {brief.signals.map((signal) => (
-                <span key={signal.label} className="rounded-full border border-line px-2 py-0.5 text-[11px] text-ink-3">
-                  <span className="text-ink-2">{signal.label}:</span> {signal.detail}
-                </span>
-              ))}
-            </div>
-            {brief.recommendation ? (
-              <p className="mt-1.5 text-[12px] leading-relaxed text-ink">{brief.recommendation}</p>
-            ) : null}
-          </div>
-          <div className="flex items-center gap-2">
-            <Btn
-              variant="primary"
-              onClick={() => void sendCommand(brief.recommendation ?? 'What is waiting on me?')}
-            >
-              Do it
-            </Btn>
-            <button
-              type="button"
-              onClick={() => setBriefDismissed(true)}
-              aria-label="Dismiss the briefing"
-              className="rounded-md p-1 text-ink-3 transition-colors hover:text-ink"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        </section>
-      ) : null}
-
       {/* ── Live scrape banner ────────────────────────────────────────────── */}
+      {/* Closing the theater minimises the run onto this strip, so the strip is
+          the way back into it. Without that, a closed theater on a running
+          crawl leaves no route back to the feed. */}
       {scrapeRun.running ? (
-        <section className="anim-fade-in mb-4 rounded-xl border border-accent/40 bg-accent/8 px-4 py-3">
+        <button
+          type="button"
+          onClick={openTheater}
+          aria-label="Reopen the pipeline run screen"
+          className="anim-fade-in group mb-4 block w-full rounded-xl border border-accent/40 bg-accent/8 px-4 py-3 text-left transition-colors hover:border-accent hover:bg-accent/12 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-[12px] text-ink">
-              Scraping Agent · scanning <span className="font-medium">{scrapeRun.currentKeyword || '…'}</span>
+              Sherlock · scanning <span className="font-medium">{scrapeRun.currentKeyword || '…'}</span>
             </p>
-            <p className="tabular text-[12px] text-ink-3">
+            <p className="tabular flex items-center gap-2 text-[12px] text-ink-3">
               {scrapeRun.found} items · {scrapeRun.progress}%
+              <span className="flex items-center gap-1 rounded-full border border-line px-1.5 py-0.5 text-[10px] transition-colors group-hover:border-accent group-hover:text-accent-bright">
+                <Maximize2 size={10} aria-hidden="true" /> Open run
+              </span>
             </p>
           </div>
           <Progress value={scrapeRun.progress} className="mt-2" />
-        </section>
+        </button>
       ) : null}
 
       {/* ── KPI strip ─────────────────────────────────────────────────────── */}
@@ -266,11 +249,37 @@ export function Dashboard() {
           format={(n) => `${n.toFixed(2)}%`}
           delta={engagementDelta}
           hint="LinkedIn, MoM"
+          {...(linkedin === undefined
+            ? { unavailable: 'LinkedIn has reported no monthly rollup yet' }
+            : {})}
         />
         <KpiCard index={4} label="Total reach" value={totalReach} spark={spark(published.map((p) => p.impressions ?? 0))} />
-        <KpiCard index={5} label="Followers" value={linkedin?.metrics.followerGrowth ?? 0} hint={`+${fmt(instagram?.metrics.followerGrowth ?? 0)} on Instagram`} />
-        <KpiCard index={6} label="Avg engagement" value={avgEngagement} format={(n) => `${n.toFixed(2)}%`} hint="Across published posts" />
-        <KpiCard index={7} label="Knowledge base" value={knowledge.filter((k) => k.active).length} hint="Active entries" onClick={() => useStore.getState().openKnowledge()} />
+        <KpiCard
+          index={5}
+          label="Followers"
+          value={linkedin?.metrics.followerGrowth ?? 0}
+          hint={`+${fmt(instagram?.metrics.followerGrowth ?? 0)} on Instagram`}
+          {...(linkedin === undefined
+            ? { unavailable: 'No follower figures reported for this period' }
+            : {})}
+        />
+        <KpiCard
+          index={6}
+          label="Avg engagement"
+          value={avgEngagement}
+          format={(n) => `${n.toFixed(2)}%`}
+          hint={`Across ${published.length} published post${published.length === 1 ? '' : 's'}`}
+          {...(published.length === 0 ? { unavailable: 'Nothing has published yet' } : {})}
+        />
+        {/* The true total from the server. Counting `knowledge.length` reported
+            the page cap (400) once the corpus pushed the store past it. */}
+        <KpiCard
+          index={7}
+          label="Knowledge base"
+          value={knowledgeCounts?.active ?? knowledge.filter((k) => k.active).length}
+          hint="Active entries"
+          onClick={() => useStore.getState().openKnowledge()}
+        />
       </section>
 
       {/* ── Row 2 ─────────────────────────────────────────────────────────── */}
@@ -322,7 +331,7 @@ export function Dashboard() {
         <div className="card p-4">
           <h3 className="display mb-3 text-sm">Up next</h3>
           {upNext.length === 0 ? (
-            <EmptyState title="Nothing scheduled" body="Run discovery and the Calendar Agent will fill the week." />
+            <EmptyState title="Nothing scheduled" body="Run discovery and Dora will fill the week." />
           ) : (
             <ul className="space-y-2">
               {upNext.map((idea) => (
@@ -349,39 +358,53 @@ export function Dashboard() {
       </section>
 
       {/* ── Row 3 ─────────────────────────────────────────────────────────── */}
-      <section className="mb-5 grid gap-4 lg:grid-cols-[1fr_380px]">
+      {/* Ask Ethara is a fixed 520px column. Stretching the row would size the
+          left card to it even when there is little to show, so each column takes
+          its own height and they align at the top. */}
+      <section className="mb-5 grid items-start gap-4 lg:grid-cols-[1fr_380px]">
         <div className="card p-4">
-          <h3 className="display mb-3 text-sm">AI content recommendations</h3>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {RECOMMENDATIONS.map((item) => (
-              <Tilt key={item.n} maxDeg={5} className="rounded-xl">
-              <article className="group card-hover relative rounded-xl border border-line bg-surface-2 p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <span className="mono text-[11px] text-accent-bright">{item.n}</span>
-                  <div className="flex items-center gap-1.5">
-                    <Badge tone={item.impact === 'High' ? 'good' : 'neutral'}>{item.impact} impact</Badge>
-                    <Badge tone="accent">{item.confidence}%</Badge>
-                  </div>
-                </div>
-                <h4 className="mt-1.5 text-[12.5px] font-medium text-ink">{item.title}</h4>
-                <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">{item.body}</p>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void addKnowledge({
-                      title: item.title,
-                      category: 'High Performer',
-                      content: item.body,
-                    })
-                  }
-                  className="mt-2 inline-flex items-center gap-1 text-[11px] text-accent-bright opacity-0 transition-opacity group-hover:opacity-100"
-                >
-                  <Check size={11} /> Save to Knowledge Base
-                </button>
-              </article>
-              </Tilt>
-            ))}
-          </div>
+          <h3 className="display mb-1 text-sm">What the agents have learned</h3>
+          <p className="mb-3 text-[11.5px] leading-relaxed text-ink-3">
+            Written by the Learning Agent from measured outcomes and your own instructions. Nothing
+            here is an estimate — an empty panel means nothing has been measured yet.
+          </p>
+
+          {learned.length === 0 ? (
+            <EmptyState
+              title="No lessons recorded yet"
+              body="The Learning Agent writes here once posts have published and been measured, or once you have given an instruction worth remembering."
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {learned.map((entry, index) => (
+                <Tilt key={entry.id} maxDeg={5} className="h-full rounded-xl">
+                  <article className="group card-hover relative flex h-full flex-col rounded-xl border border-line bg-surface-2 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="mono text-[11px] text-accent-bright">
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <Badge tone="neutral">{entry.category}</Badge>
+                        <Badge tone={entry.confidence === 'High' ? 'good' : 'accent'}>
+                          {entry.confidence}
+                        </Badge>
+                      </div>
+                    </div>
+                    {/* Clamped so a long lesson title cannot push the body and
+                        the source line out of step with the card beside it. */}
+                    <h4 className="mt-1.5 line-clamp-2 text-[12.5px] font-medium text-ink">{entry.title}</h4>
+                    <p className="mt-1 line-clamp-4 text-[11.5px] leading-relaxed text-ink-3">
+                      {entry.content}
+                    </p>
+                    <p className="mt-auto pt-1.5 text-[10.5px] text-ink-3">
+                      {entry.source} · {entry.evidence_count} observation
+                      {entry.evidence_count === 1 ? '' : 's'}
+                    </p>
+                  </article>
+                </Tilt>
+              ))}
+            </div>
+          )}
         </div>
 
         <AskAssistantCard month={linkedin?.label ?? month} rows={monthRows} onOpenBar={openBar} />
@@ -393,7 +416,7 @@ export function Dashboard() {
           <div>
             <h3 className="display text-sm">Platform analysis</h3>
             <p className="mt-0.5 text-[11px] text-ink-3">
-              {linkedin?.label ?? month} · measured against this account's own trailing baseline
+              {linkedin?.label ? `${linkedin.label} · ` : ''}measured against this account's own trailing baseline
             </p>
           </div>
           <Tabs<PlatformTab>
@@ -402,14 +425,13 @@ export function Dashboard() {
               { id: 'instagram', label: 'Instagram' },
               { id: 'x', label: 'X' },
               { id: 'facebook', label: 'Facebook' },
-              { id: 'matrix', label: 'Content Matrix' },
             ]}
             active={platformTab}
             onChange={setPlatformTab}
           />
         </header>
 
-        {platformTab === 'matrix' ? <ContentMatrix /> : <PlatformPanel tab={platformTab} month={month} />}
+        <PlatformPanel tab={platformTab} month={month} />
       </section>
     </>
   )
@@ -457,7 +479,14 @@ function PlatformPanel({ tab, month }: { tab: Platform; month: string }) {
   }
 
   if (!row) {
-    return <EmptyState title="No reported data for this month" body="Pick another month, or refresh analytics." />
+    return analytics.length === 0 ? (
+      <EmptyState
+        title="Nothing reported yet"
+        body={`No monthly rollup has been recorded for ${PLATFORM_LABEL[tab]}. Refresh analytics once a period has closed.`}
+      />
+    ) : (
+      <EmptyState title="No reported data for this month" body="Pick another month, or refresh analytics." />
+    )
   }
 
   const daily = row.daily.map((d) => ({
@@ -515,96 +544,6 @@ function PlatformPanel({ tab, month }: { tab: Platform; month: string }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   THE CONTENT MATRIX
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-const FORMATS = ['Thought Leadership', 'Carousel', 'Short Post', 'Video', 'Case Study']
-const MATRIX: Record<string, Record<Platform, number>> = {
-  'Thought Leadership': { linkedin: 94, instagram: 52, x: 71, facebook: 74 },
-  Carousel: { linkedin: 78, instagram: 88, x: 34, facebook: 68 },
-  'Short Post': { linkedin: 66, instagram: 61, x: 92, facebook: 70 },
-  Video: { linkedin: 58, instagram: 74, x: 47, facebook: 82 },
-  'Case Study': { linkedin: 81, instagram: 44, x: 39, facebook: 66 },
-}
-
-function level(score: number): { label: string; tone: string } {
-  if (score >= 85) return { label: 'Strong', tone: 'var(--color-good)' }
-  if (score >= 70) return { label: 'Good', tone: 'var(--color-accent)' }
-  if (score >= 50) return { label: 'Fair', tone: 'var(--color-warn)' }
-  return { label: 'Weak', tone: 'var(--color-serious)' }
-}
-
-function ContentMatrix() {
-  const [hovered, setHovered] = useState<string | null>(null)
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[420px] text-left text-[12px]">
-          <thead>
-            <tr className="border-b border-line text-[10px] uppercase tracking-[0.08em] text-ink-3">
-              <th className="px-3 py-2 font-medium">Format</th>
-              {(['linkedin', 'instagram', 'x', 'facebook'] as Platform[]).map((platform) => (
-                <th key={platform} className="px-3 py-2 font-medium">
-                  <span className="flex items-center gap-1.5">
-                    <PlatformIcon platform={platform} size={12} />
-                    {PLATFORM_LABEL[platform]}
-                  </span>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {FORMATS.map((format) => (
-              <tr key={format} className="border-b border-line/60 last:border-0">
-                <td className="px-3 py-2 font-medium text-ink-2">{format}</td>
-                {(['linkedin', 'instagram', 'x', 'facebook'] as Platform[]).map((platform) => {
-                  const score = MATRIX[format]?.[platform] ?? 0
-                  const meta = level(score)
-                  const key = `${format}-${platform}`
-                  return (
-                    <td
-                      key={platform}
-                      onMouseEnter={() => setHovered(key)}
-                      onMouseLeave={() => setHovered(null)}
-                      className="px-3 py-2"
-                    >
-                      <span
-                        className="tabular inline-flex min-w-16 justify-center rounded-md border px-2 py-1 text-[11px] font-medium transition-colors duration-[var(--dur-fast)]"
-                        style={{
-                          color: meta.tone,
-                          borderColor: meta.tone,
-                          backgroundColor: `color-mix(in srgb, ${meta.tone} 12%, transparent)`,
-                        }}
-                      >
-                        {hovered === key ? score : meta.label}
-                      </span>
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="card bg-surface-2 p-3">
-        <h4 className="display text-[12px]">What this means for the plan</h4>
-        <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">
-          Thought Leadership on LinkedIn and Short Post on X are the two cells carrying this account.
-          Carousel is the only format where Instagram outperforms LinkedIn, which is why the Calendar
-          Agent routes carousels there by default. Video scores fairly everywhere and strongly nowhere —
-          it is not worth the production cost yet.
-        </p>
-        <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">
-          Hover any cell to see the exact engagement index behind the label.
-        </p>
-      </div>
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
    ASK Ethara — grounded in the selected month's platform data
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -654,7 +593,7 @@ function AskAssistantCard({
         </div>
         <button
           type="button"
-          onClick={() => onOpenBar(`How did ${month} perform?`)}
+          onClick={() => onOpenBar(month ? `How did ${month} perform?` : 'How are we performing?')}
           aria-label="Open the command bar"
           className="text-[11px] text-ink-3 transition-colors hover:text-ink-2"
         >
@@ -666,8 +605,10 @@ function AskAssistantCard({
         {bubbles.length === 0 ? (
           <>
             <p className="text-[11.5px] leading-relaxed text-ink-3">
-              Grounded in {month}'s platform data. Every answer is measured against this account's own
-              baseline, never an industry benchmark.
+              {month
+                ? `Grounded in ${month}'s platform data.`
+                : 'No month has reported yet, so there is no platform rollup to ground an answer in.'}{' '}
+              Every answer is measured against this account's own baseline, never an industry benchmark.
             </p>
             <div className="mt-3 flex flex-wrap gap-1.5">
               {SUGGESTED_QUESTIONS.map((question) => (

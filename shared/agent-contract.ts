@@ -44,6 +44,27 @@ export const AGENT_IDS = [
 
 export type AgentId = (typeof AGENT_IDS)[number]
 
+/**
+ * The icon vocabulary. Names are semantic rather than pictorial so the web app
+ * can change which glyph it draws without the contract changing meaning.
+ */
+export const AGENT_ICON_IDS = [
+  'command',
+  'search',
+  'flask',
+  'chart-cluster',
+  'calendar',
+  'pen',
+  'palette',
+  'check-shield',
+  'book',
+  'send',
+  'bar-chart',
+  'graduation',
+] as const
+
+export type AgentIconId = (typeof AGENT_ICON_IDS)[number]
+
 export interface StageSpec {
   id: StageId
   name: string
@@ -55,6 +76,18 @@ export interface StageSpec {
 export interface AgentSpec {
   id: AgentId
   name: string
+  /**
+   * The icon the UI renders beside this agent's name.
+   *
+   * A stable id, not a component and not a glyph: `shared/` is imported by the
+   * server as well as the web app, so it may not depend on a React icon set.
+   * The web app maps this to a real icon in `components/agent-icon.tsx`.
+   *
+   * Deliberately NOT an emoji. Rule 5 sets the emoji budget to zero, and a
+   * platform that renders its own agents as emoji while stripping them from
+   * captions is holding two standards at once.
+   */
+  icon: AgentIconId
   stage: StageId
   /** A short noun phrase: what this agent is for. */
   role: string

@@ -3,6 +3,11 @@ THE ANALYTICS AGENT
 
 Measures against this account's own trailing baseline, explains what moved,
 and writes the lesson back to the brain.
+
+It reads `published_posts`, never `posts`. `posts` is what the Scraping Agent
+captured from other people's accounts, and measuring those against "this
+account's own baseline" produces a number that is arithmetically fine and
+means nothing at all.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from __future__ import annotations
 import statistics
 from typing import Any
 
+from agents.names import identity_for
 from core.agent import Agent
 from core.llm import Reasoning, ToolSpec
 from core.schema import Citation, MemoryEntry
@@ -87,12 +93,15 @@ def compare_to_baseline(post: dict[str, Any], baselines: list[dict[str, Any]], s
 
 class AnalyticsAgent(Agent):
     agent_id = "analytics_agent"
-    name = "Analytics Agent"
+    identity = identity_for(agent_id)
+    name = identity["name"]
+    role = identity["role"]
+    icon = identity["icon"]
     stage = "learn"
-    hands_off_to = []
+    hands_off_to = ["learning_agent"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
-        posts = payload.get("posts", [])
+        posts = payload.get("published_posts", [])
         cfg = self.config
 
         def write_lesson(title: str, content: str, sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -146,14 +155,14 @@ class AnalyticsAgent(Agent):
 
     def task(self, payload: dict[str, Any]) -> str:
         return (
-            f"Measure {len(payload.get('posts', []))} published post(s) against this account's own "
+            f"Measure {len(payload.get('published_posts', []))} published post(s) against this account's own "
             "trailing baseline, explain what moved and where it concentrated, and write the lesson "
             "back to the Knowledge Base with its evidence."
         )
 
     def finalise(self, reasoning: Reasoning, payload: dict[str, Any]) -> dict[str, Any]:
         cfg = self.config
-        posts = payload.get("posts", [])
+        posts = payload.get("published_posts", [])
         output = dict(reasoning.payload)
 
         if not output.get("baselines"):

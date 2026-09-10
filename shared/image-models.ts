@@ -3,7 +3,7 @@
  *
  * Every entry is a background painter only. The brand layer — headline, kicker,
  * accent bar, logomark, footer — is always drawn locally as vectors on top
- * (rule 12: no diffusion model is ever asked to render brand text).
+ * (invariant 21: no diffusion model is ever asked to render brand text).
  *
  * `brand-svg` is the floor: it needs no service, never fails, and is what the
  * product falls back to when a model is unreachable.
@@ -102,7 +102,7 @@ export const IMAGE_MODEL_IDS = IMAGE_MODELS.map((m) => m.id) as [ImageModelId, .
 export const DEFAULT_IMAGE_MODEL: ImageModelId = 'brand-svg'
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   CANVASES — rule 14. A post is never shipped on the wrong canvas.
+   CANVASES — invariant 22. A post is never shipped on the wrong canvas.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export interface Canvas {
@@ -123,7 +123,7 @@ export function canvasFor(platform: Platform): Canvas {
   return CANVASES[platform]
 }
 
-/** The `WxH` string stored on `media_assets.canvas` and checked by rule 14. */
+/** The `WxH` string stored on `media_assets.canvas` and checked by invariant 22. */
 export function canvasKey(platform: Platform): string {
   const c = CANVASES[platform]
   return `${c.width}x${c.height}`

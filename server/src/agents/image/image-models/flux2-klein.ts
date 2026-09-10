@@ -2,7 +2,7 @@
  * FLUX.2 KLEIN — the local background painter.
  *
  * Same contract as every other painter: background pixels only, never brand
- * text (rule 12). The brand layer is composited over the result as vectors by
+ * text (invariant 21). The brand layer is composited over the result as vectors by
  * `renderCreative`.
  *
  * TWO TRANSPORTS, ONE MODEL
@@ -40,7 +40,7 @@ import type { BackgroundPainter, RenderRequest } from './types'
 const ADAPTER_ID = 'flux2-klein'
 
 /**
- * Rule 12 says no diffusion model is ever asked to render brand text.
+ * Invariant 21 says no diffusion model is ever asked to render brand text.
  *
  * The two transports state that differently because they accept different
  * things: the Ollama adapter passes a negative prompt (see `ollama.ts`), while

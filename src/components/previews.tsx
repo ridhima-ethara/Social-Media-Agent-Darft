@@ -6,7 +6,7 @@
  * confirmation — so what Leadership approves is what the audience sees.
  */
 
-import { Bookmark, Heart, MessageCircle, Repeat2, Send, Share2, ThumbsUp, MoreHorizontal, ChevronRight } from 'lucide-react'
+import { Bookmark, Heart, MessageCircle, Repeat2, Send, Share2, ThumbsUp, MoreHorizontal, ChevronRight, Globe } from 'lucide-react'
 import { gradientPlaceholder } from '../lib/image-gen'
 import { fmt } from './ui'
 import { Logo } from './logo'
@@ -58,7 +58,9 @@ export function LinkedInPreview({ body, media }: { body: string; media?: string 
           <p className="truncate text-[11px] leading-tight text-[#5c5a70]">
             Reinforcement Learning as a Service · 14,807 followers
           </p>
-          <p className="text-[11px] leading-tight text-[#5c5a70]">Just now · 🌐</p>
+          <p className="flex items-center gap-1 text-[11px] leading-tight text-[#5c5a70]">
+            Just now <Globe size={10} aria-label="Public post" />
+          </p>
         </div>
         <MoreHorizontal size={16} className="shrink-0 text-[#5c5a70]" aria-hidden="true" />
       </header>
@@ -224,7 +226,9 @@ export function FacebookPreview({ body, media }: { body: string; media?: string 
         <Logo size={40} className="shrink-0" />
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-semibold leading-tight">Ethara AI</p>
-          <p className="text-[11px] leading-tight text-[#5c5a70]">Just now · 🌐</p>
+          <p className="flex items-center gap-1 text-[11px] leading-tight text-[#5c5a70]">
+            Just now <Globe size={10} aria-label="Public post" />
+          </p>
         </div>
         <MoreHorizontal size={16} className="shrink-0 text-[#5c5a70]" aria-hidden="true" />
       </header>

@@ -11,6 +11,7 @@ is an adapter rather than a branch downstream.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -23,7 +24,7 @@ from core.schema import HashtagCandidate, Platform, RawPost
 
 TIMEOUT = 20
 
-# Reddit rejects generic agents. This is the format its API documents.
+# A named agent string. Public APIs reject generic ones.
 UA = "python:ethara-socialai:1.0 (by /u/ethara-ai)"
 
 GENERIC = {
@@ -41,37 +42,6 @@ def _get_json(url: str, headers: dict[str, str] | None = None) -> Any:
 
 # ── Sources ────────────────────────────────────────────────────────────────
 
-def _fetch_reddit(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
-    """Reddit's public JSON. Keyless and free — no token, no cost."""
-    query = urllib.parse.quote(keyword)
-    url = f"https://www.reddit.com/search.json?q={query}&sort=top&t=month&limit={max_items}"
-    payload = _get_json(url)
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).timestamp()
-
-    posts: list[RawPost] = []
-    for child in payload.get("data", {}).get("children", []):
-        row = child.get("data", {})
-        if row.get("created_utc", 0) < cutoff:
-            continue
-        text = f"{row.get('title', '')}\n\n{row.get('selftext', '')}".strip()
-        if not text:
-            continue
-        posts.append(RawPost(
-            external_id=str(row.get("id", "")),
-            text=text[:4000],
-            url=f"https://reddit.com{row.get('permalink', '')}",
-            author_name=row.get("author", ""),
-            author_headline=f"r/{row.get('subreddit', '')}",
-            posted_at=datetime.fromtimestamp(row.get("created_utc", 0), timezone.utc).isoformat(),
-            reactions=int(row.get("ups") or 0),
-            comments=int(row.get("num_comments") or 0),
-            hashtags=extract_hashtags(text),
-            keyword=keyword,
-            source_name=f"Reddit · r/{row.get('subreddit', '')}",
-        ))
-    return posts
-
-
 def _fetch_hackernews(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
     """Hacker News via Algolia. Keyless and free."""
     since = int((datetime.now(timezone.utc) - timedelta(days=window_days)).timestamp())
@@ -83,7 +53,7 @@ def _fetch_hackernews(keyword: str, max_items: int, window_days: int) -> list[Ra
 
     posts: list[RawPost] = []
     for hit in payload.get("hits", []):
-        text = f"{hit.get('title', '')}\n\n{hit.get('story_text') or ''}".strip()
+        text = clean_text(f"{hit.get('title', '')}\n\n{hit.get('story_text') or ''}").strip()
         if not text:
             continue
         posts.append(RawPost(
@@ -158,7 +128,7 @@ def _crawl(keyword: str, max_items: int, platform: str | None) -> list[RawPost]:
     for row in result.get("posts", []):
         posts.append(RawPost(
             external_id=row["externalId"],
-            text=row["text"],
+            text=clean_text(row["text"]),
             url=row["url"],
             author_name=row.get("authorName") or row.get("siteName", ""),
             author_headline=row.get("siteName", ""),
@@ -187,16 +157,21 @@ def _lane(platform: str | None):
 
 
 #: Every lane, in capture order. The four platforms are crawl4ai searches
-#: scoped by `site:`; `web` is the same crawler unscoped. Reddit and Hacker News
-#: keep their own keyless APIs, which return real engagement figures that a
-#: search-indexed page cannot.
+#: scoped by `site:`; `web` is the same crawler unscoped. Hacker News keeps its
+#: own keyless API, which returns real engagement figures that a search-indexed
+#: page cannot.
+#:
+#: REDDIT WAS REMOVED at the operator's instruction. It had been answering
+#: `HTTP 403: Blocked` to this crawler, so every run spent a request on it and
+#: reported it as unreachable. Hacker News is now the only lane that reports real
+#: reaction counts — which matters downstream, because engagement carries the
+#: largest single share of the trend score.
 SOURCES = {
     "linkedin": (_lane("linkedin"), "crawl4ai · LinkedIn", ""),
     "instagram": (_lane("instagram"), "crawl4ai · Instagram", ""),
     "x": (_lane("x"), "crawl4ai · X", ""),
     "facebook": (_lane("facebook"), "crawl4ai · Facebook", ""),
     "web": (_lane(None), "crawl4ai · open web", ""),
-    "reddit": (_fetch_reddit, "Reddit", ""),
     "hackernews": (_fetch_hackernews, "Hacker News", ""),
 }
 
@@ -288,6 +263,23 @@ def fetch_posts(keywords: list[str], max_items: int = 50, window_days: int = 14)
     }
 
 
+def clean_text(raw: str) -> str:
+    """
+    Decodes HTML entities once, at capture.
+
+    Kept after Reddit was removed, because the failure it prevents is not
+    Reddit-specific: any source that hands back entity-encoded bodies — a JSON
+    API or a crawled page — turns `&#x27;` into raw text containing a `#`, and
+    every apostrophe in the corpus is then harvested as the hashtag `#x27`,
+    which out-ranks real tags on sheer volume. That is how it was found.
+
+    It does not weaken the injection scan. An `&lt;script&gt;` that stayed
+    encoded would slip past the scanner as inert prose; decoded, it is seen for
+    what it is, reported, and still never followed.
+    """
+    return html.unescape(raw or "")
+
+
 def extract_hashtags(text: str) -> list[str]:
     seen: list[str] = []
     for raw in re.findall(r"#[\wÀ-ɏ]+", text or ""):
@@ -318,9 +310,17 @@ def harvest_hashtags(posts: list[dict[str, Any]], min_occurrences: int = 2) -> d
                 "tag": key, "display_tag": tag, "keyword": post.keyword,
                 "post_count": 0, "total_engagement": 0,
                 "top_post_url": None, "top_post_title": None, "_top": 0,
+                "_aligned": 0, "last_seen_at": "",
             })
             bucket["post_count"] += 1
             bucket["total_engagement"] += post.engagement
+            # Counting, not judging. Whether the post text actually names the
+            # keyword that surfaced it is a fact about the post; turning the
+            # count into a score is the Validation Agent's business.
+            if post.keyword and post.keyword.lower() in post.text.lower():
+                bucket["_aligned"] += 1
+            if post.posted_at > bucket["last_seen_at"]:
+                bucket["last_seen_at"] = post.posted_at
             if post.engagement > bucket["_top"]:
                 bucket["_top"] = post.engagement
                 bucket["top_post_url"] = post.url
@@ -331,6 +331,8 @@ def harvest_hashtags(posts: list[dict[str, Any]], min_occurrences: int = 2) -> d
         if bucket["post_count"] < min_occurrences:
             continue
         bucket.pop("_top", None)
+        aligned = bucket.pop("_aligned", 0)
+        bucket["brand_relevance"] = round(100 * aligned / max(1, bucket["post_count"]))
         bucket["feed_url"] = f"https://www.linkedin.com/feed/hashtag/{bucket['tag']}/"
         candidates.append(HashtagCandidate(**bucket).model_dump())
 

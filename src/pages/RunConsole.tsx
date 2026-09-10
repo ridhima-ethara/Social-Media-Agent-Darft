@@ -7,11 +7,28 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Pause, Play, Trash2 } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowUpRight,
+  Check,
+  ChevronRight,
+  CircleDot,
+  CircleSlash,
+  Dot,
+  Hash,
+  Pause,
+  PencilLine,
+  Play,
+  Square,
+  Trash2,
+  X,
+  type LucideIcon,
+} from 'lucide-react'
 import { SKILL_BY_ID } from '@shared/agent-registry'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
 import { PlayButton } from '../components/play-button'
+import { AgentRunPanel } from '../components/agent-run'
 import { subscribeToEvents } from '../lib/api'
 import { Badge, Btn, EmptyState, Metric, Tabs } from '../components/ui'
 import type { RuntimeEvent } from '../types'
@@ -35,21 +52,35 @@ const TYPE_TONE: Record<string, string> = {
   activity: 'text-ink-3',
 }
 
-const TYPE_GLYPH: Record<string, string> = {
-  'agent.started': '▸',
-  'agent.finished': '✓',
-  'agent.failed': '✕',
-  'skill.started': '·',
-  'skill.finished': '✓',
-  'skill.skipped': '⊘',
-  'skill.failed': '✕',
-  'pipeline.started': '▶',
-  'pipeline.finished': '■',
-  'item.scraped': '↓',
-  'item.validated': '⊙',
-  'hashtag.captured': '#',
-  'knowledge.written': '✎',
-  'post.published': '↗',
+/**
+ * One icon per event type.
+ *
+ * Icons rather than characters: a dingbat is a font accident that renders
+ * differently on every machine and cannot take a brand colour, and the emoji
+ * budget is zero. Each icon is `aria-hidden` because the message beside it
+ * already says what happened in words.
+ */
+const TYPE_ICON: Record<string, LucideIcon> = {
+  'agent.started': ChevronRight,
+  'agent.finished': Check,
+  'agent.failed': X,
+  'skill.started': Dot,
+  'skill.finished': Check,
+  'skill.skipped': CircleSlash,
+  'skill.failed': X,
+  'pipeline.started': Play,
+  'pipeline.finished': Square,
+  'item.scraped': ArrowDown,
+  'item.validated': CircleDot,
+  'hashtag.captured': Hash,
+  'knowledge.written': PencilLine,
+  'post.published': ArrowUpRight,
+}
+
+/** Resolves an event type to its icon, defaulting to a neutral dot. */
+function EventIcon({ type }: { type: string }) {
+  const Icon = TYPE_ICON[type] ?? Dot
+  return <Icon size={11} aria-hidden="true" />
 }
 
 function bucketOf(type: string): Filter {
@@ -64,8 +95,10 @@ function bucketOf(type: string): Filter {
 export function RunConsole() {
   const apiMode = useStore((s) => s.apiMode)
   const runScraping = useStore((s) => s.runScraping)
+  const runAgents = useStore((s) => s.runAgentPipeline)
   const openTheater = useStore((s) => s.openTheater)
   const scrapeRun = useStore((s) => s.scrapeRun)
+  const agentRun = useStore((s) => s.agentRun)
 
   const [events, setEvents] = useState<RuntimeEvent[]>([])
   const [paused, setPaused] = useState(false)
@@ -109,7 +142,6 @@ export function RunConsole() {
         <PageHeader
           title="Run Console"
           subtitle="Every agent and skill execution, streamed live from the runtime as it happens."
-          askPrompt="What did the last run do?"
         />
         <EmptyState
           title="The runtime is not connected"
@@ -129,7 +161,6 @@ export function RunConsole() {
       <PageHeader
         title="Run Console"
         subtitle="Every agent and skill execution, streamed live from the runtime as it happens."
-        askPrompt="What did the last run do?"
         actions={
           <>
             <Btn variant="ghost" onClick={() => setEvents([])}>
@@ -139,17 +170,29 @@ export function RunConsole() {
               {paused ? <Play size={13} /> : <Pause size={13} />}
               {paused ? 'Resume' : 'Pause'}
             </Btn>
-            <PlayButton
-              label="Run SocialAI"
-              running={scrapeRun.running}
+            {/* Two engines, named for what they are rather than which is
+                newer. `Run agents` drives the eight agents in `backend/`;
+                `Run skills` drives the in-process TypeScript orchestrator. */}
+            <Btn
+              variant="subtle"
+              disabled={scrapeRun.running || agentRun.running}
               onClick={() => {
                 openTheater()
                 void runScraping()
               }}
+            >
+              Run skills
+            </Btn>
+            <PlayButton
+              label="Run agents"
+              running={agentRun.running}
+              onClick={() => void runAgents()}
             />
           </>
         }
       />
+
+      <AgentRunPanel />
 
       <section className="mb-3 flex flex-wrap items-center gap-3">
         <span className="flex items-center gap-1.5 text-[12px] text-ink-2">
@@ -198,7 +241,7 @@ export function RunConsole() {
               >
                 <span className="tabular shrink-0 text-ink-3">{time}</span>
                 <span className={`shrink-0 ${TYPE_TONE[event.type] ?? 'text-ink-3'}`}>
-                  {TYPE_GLYPH[event.type] ?? '·'}
+                  <EventIcon type={event.type} />
                 </span>
                 {event.agentId ? <span className="shrink-0 text-accent-bright">{event.agentId}</span> : null}
                 {skillName ? <span className="shrink-0 text-ink-2">{skillName}</span> : null}

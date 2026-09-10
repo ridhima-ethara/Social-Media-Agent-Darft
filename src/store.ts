@@ -9,10 +9,10 @@
 
 import { create } from 'zustand'
 import { AGENTS, AGENT_BY_ID, SKILL_BY_ID } from '@shared/agent-registry'
-import { checkBrandCompliance } from '@shared/brand-voice'
+import { BRAND_TOPICS, checkBrandCompliance } from '@shared/brand-voice'
 import { addressOperator } from '@shared/assistant-persona'
 import { TOOL_BY_ID } from '@shared/tool-registry'
-import { API_BASE, api, detectApi, subscribeToEvents } from './lib/api'
+import { API_BASE, api, detectApi, runAgentPipeline, subscribeToEvents } from './lib/api'
 import { applyInstruction as applyInstructionLocally, writeCaption } from './lib/ai'
 import { renderBrandSvg } from './lib/image-gen'
 import {
@@ -27,6 +27,7 @@ import { EMPTY_STATE } from './data/empty'
 import type {
   ActivityEvent,
   AgentId,
+  AgentRunState,
   AgentRunStatus,
   AgentState,
   ApiHealth,
@@ -39,11 +40,17 @@ import type {
   AssistantPlan,
   AssistantTurn,
   KnowledgeEntry,
+  LiveCapture,
+  LiveLane,
+  LiveNote,
+  LiveVerdict,
+  ModelReference,
   OperatorRole,
   PageId,
   PendingConfirm,
   Platform,
   PublishPhase,
+  RuntimeEvent,
   ScrapeRunState,
   Settings,
   StatePayload,
@@ -60,6 +67,71 @@ import type {
 
 const THEME_KEY = 'ethara-theme'
 
+export interface CorpusStats {
+  total: number
+  active: number
+  /** Subject-matter entries. Only these reach the Scraping Agent. */
+  domain: number
+  rules: number
+  brandTopics: number
+  corpusTerms: number
+  keywordTerms: number
+  /** Everything the next discovery run will judge a captured page against. */
+  alignmentTerms: number
+}
+
+/** A corpus view with nothing in it yet. Zeroes, never invented figures. */
+export const EMPTY_CORPUS_STATS: CorpusStats = {
+  total: 0,
+  active: 0,
+  domain: 0,
+  rules: 0,
+  brandTopics: BRAND_TOPICS.length,
+  corpusTerms: 0,
+  keywordTerms: 0,
+  alignmentTerms: BRAND_TOPICS.length,
+}
+
+export interface CorpusState {
+  entries: KnowledgeEntry[]
+  stats: CorpusStats
+}
+
+/**
+ * Derives the corpus view from whatever entries are in hand.
+ *
+ * Used standalone, and as the optimistic answer before the server replies. The
+ * keyword-term count is the one figure the browser cannot know on its own, so it
+ * is reported as zero rather than guessed at.
+ */
+function corpusFromEntries(entries: KnowledgeEntry[]): CorpusState {
+  const corpus = entries.filter((e) => e.tags.includes('brand-corpus'))
+  const terms = new Set<string>()
+  for (const entry of corpus) {
+    if (!entry.active) continue
+    // Identity entries are corpus but not subject matter, so they contribute no
+    // alignment vocabulary. Mirrors BRAND_DOMAIN_TAG on the server.
+    if (!entry.tags.includes('brand-domain')) continue
+    for (const tag of entry.tags) {
+      if (tag === 'brand' || tag === 'brand-corpus' || tag === 'brand-domain') continue
+      terms.add(tag.toLowerCase())
+    }
+  }
+  return {
+    entries: corpus,
+    stats: {
+      total: corpus.length,
+      active: corpus.filter((e) => e.active).length,
+      domain: corpus.filter((e) => e.tags.includes('brand-domain')).length,
+      rules: entries.filter((e) => e.tags.includes('brand-rule')).length,
+      brandTopics: BRAND_TOPICS.length,
+      corpusTerms: terms.size,
+      keywordTerms: 0,
+      alignmentTerms: BRAND_TOPICS.length + terms.size,
+    },
+  }
+}
+
 export const AGENT_STATUS_META: Record<AgentRunStatus, { label: string; dot: string }> = {
   idle: { label: 'Idle', dot: 'bg-ink-3' },
   running: { label: 'Running', dot: 'bg-accent anim-pulse-dot' },
@@ -67,6 +139,66 @@ export const AGENT_STATUS_META: Record<AgentRunStatus, { label: string; dot: str
   waiting: { label: 'Waiting', dot: 'bg-warn' },
   needs_review: { label: 'Needs review', dot: 'bg-serious' },
   failed: { label: 'Failed', dot: 'bg-critical' },
+}
+
+/**
+ * The Python backend names its agents in its own namespace, one folder each.
+ * This is the only place the two vocabularies meet.
+ *
+ * `content_agent` is the odd one: the UI has always called that agent
+ * `caption`, and the id is a storage key elsewhere in the product, so it is the
+ * mapping that bends rather than either side's name.
+ *
+ * An agent with no entry here is not an error. The backend roster can grow
+ * ahead of the UI, and an unmapped agent simply narrates itself in the run log
+ * without claiming a tile it has no tile for.
+ */
+const UI_AGENT_ID: Record<string, AgentId> = {
+  scraping_agent: 'scraping',
+  validation_agent: 'validation',
+  calendar_agent: 'calendar',
+  content_agent: 'caption',
+  image_agent: 'image',
+  publishing_agent: 'publishing',
+  analytics_agent: 'analytics',
+  learning_agent: 'learning',
+}
+
+function uiAgentId(raw: unknown): AgentId | null {
+  return UI_AGENT_ID[String(raw ?? '')] ?? null
+}
+
+/** Enough of the run log to read back, bounded so a long run cannot grow without limit. */
+const FRAME_BUFFER = 200
+
+/**
+ * What to tell the operator when the run stops.
+ *
+ * Deliberately reports the write, not just the work. "Four ideas on the
+ * calendar" is only true if four ideas reached the database, and those are two
+ * different facts — a run can succeed and still fail to land.
+ */
+function runReport(run: AgentRunState): [string, Toast['tone'], string?] {
+  if (run.error) return [run.error, 'critical']
+  if (!run.summary) return ['The run ended before it reported a summary.', 'warn']
+
+  const n = (key: string): number => Number(run.summary?.[key] ?? 0)
+  const wrote = run.persisted
+  const headline =
+    `${n('posts_captured')} posts captured · ${n('keywords_trending')} keywords trending · ` +
+    `${n('ideas_on_calendar')} on the calendar, ${n('ideas_in_suggestions')} in suggestions`
+
+  if (!wrote) return [headline, 'warn', 'Nothing was written to the database, so the screen is unchanged.']
+
+  const created = Number(wrote.ideasCreated ?? 0)
+  const updated = Number(wrote.ideasUpdated ?? 0)
+  const skipped = Array.isArray(wrote.skipped) ? (wrote.skipped as string[]) : []
+  return [
+    headline,
+    run.summary.status === 'completed' ? 'good' : 'warn',
+    `${created} idea(s) written, ${updated} updated, ${Number(wrote.hashtags ?? 0)} hashtag(s) recorded.` +
+      (skipped.length ? ` ${skipped.join(' ')}` : ''),
+  ]
 }
 
 const USERS: Record<OperatorRole, User> = {
@@ -94,10 +226,11 @@ const DEFAULT_SETTINGS: Settings = {
   autoScheduling: true,
   autoPublish: false,
   imageModel: 'brand-svg',
+  captionModel: 'ethara-writer',
   topKeywords: 5,
   topHashtagsPerKeyword: 5,
   knowledgeHashtagCount: 25,
-  topPerPlatform: 10,
+  topPerPlatform: 5,
   assistantVoice: true,
   assistantProactive: true,
   assistantWakePhrase: false,
@@ -135,7 +268,7 @@ export interface AssistantSlice {
   /** What "publish it" resolves against. Set by every tool that names an entity. */
   lastEntity: { type: string; id: string; title: string } | null
   streaming: boolean
-  /** Prefilled text handed to the bar by "Ask Ethara about this screen". */
+  /** Prefilled text handed to the bar by a caller that knows what to ask. */
   prefill: string
 }
 
@@ -162,6 +295,7 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   /* ── Transient ─────────────────────────────────────────────────────────── */
   toasts: Toast[]
   scrapeRun: ScrapeRunState
+  agentRun: AgentRunState
   validating: boolean
   publishPhase: PublishPhase
   scrapeRunCount: number
@@ -186,6 +320,8 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   refreshState: () => Promise<void>
 
   runScraping: () => Promise<void>
+  /** Runs the Python agent backend, narrated from its own events. */
+  runAgentPipeline: () => Promise<void>
   /** Walks the discovery graph in hand-off order, standalone. Every message reads state. */
   walkAgents: () => Promise<void>
   runValidation: () => Promise<void>
@@ -204,12 +340,31 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   addKnowledge: (entry: { title: string; category: string; content: string }) => Promise<void>
   toggleKnowledge: (id: string) => Promise<void>
 
+  /**
+   * The brand corpus: the domain half of the Knowledge Base, and the vocabulary
+   * the Scraping Agent scores captured pages against. Held separately from
+   * `knowledge` because the counts come from the server, which knows the
+   * keyword synonyms the browser does not.
+   */
+  corpus: CorpusState
+  loadCorpus: () => Promise<void>
+  addCorpusEntry: (entry: {
+    title: string
+    content: string
+    tags: string[]
+    keyPoints?: string[]
+    domain?: boolean
+  }) => Promise<void>
+  restoreCorpus: () => Promise<void>
+  /** Uploads files into `corpus/uploads/` and ingests them; resolves to the server's summary. */
+  uploadCorpusFiles: (files: File[]) => Promise<void>
+
   ensureDraft: (ideaId: string, platform?: Platform) => Promise<void>
   regenerateDraft: (ideaId: string, platform?: Platform) => Promise<void>
   ensureImage: (ideaId: string, platform?: Platform) => Promise<void>
   regenerateImage: (ideaId: string, platform?: Platform, model?: string) => Promise<void>
-  instructImage: (ideaId: string, instruction: string) => Promise<void>
-  instructAI: (ideaId: string, instruction: string) => Promise<string>
+  instructImage: (ideaId: string, instruction: string, references?: ModelReference[]) => Promise<void>
+  instructAI: (ideaId: string, instruction: string, references?: ModelReference[]) => Promise<string>
   updateDraft: (ideaId: string, body: string) => void
 
   moveIdea: (ideaId: string, date: string) => Promise<void>
@@ -223,9 +378,27 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   approveIdea: (ideaId: string) => Promise<void>
   leadershipApprove: (ideaId: string) => Promise<void>
   leadershipReject: (ideaId: string, reason: string) => Promise<void>
+  /**
+   * Whether a real publication can happen right now.
+   *
+   * Live mode AND a reachable API. Standalone counts as disabled because the
+   * client cannot dispatch to a platform by itself — it could only fabricate the
+   * receipt, which is the thing being prevented.
+   */
+  publishingEnabled: () => boolean
   publishIdea: (ideaId: string) => Promise<void>
 
   pushActivity: (event: Omit<ActivityEvent, 'id' | 'created_at'>) => void
+  /** Records one captured page exactly as the run reported it. */
+  recordCapture: (event: RuntimeEvent) => void
+  /** Records what one keyword-on-one-lane reported. */
+  recordScrapeLane: (event: RuntimeEvent) => void
+  /** Records one verdict from the validation agent. */
+  recordVerdict: (event: RuntimeEvent) => void
+  /** Marks a capture the scraping stage held back as already on record. */
+  recordHeld: (event: RuntimeEvent) => void
+  /** Records an agent-level conclusion, including the reason a stage was empty. */
+  recordRunNote: (event: RuntimeEvent) => void
   setAgent: (agentId: AgentId, patch: Partial<AgentState>) => void
   toast: (message: string, tone?: Toast['tone'], hint?: string) => void
   dismissToast: (id: string) => void
@@ -236,7 +409,11 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   closeBar: () => void
   toggleRail: () => void
   setCoreState: (state: AssistantCoreState) => void
-  sendCommand: (utterance: string, channel?: 'text' | 'voice') => Promise<void>
+  sendCommand: (
+    utterance: string,
+    channel?: 'text' | 'voice',
+    focus?: { type: string; id: string; title?: string; platform?: string },
+  ) => Promise<void>
   confirmPlan: (token: string, decision: 'confirm' | 'cancel') => Promise<void>
   startListening: () => void
   stopListening: () => void
@@ -347,6 +524,23 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 const INITIAL = freshEmptyState()
 
+/**
+ * Whether an event belongs to the run the theater is already showing.
+ *
+ * Runs can overlap — a scheduled run and an operator-triggered one, or two
+ * servers against one database. Once a run is latched, events from any other
+ * are ignored rather than merged, because a feed that mixes two runs reports a
+ * total that describes neither of them.
+ */
+/** Stages whose conclusions the run theater narrates. */
+const RUN_NOTE_AGENTS = new Set(['scraping', 'validation', 'analysis', 'calendar'])
+
+function sameRun(run: ScrapeRunState, event: RuntimeEvent): boolean {
+  if (run.runId === null) return true
+  if (event.runId === undefined) return true
+  return event.runId === run.runId
+}
+
 export const useStore = create<Store>((set, get) => ({
   ...stripAssistant(INITIAL),
   conversation: INITIAL.assistant.conversation,
@@ -366,7 +560,14 @@ export const useStore = create<Store>((set, get) => ({
   hydrated: false,
 
   toasts: [],
-  scrapeRun: { running: false, progress: 0, currentSource: '', currentKeyword: '', found: 0 },
+  scrapeRun: {
+    running: false, progress: 0, currentSource: '', currentKeyword: '',
+    found: 0, runId: null, captures: [], lanes: [], verdicts: [], notes: [], summary: null,
+  },
+  agentRun: {
+    running: false, order: [], done: [], current: null,
+    frames: [], summary: null, persisted: null, error: null,
+  },
   validating: false,
   publishPhase: null,
   scrapeRunCount: 0,
@@ -445,7 +646,14 @@ export const useStore = create<Store>((set, get) => ({
    * no run produced.
    */
   connectToRuntime: async () => {
-    const health = await detectApi()
+    // Probed twice before believing the answer. The first probe races the
+    // page's own start-up: in dev the module graph is unbundled and parsing it
+    // blocks the main thread long enough for the abort timeout to fire against
+    // a server that is answering in milliseconds — and the operator is then
+    // told the API is unreachable when it is running. A second probe costs one
+    // timeout on a machine that genuinely has no server, and nothing at all on
+    // a machine that has one.
+    const health = (await detectApi()) ?? (await detectApi())
 
     if (!health) {
       set({
@@ -493,14 +701,26 @@ export const useStore = create<Store>((set, get) => ({
     // Liveness. Correctness still comes from refetching /state.
     subscribeToEvents((event) => {
       if (event.type === 'activity' && event.message) {
+        // The run states its own status. Stamping 'ok' over a 'warn' turns an
+        // empty lane — a real finding about that lane — into a success line.
+        const stated = event.data?.status
+        const status: ActivityEvent['status'] =
+          stated === 'warn' || stated === 'error' || stated === 'running' ? stated : 'ok'
         get().pushActivity({
           agent_id: (event.agentId ?? null) as AgentId | null,
           message: event.message,
-          status: 'ok',
+          status,
           entity_type: null,
           entity_id: null,
         })
+        if (event.agentId === 'scraping') get().recordScrapeLane(event)
+        // The stage-level conclusions travel too, so the theater can say WHY a
+        // stage produced nothing instead of showing an unexplained zero.
+        if (RUN_NOTE_AGENTS.has(event.agentId ?? '')) get().recordRunNote(event)
       }
+      if (event.type === 'item.scraped') get().recordCapture(event)
+      if (event.type === 'item.validated') get().recordVerdict(event)
+      if (event.type === 'item.held') get().recordHeld(event)
       if (event.type === 'agent.started' && event.agentId) {
         get().setAgent(event.agentId as AgentId, { status: 'running' })
       }
@@ -532,28 +752,141 @@ export const useStore = create<Store>((set, get) => ({
 
   /* ── DISCOVERY ─────────────────────────────────────────────────────────── */
 
+  /**
+   * Runs the eight-agent Python pipeline and narrates it from its own events.
+   *
+   * The distinction from `runScraping` is the whole point. `runScraping` drives
+   * the TypeScript orchestrator and animates a progress bar on a timer while it
+   * waits. This drives the agents themselves and moves only when an agent
+   * actually starts or finishes, so the banner cannot claim progress that has
+   * not happened.
+   *
+   * Each agent's own summary becomes its activity line — the scrape reports what
+   * it captured, the validation reports what it accepted, the calendar reports
+   * what took a slot and what went to suggestions. None of it is written here.
+   */
+  runAgentPipeline: async () => {
+    if (get().agentRun.running) return
+
+    const keywords = get().keywords.filter((k) => k.active).map((k) => k.term)
+    if (keywords.length === 0) {
+      get().toast('No active keywords. Add one before running the agents.', 'warn')
+      return
+    }
+    if (get().apiMode !== 'connected') {
+      get().toast(
+        'The agent backend runs inside the API process, so it needs the API.',
+        'warn',
+        'Start it with `npm run dev:server`.',
+      )
+      return
+    }
+
+    const patch = (next: Partial<AgentRunState>): void =>
+      set({ agentRun: { ...get().agentRun, ...next } })
+
+    set({
+      agentRun: {
+        running: true, order: [], done: [], current: null,
+        frames: [], summary: null, persisted: null, error: null,
+      },
+      scrapeRunCount: get().scrapeRunCount + 1,
+    })
+
+    try {
+      await runAgentPipeline({ keywords }, (frame) => {
+        patch({ frames: [...get().agentRun.frames, frame].slice(-FRAME_BUFFER) })
+
+        switch (frame.event) {
+          case 'workflow.started':
+            patch({ order: Array.isArray(frame.agents) ? (frame.agents as string[]) : [] })
+            break
+
+          case 'agent.started': {
+            const id = uiAgentId(frame.agent_id)
+            patch({ current: id })
+            if (id) get().setAgent(id, { status: 'running', current_task: String(frame.name ?? '') })
+            break
+          }
+
+          case 'agent.finished': {
+            const id = uiAgentId(frame.agent_id)
+            const failed = frame.status === 'failed'
+            patch({ current: null, done: [...get().agentRun.done, String(frame.agent_id ?? '')] })
+            if (!id) break
+            get().setAgent(id, {
+              status: failed ? 'failed' : 'completed',
+              current_task: 'Idle',
+              last_run: new Date().toISOString(),
+            })
+            // The agent's own summary, verbatim. Rewriting it here would put the
+            // UI's opinion of the run on screen instead of the run.
+            get().pushActivity({
+              agent_id: id,
+              message: String(frame.summary ?? ''),
+              status: failed ? 'error' : 'ok',
+              entity_type: null,
+              entity_id: null,
+            })
+            break
+          }
+
+          case 'agents.persisted':
+            patch({ persisted: frame })
+            break
+
+          case 'agents.persist_failed':
+          case 'error':
+            patch({ error: String(frame.message ?? 'The run reported an error with no message.') })
+            break
+
+          case 'workflow.failed':
+            patch({ error: String(frame.error ?? `${String(frame.agent_id)} failed.`) })
+            break
+
+          case 'workflow.finished':
+            patch({ summary: frame })
+            break
+        }
+      })
+
+      patch({ running: false, current: null })
+      // Law 8: the stream said what happened, the database says what is. The
+      // calendar renders from this refetch, never from the frames above.
+      await get().refreshState()
+      get().toast(...runReport(get().agentRun))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The agent backend could not be reached.'
+      patch({ running: false, current: null, error: message })
+      get().toast(message, 'critical')
+    }
+  },
+
   runScraping: async () => {
     if (get().scrapeRun.running) return
 
     const keywords = get().keywords.filter((k) => k.active).slice(0, 12)
     set({
-      scrapeRun: { running: true, progress: 0, currentSource: 'LinkedIn', currentKeyword: '', found: 0 },
+      scrapeRun: {
+        running: true, progress: 0, currentSource: '', currentKeyword: '',
+        found: 0, runId: null, captures: [], lanes: [], verdicts: [], notes: [], summary: null,
+      },
       scrapeRunCount: get().scrapeRunCount + 1,
     })
     get().setAgent('scraping', { status: 'running', current_task: 'Scanning LinkedIn' })
 
-    // Narrate locally while the real run proceeds, so the banner is honest
-    // about progress in both modes.
+    // Connected runs narrate themselves: `item.scraped` and the per-lane
+    // activity lines arrive over the event stream and are recorded as they
+    // land. Nothing is invented to fill the wait — a run that has captured
+    // nothing yet reads as nothing yet, which is the truth about it.
     const tick = async (): Promise<void> => {
       for (const [i, keyword] of keywords.entries()) {
         if (!get().scrapeRun.running) return
         set({
           scrapeRun: {
-            running: true,
+            ...get().scrapeRun,
             progress: Math.round(((i + 1) / keywords.length) * 100),
-            currentSource: 'LinkedIn',
-            currentKeyword: keyword.term,
-            found: get().scrapeRun.found + Math.floor(2 + Math.random() * 5),
+            ...(get().scrapeRun.currentKeyword === '' ? { currentKeyword: keyword.term } : {}),
           },
         })
         await sleep(360)
@@ -568,7 +901,16 @@ export const useStore = create<Store>((set, get) => ({
           return null
         }),
       ])
-      set({ scrapeRun: { ...get().scrapeRun, running: false, progress: 100 } })
+      // The run's own numbers ride along, so the theater can say what this
+      // run did rather than replay what the store already held.
+      set({
+        scrapeRun: {
+          ...get().scrapeRun,
+          running: false,
+          progress: 100,
+          summary: result ? (result.summary as Record<string, number>) : null,
+        },
+      })
       get().setAgent('scraping', { status: 'completed', current_task: 'Idle' })
       await get().refreshState()
       if (result) {
@@ -582,11 +924,16 @@ export const useStore = create<Store>((set, get) => ({
     }
 
     await tick()
-    set({ scrapeRun: { ...get().scrapeRun, running: false, progress: 100 } })
-    get().setAgent('scraping', { status: 'completed', current_task: `Captured ${get().scrapeRun.found} posts` })
+    // Standalone captures nothing: it surfaces what the bundled corpus already
+    // holds. The count therefore comes from that corpus, and the line says so.
+    const held = get().scraped.length
+    set({
+      scrapeRun: { ...get().scrapeRun, running: false, progress: 100, found: held, summary: null },
+    })
+    get().setAgent('scraping', { status: 'completed', current_task: `${held} items held` })
     get().pushActivity({
       agent_id: 'scraping',
-      message: `Standalone run · ${get().scrapeRun.found} items surfaced from the bundled corpus.`,
+      message: `Standalone run · ${held} items surfaced from the bundled corpus. Nothing was captured live.`,
       status: 'warn',
       entity_type: null,
       entity_id: null,
@@ -816,6 +1163,91 @@ export const useStore = create<Store>((set, get) => ({
     )
   },
 
+  corpus: { entries: [], stats: EMPTY_CORPUS_STATS },
+
+  loadCorpus: async () => {
+    // Standalone still shows a real corpus: the bundled entries carry the same
+    // tags, so the same derivation applies with the keyword count absent.
+    if (get().apiMode !== 'connected') {
+      set({ corpus: corpusFromEntries(get().knowledge) })
+      return
+    }
+    try {
+      const payload = await api.knowledgeCorpus()
+      set({ corpus: { entries: payload.entries, stats: payload.stats } })
+    } catch {
+      set({ corpus: corpusFromEntries(get().knowledge) })
+    }
+  },
+
+  addCorpusEntry: async (entry) => {
+    if (get().apiMode !== 'connected') {
+      get().toast('Standalone — start the API to add a corpus entry that scraping will read.', 'warn')
+      return
+    }
+    try {
+      const { appliesTo } = await api.addCorpusEntry(entry)
+      await get().refreshState()
+      await get().loadCorpus()
+      get().toast(`Added to the brand corpus. ${appliesTo}`, 'good')
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'That corpus entry did not save.', 'critical')
+    }
+  },
+
+  uploadCorpusFiles: async (files) => {
+    if (get().apiMode !== 'connected') {
+      get().toast('Standalone — start the API to upload into the Knowledge Base.', 'warn')
+      return
+    }
+    if (files.length === 0) return
+    const total = files.reduce((sum, f) => sum + f.size, 0)
+    if (total > 10 * 1024 * 1024) {
+      get().toast('That is over 10 MB in one go. Upload fewer files at a time.', 'warn')
+      return
+    }
+    try {
+      const encoded = await Promise.all(
+        files.map(
+          (file) =>
+            new Promise<{ name: string; content: string }>((resolveFile, reject) => {
+              const reader = new FileReader()
+              reader.onerror = () => reject(new Error(`Could not read ${file.name}.`))
+              reader.onload = () => {
+                const result = String(reader.result ?? '')
+                resolveFile({ name: file.name, content: result.slice(result.indexOf(',') + 1) })
+              }
+              reader.readAsDataURL(file)
+            }),
+        ),
+      )
+      get().toast(`Reading ${files.length} file${files.length === 1 ? '' : 's'}…`, 'neutral')
+      const report = await api.uploadCorpusFiles(encoded)
+      await get().refreshState()
+      await get().loadCorpus()
+      const bad = report.files.filter((f) => f.outcome === 'unreadable')
+      get().toast(report.summary, report.inserted > 0 ? 'good' : bad.length > 0 ? 'warn' : 'neutral')
+      for (const f of bad) get().toast(`${f.file} — ${f.detail ?? 'could not be read'}`, 'warn')
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The upload did not complete.', 'critical')
+    }
+  },
+
+  restoreCorpus: async () => {
+    if (get().apiMode !== 'connected') {
+      get().toast('Standalone — start the API to restore the declared corpus.', 'warn')
+      return
+    }
+    try {
+      const { reason } = await api.restoreCorpus()
+      await get().refreshState()
+      await get().loadCorpus()
+      get().toast(reason, 'good')
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The corpus restore failed.', 'critical')
+    }
+  },
+
   addKnowledge: async (entry) => {
     const local: KnowledgeEntry = {
       id: nid('kb'),
@@ -972,13 +1404,17 @@ export const useStore = create<Store>((set, get) => ({
     get().setAgent('image', { status: 'completed', current_task: 'Idle' })
   },
 
-  instructImage: async (ideaId, instruction) => {
+  instructImage: async (ideaId, instruction, references = []) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
 
     if (get().apiMode === 'connected') {
       try {
-        const { media } = await api.renderImage(ideaId, { platform: idea.platform, instruction })
+        const { media } = await api.renderImage(ideaId, {
+          platform: idea.platform,
+          instruction,
+          ...(references.length === 0 ? {} : { references }),
+        })
         set({
           media: { ...get().media, [`${ideaId}|${idea.platform}`]: media },
           ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, media } : i)),
@@ -995,7 +1431,7 @@ export const useStore = create<Store>((set, get) => ({
     get().toast('Re-rendered locally. Start the API to apply model-side instructions.', 'warn')
   },
 
-  instructAI: async (ideaId, instruction) => {
+  instructAI: async (ideaId, instruction, references = []) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return 'That idea no longer exists.'
     const key = `${ideaId}|${idea.platform}`
@@ -1010,12 +1446,20 @@ export const useStore = create<Store>((set, get) => ({
 
     if (get().apiMode === 'connected') {
       try {
-        const result = await api.instruct(ideaId, { platform: idea.platform, instruction })
+        const result = await api.instruct(ideaId, {
+          platform: idea.platform,
+          instruction,
+          model: get().settings.captionModel,
+          ...(references.length === 0 ? {} : { references }),
+        })
+        // An unchanged draft is still written back: the revision and model on it
+        // are the server's truth, and the panel reconciles its textarea from it.
         set({
           drafts: { ...get().drafts, [key]: result.draft },
           ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, draft: result.draft } : i)),
         })
         get().setAgent('review', { status: 'completed', current_task: 'Idle' })
+        if (result.applied === false) get().toast('The caption was not changed.', 'warn')
         return result.note
       } catch (error) {
         get().setAgent('review', { status: 'completed', current_task: 'Idle' })
@@ -1041,7 +1485,14 @@ export const useStore = create<Store>((set, get) => ({
         ? ''
         : ` One finding stands alongside it: ${result.compliance.reason}`
 
-    return `${result.note}${finding}`
+    // The local template writer reads no attachments. Saying so is the honest
+    // answer; letting the operator assume the file was used is not.
+    const ignored =
+      references.length === 0
+        ? ''
+        : ` ${references.length} attached reference(s) were not read — the local template writer cannot use them. Start the API to apply them.`
+
+    return `${result.note}${finding}${ignored}`
   },
 
   updateDraft: (ideaId, body) => {
@@ -1230,7 +1681,9 @@ export const useStore = create<Store>((set, get) => ({
 
   leadershipApprove: async (ideaId) => {
     const by = get().user?.name ?? 'Arjun Mehta'
-    const autoPublish = get().settings.autoPublish
+    // Auto-publish cannot publish what publishing refuses. In demo mode the
+    // approval still lands; the post simply stops at `approved`.
+    const autoPublish = get().settings.autoPublish && get().publishingEnabled()
 
     set({
       ideas: get().ideas.map((i) =>
@@ -1307,9 +1760,32 @@ export const useStore = create<Store>((set, get) => ({
     get().toast('Rejected, with the reason written to the Knowledge Base.', 'neutral')
   },
 
+  publishingEnabled: () => get().apiMode === 'connected' && get().mode.publishMode === 'live',
+
   publishIdea: async (ideaId) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
+
+    /*
+     * DEMO MODE DOES NOT PUBLISH.
+     *
+     * The server refuses this too, at `publishIdea` in the orchestrator, and that
+     * refusal is the one that matters. This check exists because the standalone
+     * branch below never reaches the server: it used to mint a `posts` row with
+     * a `demo-` receipt entirely in the browser, so with the API stopped a post
+     * could be "published" with nothing anywhere having sent it.
+     *
+     * Refused before the phase animation runs, so the UI never plays a publish
+     * sequence for something that is not going to happen.
+     */
+    if (!get().publishingEnabled()) {
+      get().toast(
+        'Publishing is disabled in demo mode. Nothing was published or recorded.',
+        'warn',
+        'Set PUBLISH_MODE=live on the server and supply the platform token to publish for real.',
+      )
+      return
+    }
 
     // The five phases, 850 ms apart.
     for (const phase of PUBLISH_PHASES) {
@@ -1344,13 +1820,13 @@ export const useStore = create<Store>((set, get) => ({
             publish_mode: 'demo',
             published_at: new Date().toISOString().slice(0, 10),
             history: [
-              { step: 1, label: 'Draft generated by Caption Creator Agent', at: new Date().toISOString() },
+              { step: 1, label: 'Draft generated by SpongeBob', at: new Date().toISOString() },
               { step: 2, label: `Approved by ${idea.marketing_approved_by ?? 'Marketing'}`, at: new Date().toISOString() },
               { step: 3, label: `Final approval from ${idea.leadership_decision?.by ?? 'Leadership'}`, at: new Date().toISOString() },
               { step: 4, label: `Published to ${idea.platform} in demo mode`, at: new Date().toISOString() },
             ],
             media_asset_id: null,
-            analysis_summary: 'Published moments ago — the Analytics Agent will report the first reading in an hour.',
+            analysis_summary: 'Published moments ago — Jerry will report the first reading in an hour.',
             analysis_recommendation: null,
             reach: null,
             impressions: null,
@@ -1374,7 +1850,7 @@ export const useStore = create<Store>((set, get) => ({
       entity_type: 'idea',
       entity_id: ideaId,
     })
-    get().toast('Published. The Analytics Agent will report the first reading in an hour.', 'good')
+    get().toast('Published. Jerry will report the first reading in an hour.', 'good')
 
     await sleep(600)
     set({ publishPhase: null })
@@ -1389,6 +1865,161 @@ export const useStore = create<Store>((set, get) => ({
         ...get().activity,
       ].slice(0, 60),
     }),
+
+  recordCapture: (event) => {
+    const d = event.data ?? {}
+    const run = get().scrapeRun
+    if (!sameRun(run, event)) return
+    const id = String(d.externalId ?? event.message ?? nid('cap'))
+    if (run.captures.some((c) => c.id === id)) return
+    const relevance = typeof d.brandRelevance === 'number' ? d.brandRelevance : null
+    const capture: LiveCapture = {
+      id,
+      title: event.message ?? 'Untitled page',
+      keyword: typeof d.keyword === 'string' ? d.keyword : '',
+      platform: typeof d.platform === 'string' ? d.platform : 'open-web',
+      source: typeof d.source === 'string' ? d.source : 'crawl4ai',
+      relevance,
+      held: null,
+    }
+    // `found` counts captures the run actually reported. It is never estimated.
+    const captures = [...run.captures, capture].slice(-400)
+    set({
+      scrapeRun: {
+        ...run,
+        runId: run.runId ?? event.runId ?? null,
+        captures,
+        found: captures.length,
+        currentKeyword: capture.keyword || run.currentKeyword,
+        currentSource: capture.platform,
+      },
+    })
+  },
+
+  recordRunNote: (event) => {
+    const d = event.data ?? {}
+    // A per-lane line is already a lane row; only the stage-level ones are notes.
+    if (typeof d.platform === 'string') return
+    const message = event.message
+    if (message === undefined || message === '') return
+    const run = get().scrapeRun
+    if (!sameRun(run, event)) return
+    const id = `${event.skillId ?? event.agentId ?? 'run'}::${message}`
+    if (run.notes.some((n) => n.id === id)) return
+    const note: LiveNote = {
+      id,
+      agentId: event.agentId ?? '',
+      message,
+      status: d.status === 'warn' || d.status === 'error' ? 'warn' : 'ok',
+    }
+    set({
+      scrapeRun: {
+        ...run,
+        runId: run.runId ?? event.runId ?? null,
+        notes: [...run.notes, note].slice(-120),
+      },
+    })
+  },
+
+  recordHeld: (event) => {
+    const d = event.data ?? {}
+    const run = get().scrapeRun
+    if (!sameRun(run, event)) return
+    const id = String(d.externalId ?? event.message ?? '')
+    if (id === '') return
+    const verdict = d.verdict
+    const held: NonNullable<LiveCapture['held']> = {
+      since: typeof d.heldSince === 'string' ? d.heldSince : '',
+      originalId: typeof d.originalId === 'string' ? d.originalId : '',
+      originalTitle: typeof d.originalTitle === 'string' ? d.originalTitle : '',
+      verdict:
+        verdict === 'validated' || verdict === 'needs_review' || verdict === 'duplicate' || verdict === 'rejected'
+          ? verdict
+          : 'pending',
+      reason: typeof d.reason === 'string' ? d.reason : '',
+    }
+    const known = run.captures.some((c) => c.id === id)
+    const captures = known
+      ? run.captures.map((c) => (c.id === id ? { ...c, held } : c))
+      : [
+          ...run.captures,
+          {
+            id,
+            title: event.message ?? 'Untitled page',
+            keyword: typeof d.keyword === 'string' ? d.keyword : '',
+            platform: typeof d.platform === 'string' ? d.platform : 'open-web',
+            source: 'crawl4ai',
+            relevance: null,
+            held,
+          },
+        ]
+    set({
+      scrapeRun: {
+        ...run,
+        runId: run.runId ?? event.runId ?? null,
+        captures,
+        found: captures.length,
+      },
+    })
+  },
+
+  recordVerdict: (event) => {
+    const d = event.data ?? {}
+    const run = get().scrapeRun
+    if (!sameRun(run, event)) return
+    const verdict = d.validation
+    if (typeof verdict !== 'string') return
+    const id = String(d.externalId ?? event.message ?? nid('ver'))
+    if (run.verdicts.some((v) => v.id === id)) return
+    const row: LiveVerdict = {
+      id,
+      title: event.message ?? 'Untitled page',
+      verdict: verdict as LiveVerdict['verdict'],
+      // Rule 6: the verdict arrives with the reason that produced it.
+      reason: typeof d.reason === 'string' ? d.reason : '',
+      relevance: typeof d.relevance === 'number' ? d.relevance : null,
+      credibility: typeof d.credibility === 'string' ? d.credibility : null,
+    }
+    set({
+      scrapeRun: {
+        ...run,
+        runId: run.runId ?? event.runId ?? null,
+        verdicts: [...run.verdicts, row].slice(-400),
+      },
+    })
+  },
+
+  recordScrapeLane: (event) => {
+    const d = event.data ?? {}
+    const keyword = typeof d.keyword === 'string' ? d.keyword : ''
+    const platform = typeof d.platform === 'string' ? d.platform : ''
+    // Only the per-lane lines carry both. Agent-level notes are left to the feed.
+    if (keyword === '' || platform === '') return
+    const stated = d.status
+    const status: LiveLane['status'] = stated === 'warn' ? 'warn' : stated === 'running' ? 'running' : 'ok'
+    const lane: LiveLane = {
+      id: `${platform}::${keyword}`,
+      keyword,
+      platform,
+      status,
+      kept: typeof d.count === 'number' ? d.count : null,
+      captured: typeof d.captured === 'number' ? d.captured : null,
+      reason: typeof d.reason === 'string' ? d.reason : null,
+    }
+    const run = get().scrapeRun
+    if (!sameRun(run, event)) return
+    const lanes = run.lanes.some((l) => l.id === lane.id)
+      ? run.lanes.map((l) => (l.id === lane.id ? lane : l))
+      : [...run.lanes, lane]
+    set({
+      scrapeRun: {
+        ...run,
+        runId: run.runId ?? event.runId ?? null,
+        lanes,
+        ...(status === 'running' ? { currentKeyword: keyword, currentSource: platform } : {}),
+      },
+    })
+  },
 
   setAgent: (agentId, patch) =>
     set({
@@ -1424,7 +2055,7 @@ export const useStore = create<Store>((set, get) => ({
    * frames; standalone, it runs the same grammar parser in the bundle and
    * labels itself. The reducer below cannot tell the difference.
    */
-  sendCommand: async (utterance, channel = 'text') => {
+  sendCommand: async (utterance, channel = 'text', focus) => {
     const text = utterance.trim()
     if (text.length === 0) return
 
@@ -1579,6 +2210,7 @@ export const useStore = create<Store>((set, get) => ({
             ...(get().assistant.conversationId ? { conversationId: get().assistant.conversationId as string } : {}),
             actor: get().user?.name ?? 'Ridhima',
             role: get().user?.role ?? 'marketing',
+            ...(focus === undefined ? {} : { focus }),
           },
           onFrame,
         )

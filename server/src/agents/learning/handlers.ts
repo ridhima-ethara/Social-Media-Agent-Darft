@@ -116,7 +116,17 @@ registerSkill<LearningPayload>('learning.knowledge.write', async (payload, ctx) 
   const learned: Array<{ id: string; title: string }> = []
 
   for (const pattern of patterns) {
-    const title = `Learned: ${pattern.signal.slice(0, 60).replace(/\s+\S*$/, '')}`
+    /*
+     * Trim to a whole word only when the text was actually cut.
+     *
+     * The unconditional `replace(/\s+\S*$/, '')` removed the LAST word of every
+     * signal, truncated or not: "Approved as submitted." is 22 characters, needed
+     * no truncation, and became the title "Learned: Approved as" — which says
+     * nothing. Three entries in the Knowledge Base read that way.
+     */
+    const signal = pattern.signal.trim()
+    const clipped = signal.length > 60 ? signal.slice(0, 60).replace(/\s+\S*$/, '') : signal
+    const title = `Learned: ${clipped.replace(/[.\s]+$/, '')}`
 
     // Already known? Confirm it rather than write it twice.
     const known = existing.find((row) => similarity(row.content, pattern.signal) >= 0.68)
@@ -130,7 +140,7 @@ registerSkill<LearningPayload>('learning.knowledge.write', async (payload, ctx) 
       title,
       category: pattern.category,
       content: `${pattern.signal} Seen ${pattern.occurrences} times across: ${pattern.evidence.slice(0, 4).join('; ')}.`,
-      source: 'Learning Agent',
+      source: 'Velma',
       sources: [],
       hashtagId: null,
       confidence: defaultConfidence,

@@ -40,7 +40,7 @@ deterministic parser.
 2. **Press ⌘K** and type *"what's trending this week?"* — Ethara shows you the plan before it runs it.
 3. **Start discovery.** The Pipeline Theater runs scrape → validate → plan on a virtual clock; Space
    pauses it exactly where it is.
-4. **Open the Weekly Calendar.** Exactly ten cards per platform. Everything else is below in *More
+4. **Open the Weekly Calendar.** Exactly five cards per platform. Everything else is below in *More
    suggestions* with its rank — promote one and watch what it displaces.
 5. **Open a card, edit the caption, then ask Ethara to "make it shorter and more CTO-focused."** The
    instruction wins over the brand guideline; the finding is raised alongside it, never silently
@@ -92,9 +92,22 @@ keywords → scrape LinkedIn → validate (4 verdicts, every one with a reason)
         → Leadership approval → publish → measure → write the lesson back
 ```
 
+The eight operator-facing specialist names are standardized without changing their permanent machine IDs:
+
+| Display name | Role | Stable ID |
+|---|---|---|
+| Mickey | Publishing Agent | `publishing` |
+| Sherlock | Scraping Agent | `scraping` |
+| Dexter | Validation Agent | `validation` |
+| Velma | Learning Agent | `learning` |
+| SpongeBob | Content Agent | `caption` |
+| Dora | Calendar Agent | `calendar` |
+| Minnie | Image Agent | `image` |
+| Jerry | Analytics Agent | `analytics` |
+
 Four platforms ship — LinkedIn, Instagram, X and Facebook (see `docs/decisions/ADR-006`). Four
 numbers hold the shape of it: top **5** trending keywords, top **5** hashtags each, a
-consolidated top **25**, and top **10** calendar slots per platform. All four are adjustable knobs in
+consolidated top **25**, and top **5** calendar slots per platform. All four are adjustable knobs in
 Agent Studio.
 
 ---
@@ -108,9 +121,14 @@ Copy `server/.env.example` to `server/.env`. Every key may be left blank.
 | `CRAWL4AI_PYTHON` | **Nothing is captured at all.** This is the only scraping path; there is no corpus behind it |
 | `FACEBOOK_ACCESS_TOKEN` (and the other platform tokens) | Publishing runs in demo mode; every receipt says so |
 | `PARALLEL_API_KEY` | Research reads the open web with crawl4ai instead, with the reason on every entry |
-| `GCP_API_KEY` | Captions come from the deterministic template writer |
-| `GCP_API_KEY` + `Z_IMAGE_ENDPOINT` | Creatives render locally with the brand renderer |
+| `OLLAMA_BASE_URL` (with `AGENT_MODEL_PROVIDER=ollama`) | Captions, calendar copy and analytics prose come from the deterministic template writer instead of `qwen3.5:latest` |
+| `MFLUX_PYTHON` | Ollama refuses image generation over HTTP, so nothing tries mflux; creatives render locally with the brand SVG renderer instead of FLUX.2 Klein |
 | `ASSISTANT_MODEL_PROVIDER` | Ethara runs on the built-in grammar parser — blunter, fully working |
+
+`GCP_API_KEY` is the hosted alternative to the two Ollama keys above — `TEXT_MODEL_PROVIDER=auto`
+prefers whichever local model is configured over it, and `AGENT_MODEL_PROVIDER` never silently
+falls back from one vendor to another: an unreachable named provider degrades straight to the
+deterministic path and stamps the reason on the output.
 
 Every fallback is **labelled in the UI**, on the card it affected. The mode is always visible: the
 health endpoint reports the database, the publish mode and the command plane provider, and the header, the
@@ -153,6 +171,33 @@ backend/.venv/bin/python -m tools.crawl --keywords "RLHF" --platform linkedin --
 Every trending keyword and hashtag carries the URLs to open it, and the strongest page that carried
 it. They show on Content Intelligence, come back from `GET /api/trends`, and export as CSV from
 `GET /api/trends.csv`.
+
+### Two execution paths, honestly
+
+`npm run dev:full` runs `server/src/orchestrator.ts` — the 12-agent, registry-driven pipeline
+the UI talks to by default. There is a second, separate engine: `backend/`, a Python 3.14
+tier with its own 8-agent roster (`backend/agents/__init__.py`) and its own sequencer
+(`backend/workflows/social_media_workflow.py`), driven by `POST /api/agents/run` and the
+"Run agents" action. Both read and write the same Postgres state; they are not the same code
+path, and consolidating them is tracked as open work rather than pretended away.
+
+The Python tier is where the local models live:
+
+| Stage | Agent | What it does |
+|---|---|---|
+| Scrape | Sherlock | crawl4ai, headless Chromium, keyless |
+| Validate | Dexter | keyword/hashtag scoring, four verdicts |
+| Plan | Dora | weekly calendar slots |
+| Create | SpongeBob, Minnie | captions (`qwen3.5:latest`) and images (`x/flux2-klein:latest` via mflux, brand layer always local SVG) |
+| Ship | Mickey | two-stage approval, then dispatch |
+| Measure | Jerry, Velma | baseline comparison, lesson write-back |
+
+It reads its configuration from `server/.env` only — inherited through the Node spawn, not a
+separate `backend/.env` — so `AGENT_MODEL_PROVIDER=ollama` and the `OLLAMA_*` keys above govern
+both engines at once. Run it standalone with `backend/.venv/bin/python scripts/run-agents-api.py
+"<keyword>"`, which holds the SSE connection open so closing a shell does not orphan the run (the
+API kills the child process on client disconnect, by design). A full 8-agent run on Qwen takes
+roughly 9–12 minutes.
 
 ### Going live, agent by agent
 

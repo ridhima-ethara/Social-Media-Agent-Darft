@@ -8,7 +8,8 @@
 import type { Platform } from '../../../../shared/agent-contract'
 import { PLATFORMS } from '../../../../shared/agent-contract'
 import { listPlatformAnalytics, listPosts, postBaseline, setPostAnalysis, type PostRow } from '../../db/repo'
-import { clamp, mean, median, monthKeyOf, monthLabelOf, PLATFORM_LABEL, round, stdev } from '../corpus'
+import { clamp, mean, median, monthKeyOf, monthLabelOf, PLATFORM_LABEL, round, stdev,
+} from '../corpus'
 import { registerSkill } from '../runtime'
 import type { AnalyticsPayload } from '../skills/index'
 
@@ -319,6 +320,7 @@ registerSkill<AnalyticsPayload>('analytics.post.explain', async (payload, ctx) =
 function clampTo(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1).trimEnd()}…`
 }
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
    ANALYTICS 7 · analytics.report.compose

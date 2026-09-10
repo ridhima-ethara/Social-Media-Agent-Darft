@@ -117,6 +117,7 @@ export function buildParserSystemPrompt(snapshot: SituationSnapshot): string {
     '· `restated` is one short sentence in the operator’s own terms. No emoji, no exclamation marks.',
     '· `confidence` is your honest reading, not a flourish.',
     '· Resolve pronouns against the "Last referenced" line in the situation.',
+    '· Never add a platform, metric or period the operator did not name; leave the argument out and the tool reports across all of them.',
     '',
     'THE TOOL CATALOGUE',
     catalogue,
@@ -129,9 +130,16 @@ export function buildParserSystemPrompt(snapshot: SituationSnapshot): string {
 function describeArgs(tool: ToolSpec): string {
   const shape = (tool.args as { _def?: { typeName?: string } })._def
   if (shape?.typeName !== 'ZodObject') return '{}'
-  const keys = Object.keys((tool.args as unknown as { shape: Record<string, unknown> }).shape)
-  return keys.length === 0 ? '{}' : `{ ${keys.join(', ')} }`
+  const shapeMap = (tool.args as unknown as { shape: Record<string, { description?: string }> }).shape
+  const keys = Object.keys(shapeMap)
+  if (keys.length === 0) return '{}'
+  return `{ ${keys.map((key) => (shapeMap[key]?.description ? `${key} (${shapeMap[key].description})` : key)).join(', ')} }`
 }
+
+/** Reads where a platform or metric the operator never named is a narrowed guess, not a resolution. */
+const ANALYTICS_SCOPE_TOOLS = new Set(['analytics.query', 'analytics.compare', 'report.export'])
+/** Tools that take a day: the model's phrase is resolved to a date before the plan is stored. */
+const DAY_TOOLS = new Set(['idea.list', 'idea.move', 'draft.generate'])
 
 async function parseWithModel(opts: ParseOptions): Promise<Intent | null> {
   const raw = await textAdapter().run({
@@ -153,9 +161,45 @@ async function parseWithModel(opts: ParseOptions): Promise<Intent | null> {
     return null
   }
 
+  const entities: Record<string, unknown> = isRecord(parsed.entities) ? { ...parsed.entities } : {}
+  if (ANALYTICS_SCOPE_TOOLS.has(action)) {
+    // Qwen answers "how did last month perform?" with LinkedIn and engagement
+    // rate it was never asked for. A scope the operator did not say is dropped,
+    // so the read reports across everything rather than a narrowed guess.
+    const lower = opts.utterance.toLowerCase()
+    if (typeof entities.platform === 'string' && !/\b(linkedin|instagram|insta|facebook|fb|twitter|x)\b/.test(lower)) delete entities.platform
+    if (typeof entities.metric === 'string') {
+      const head = entities.metric.toLowerCase().split(/[\s_]+/)[0] ?? ''
+      if (head.length === 0 || !lower.includes(head)) delete entities.metric
+    }
+    // And a period the operator did say is never lost to the model omitting it.
+    if (typeof entities.month !== 'string') {
+      const month = detectMonth(lower)
+      if (month) entities.month = month
+    }
+  }
+
+  if (DAY_TOOLS.has(action)) {
+    // "next monday" is what the operator said, not a date. Resolve it here so
+    // the confirm card and the stored plan both name the actual day; and if the
+    // model dropped the day entirely, take it from the utterance.
+    const lower = opts.utterance.toLowerCase()
+    const fromEntity =
+      typeof entities.day === 'string' ? detectDay(entities.day.toLowerCase().replace(/_/g, ' ')) : null
+    const day = fromEntity ?? detectDay(lower)
+    if (day) entities.day = day
+    else if (typeof entities.day === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(entities.day)) delete entities.day
+    if (action === 'idea.move') {
+      const fromTime =
+        typeof entities.time === 'string' ? detectTime(entities.time.toLowerCase().replace(/_/g, ' ')) : null
+      const time = fromTime ?? detectTime(lower)
+      if (time) entities.time = time
+    }
+  }
+
   return {
     action,
-    entities: isRecord(parsed.entities) ? parsed.entities : {},
+    entities,
     confidence: clampConfidence(parsed.confidence),
     restated: typeof parsed.restated === 'string' ? parsed.restated : opts.utterance,
     ...(Array.isArray(parsed.missing)
@@ -575,6 +619,28 @@ async function enrich(intent: Intent, opts: ParseOptions): Promise<Intent> {
     }
   }
 
+  /* ── The screen's focus ───────────────────────────────────────────────────
+     Applied without requiring a pronoun. An operator with a post open who types
+     "shorten the caption" has named the subject by looking at it, and asking
+     which post they meant would be asking them to retype what is on screen.
+     It never overrides a subject the utterance itself carries. */
+  if (needsSubject && typeof entities.id !== 'string') {
+    const focus = opts.snapshot.focus
+    if (focus && typeof focus.id === 'string') {
+      entities.id = focus.id
+      if (typeof focus.title === 'string' && typeof entities.title !== 'string') {
+        entities.title = focus.title
+      }
+      if (
+        typeof focus.platform === 'string' &&
+        argKeys.includes('platform') &&
+        entities.platform === undefined
+      ) {
+        entities.platform = focus.platform
+      }
+    }
+  }
+
   /* ── Fuzzy title → id ─────────────────────────────────────────────────── */
   if (argKeys.includes('id') && typeof entities.id !== 'string') {
     const fragment =
@@ -626,13 +692,24 @@ async function enrich(intent: Intent, opts: ParseOptions): Promise<Intent> {
     }
   }
 
-  /* ── Missing required arguments ───────────────────────────────────────── */
+  /* ── Missing required arguments ─────────────────────────────────────────
+     The schema decides this, not the model.
+
+     `parseWithModel` copies the model's own `missing` array onto the intent, and
+     a conditional spread here left that claim in place whenever this recount
+     found nothing — so a model that decided an OPTIONAL argument was required
+     got its way. "What is trending this week?" answered "I need limit before I
+     can trending keywords", asking an operator to supply a number the tool
+     already defaults.
+
+     `missing` is therefore always assigned, so the recount can clear a stale
+     claim as well as add a real one. */
   const missing = requiredArgs(tool).filter((key) => entities[key] === undefined)
 
   return {
     ...intent,
     entities,
-    ...(missing.length > 0 ? { missing } : {}),
+    missing,
   }
 }
 

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 
 import { config, redactUrl } from '../config'
 import { closePool, getPool, query } from './pool'
+import { describeDrift, findSchemaDrift } from './schema-drift'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCHEMA_PATH = join(HERE, 'schema.sql')
@@ -102,7 +103,20 @@ async function main(): Promise<void> {
   await getPool().query(sql)
 
   const count = await tableCount()
-  console.log(`  ✓ Schema applied. ${count} tables present.\n`)
+  console.log(`  ✓ Schema applied. ${count} tables present.`)
+
+  /*
+   * Applying the schema is not the same as matching it. CREATE TABLE IF NOT
+   * EXISTS leaves an existing table alone, so a column added to schema.sql
+   * after that table was created is still absent here — and the next pipeline
+   * run is where you would find out. Check now, while the fix is one command.
+   */
+  const drift = await findSchemaDrift()
+  if (drift.length > 0) {
+    console.error(`\n  ✗ ${describeDrift(drift)}\n`)
+    process.exit(1)
+  }
+  console.log(`  ✓ Every declared column is present.\n`)
 }
 
 main()

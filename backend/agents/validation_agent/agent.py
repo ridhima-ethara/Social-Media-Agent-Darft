@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agents.names import identity_for
 from core.agent import Agent
 from core.llm import Reasoning, ToolSpec
 from tools import consolidate_hashtags, rank_hashtags, route_verdict, score_keywords, similarity_check
@@ -16,7 +17,10 @@ from tools import consolidate_hashtags, rank_hashtags, route_verdict, score_keyw
 
 class ValidationAgent(Agent):
     agent_id = "validation_agent"
-    name = "Validation Agent"
+    identity = identity_for(agent_id)
+    name = identity["name"]
+    role = identity["role"]
+    icon = identity["icon"]
     stage = "assess"
     hands_off_to = ["content_agent", "calendar_agent"]
 
@@ -48,6 +52,7 @@ class ValidationAgent(Agent):
                     candidates,
                     trending_terms if trending_terms is not None else self._trending_terms,
                     cfg["top_hashtags_per_keyword"],
+                    cfg["freshness_half_life_hours"],
                 ),
             ),
             ToolSpec(
@@ -124,7 +129,8 @@ class ValidationAgent(Agent):
 
         if not output.get("ranked_hashtags"):
             output.update(rank_hashtags(
-                payload.get("hashtag_candidates", []), trending_terms, cfg["top_hashtags_per_keyword"]
+                payload.get("hashtag_candidates", []), trending_terms,
+                cfg["top_hashtags_per_keyword"], cfg["freshness_half_life_hours"],
             ))
         self._ranked = output.get("ranked_hashtags", [])
 

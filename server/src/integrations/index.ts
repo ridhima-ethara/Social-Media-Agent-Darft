@@ -46,7 +46,9 @@ export {
   ollamaImage,
   ollamaText,
   stripReasoning,
+  templateWriter,
   textAdapter,
+  textAdapterFor,
   textModelId,
   type OllamaTextInput,
 } from './ollama'

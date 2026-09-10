@@ -18,9 +18,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'scraping',
-  name: 'Scraping Agent',
+  name: 'Sherlock',
   stage: 'discover',
-  role: 'Captures public activity for the keyword set across four platforms and the open web, via crawl4ai.',
+  role: 'Scraping Agent · Captures public activity for the keyword set across four platforms and the open web, via crawl4ai.',
   description:
     'Gathers. Does not judge. Admits only what aligns with the brand topic set and the Knowledge Base, wraps every captured body as untrusted evidence before it reaches a model, and counts every exclusion rather than silently dropping it. A lane that returns nothing returns nothing — there is no corpus behind it.',
   consumes: [

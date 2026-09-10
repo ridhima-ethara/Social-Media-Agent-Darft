@@ -17,9 +17,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'analytics',
-  name: 'Analytics Agent',
+  name: 'Jerry',
   stage: 'learn',
-  role: 'Measures against this account’s own trailing baseline.',
+  role: 'Analytics Agent · Measures against this account’s own trailing baseline.',
   description:
     'Appends a reading per pull, never overwrites. A not-yet-reported metric is excluded from every calculation, never counted as zero.',
   consumes: [

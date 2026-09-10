@@ -68,7 +68,7 @@ registerSkill<ImagePayload>('generation.image.reference', async (payload, ctx) =
     .filter((a) => a.idea_id !== payload.ideaId)
     .map((a) => `${a.concept ?? 'unknown'} · ${a.canvas ?? ''}`)
 
-  // Rule 14: an image too close to a recent one is a repeat, not a series.
+  // Rule 17: an image too close to a recent one is a repeat, not a series.
   const sameConcept = assets.filter((a) => a.concept === payload.concept)
   if (sameConcept.length > 0) {
     const headlineTwin = sameConcept.find(
@@ -188,7 +188,7 @@ registerSkill<ImagePayload>('generation.image.render', async (payload, ctx) => {
   })
 
   if (!compositeBrandLayer) {
-    // The knob is honoured as far as it can be. Rule 12 is structural: the brand
+    // The knob is honoured as far as it can be. Invariant 21 is structural: the brand
     // layer is always drawn, and the operator is told the knob had no effect
     // rather than left believing it did something.
     ctx.emit(

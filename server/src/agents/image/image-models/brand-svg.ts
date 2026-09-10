@@ -2,7 +2,7 @@
  * THE BRAND RENDERER — the local vector layer, and the floor of every fallback.
  *
  * Needs no service, makes no network call, and cannot fail. It draws the brand
- * layer for every render (rule 12), and when no model is reachable it also
+ * layer for every render (invariant 21), and when no model is reachable it also
  * draws the background, so a post is never left without a picture.
  *
  * Output is deterministic: the same request always produces byte-identical SVG,

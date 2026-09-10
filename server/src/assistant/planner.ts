@@ -199,7 +199,7 @@ export function composePlan(opts: ComposeOptions): Plan {
     intent,
     steps: kept,
     risk,
-    summary: summarise(tool, intent, kept, snapshot),
+    summary: summarise(tool, intent, snapshot),
     requiresConfirmation: needsConfirm,
     ...(trimmed.length > 0 ? { trimmed } : {}),
   }
@@ -265,6 +265,8 @@ function whyFor(tool: ToolSpec, intent: Intent, snapshot: SituationSnapshot): st
       return `Research the top ${e.hashtagCount ?? snapshot.counts.topHashtags} hashtags and write cited entries`
     case 'analytics.compare':
       return 'Compare the period against this account’s own trailing baseline'
+    case 'analytics.query':
+      return 'Read the reported figures, and say whether the platform has actually reported the period'
     case 'post.explain':
       return 'Explain the post against our own baseline, not an industry figure'
     case 'lineage.trace':
@@ -279,7 +281,6 @@ function whyFor(tool: ToolSpec, intent: Intent, snapshot: SituationSnapshot): st
 function summarise(
   tool: ToolSpec,
   intent: Intent,
-  steps: ToolCall[],
   snapshot: SituationSnapshot,
 ): string {
   const e = intent.entities
@@ -311,10 +312,15 @@ function summarise(
       return `Adding “${String(e.term ?? '')}” to the keyword set${e.weight ? ` at weight ${String(e.weight)}` : ''}.`
     case 'lineage.trace':
       return 'Tracing the lineage in both directions.'
+    case 'analytics.query': {
+      const period = typeof e.month === 'string' ? ` for ${e.month.replace(/_/g, ' ')}` : ''
+      const figure = typeof e.metric === 'string' ? e.metric : 'figures'
+      return `Reading ${platform ?? 'every platform'}’s ${figure}${period}, with whether the platform has reported the period.`
+    }
+    case 'report.export':
+      return `Preparing the ${platform ?? 'analytics'} export${typeof e.month === 'string' ? ` for ${e.month.replace(/_/g, ' ')}` : ''}.`
     default:
-      return steps.length > 1
-        ? `${tool.name}: ${tool.summary}`
-        : tool.summary
+      return intent.restated.trim().length > 0 ? intent.restated : tool.summary
   }
 }
 

@@ -11,7 +11,7 @@ import { Eye, EyeOff, Megaphone, ShieldCheck, Sparkles, Loader2 } from 'lucide-r
 import { useStore } from '../store'
 import { Logo, Wordmark } from '../components/logo'
 import { ThemeToggle } from '../components/theme-toggle'
-import { Holo, Tilt } from '../components/tilt'
+import { Tilt } from '../components/tilt'
 import type { OperatorRole } from '../types'
 
 const ROLES: Array<{
@@ -75,25 +75,24 @@ export function LoginPage() {
               className="absolute inset-0 rounded-full"
               style={{
                 background: 'radial-gradient(circle, var(--color-glow), transparent 68%)',
-                animation: 'auth-halo 9s var(--ease-in-out-soft) infinite',
+                animation: 'auth-halo 16s var(--ease-in-out-soft) infinite',
               }}
               aria-hidden="true"
             />
             <span
               className="absolute inset-[6px] rounded-full border border-line-strong"
-              style={{ animation: 'auth-orbit-in 900ms var(--ease-out-expo) both, auth-orbit-spin 28s linear infinite 900ms' }}
+              style={{ animation: 'auth-orbit-in 900ms var(--ease-out-expo) both, auth-orbit-spin 90s linear infinite 900ms' }}
               aria-hidden="true"
             />
             <span
               className="absolute inset-[22px] rounded-full border border-magenta/35"
-              style={{ animation: 'auth-orbit-in 900ms var(--ease-out-expo) 160ms both, auth-orbit-spin-reverse 19s linear infinite 1060ms' }}
+              style={{ animation: 'auth-orbit-in 900ms var(--ease-out-expo) 160ms both, auth-orbit-spin-reverse 140s linear infinite 1060ms' }}
               aria-hidden="true"
             />
-            <span className="anim-float-3d">
-              <Holo size={92} rings={3}>
-                <Logo size={92} mode="draw" />
-              </Holo>
-            </span>
+            {/* The mark, drawn once. It used to sit inside three holographic
+                rings tumbling in 3D and a float on top — five rings orbiting
+                one logo. The two slow rings above are the whole orbit now. */}
+            <Logo size={92} mode="draw" />
           </div>
 
           <p className="mb-3 flex items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-ink-3">
@@ -163,14 +162,9 @@ export function LoginPage() {
           className="glass relative z-10 w-full max-w-md rounded-2xl p-7 shadow-2xl"
           style={{ animation: 'auth-card-rise 720ms var(--ease-out-expo) both' }}
         >
-          <span
-            className="pointer-events-none absolute inset-x-0 top-0 h-px"
-            style={{
-              background: 'linear-gradient(90deg, transparent, var(--color-magenta), transparent)',
-              animation: 'auth-card-beam 6s var(--ease-in-out-soft) infinite',
-            }}
-            aria-hidden="true"
-          />
+          {/* A magenta beam used to sweep the top edge of this card every six
+              seconds, forever. The card is where the operator is reading and
+              typing; nothing on it should move once it has arrived. */}
 
           <div className="mb-6 flex items-center gap-2.5 lg:hidden">
             <Logo size={28} />
@@ -272,24 +266,6 @@ export function LoginPage() {
               'Sign in'
             )}
           </button>
-
-          <div className="my-5 flex items-center gap-3">
-            <span className="h-px flex-1 bg-line" aria-hidden="true" />
-            <span className="text-[10px] uppercase tracking-[0.14em] text-ink-3">or</span>
-            <span className="h-px flex-1 bg-line" aria-hidden="true" />
-          </div>
-
-          <button
-            type="button"
-            disabled
-            className="w-full rounded-lg border border-line px-3 py-2 text-[13px] text-ink-3 opacity-60"
-          >
-            Request access
-          </button>
-
-          <p className="mt-5 text-[11px] leading-relaxed text-ink-3">
-            Demo workspace — any password signs you in. Roles control which screens and approvals you see.
-          </p>
         </form>
       </section>
     </div>
@@ -306,7 +282,7 @@ function AuthBackdrop({ subtle = false }: { subtle?: boolean }) {
           background:
             'radial-gradient(900px 520px at 20% 10%, var(--color-glow), transparent 62%), radial-gradient(700px 420px at 84% 78%, var(--color-hud), transparent 60%)',
           opacity: subtle ? 0.5 : 1,
-          animation: 'auth-glow-drift 24s var(--ease-in-out-soft) infinite',
+          animation: 'auth-glow-drift 48s var(--ease-in-out-soft) infinite',
         }}
       />
       <span
@@ -315,39 +291,13 @@ function AuthBackdrop({ subtle = false }: { subtle?: boolean }) {
           backgroundImage:
             'linear-gradient(to right, var(--color-hud) 1px, transparent 1px), linear-gradient(to bottom, var(--color-hud) 1px, transparent 1px)',
           backgroundSize: '52px 52px',
-          animation: 'auth-grid-pan 46s linear infinite',
         }}
       />
-      {[0, 1, 2].map((i) => (
-        <span
-          key={`signal-${i}`}
-          className="absolute h-px w-full"
-          style={{
-            top: `${22 + i * 26}%`,
-            background: 'linear-gradient(90deg, transparent, var(--color-hud-strong), transparent)',
-            animation: `auth-signal-drift ${18 + i * 5}s var(--ease-in-out-soft) infinite ${i * 2.4}s`,
-          }}
-        />
-      ))}
-      <span
-        className="absolute inset-y-0 w-40"
-        style={{
-          background: 'linear-gradient(90deg, transparent, var(--color-glow), transparent)',
-          animation: 'auth-accent-sweep 16s var(--ease-in-out-soft) infinite',
-        }}
-      />
-      {[0, 1, 2, 3, 4, 5, 6].map((i) => (
-        <span
-          key={`particle-${i}`}
-          className="absolute h-1 w-1 rounded-full bg-magenta"
-          style={{
-            left: `${8 + i * 13}%`,
-            bottom: '-4%',
-            opacity: 0.5,
-            animation: `auth-particle-rise ${14 + i * 3}s linear infinite ${i * 1.7}s`,
-          }}
-        />
-      ))}
+      {/* The sweeping lines, the accent sweep and the rising particles used to
+          live here. Together with the mark and the card that was twenty
+          things moving on a screen whose only job is one form. The glow
+          above is the one thing left that moves, and it takes most of a
+          minute to do it. */}
     </div>
   )
 }

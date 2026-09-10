@@ -8,7 +8,6 @@
 
 import { useEffect, type ReactNode } from 'react'
 import {
-  Bell,
   Brain,
   CalendarDays,
   ChevronLeft,
@@ -21,22 +20,16 @@ import {
   Send,
   Settings as SettingsIcon,
   ShieldCheck,
-  Sparkles,
   Sliders,
-  Volume2,
-  VolumeX,
 } from 'lucide-react'
 import { AGENT_BY_ID } from '@shared/agent-registry'
 import { useStore } from '../store'
-import { Badge, Btn } from './ui'
+import { Badge } from './ui'
 import { Logo, Wordmark } from './logo'
 import { ThemeToggle } from './theme-toggle'
-import { AssistantCore } from './assistant/core'
 import { AssistantBar } from './assistant/bar'
 import { AssistantRail } from './assistant/rail'
 import { AssistantHud, LiveBackground } from './assistant/hud'
-import { Holo } from './tilt'
-import { setVoiceEnabled, voiceSupport } from '../lib/voice'
 import type { AgentId, PageId } from '../types'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -214,49 +207,13 @@ function Sidebar() {
 function Header() {
   const user = useStore((s) => s.user)
   const logout = useStore((s) => s.logout)
-  const setPage = useStore((s) => s.setPage)
   const openKnowledge = useStore((s) => s.openKnowledge)
   const knowledge = useStore((s) => s.knowledge)
-  const ideas = useStore((s) => s.ideas)
-  const reviewQueue = useStore((s) => s.reviewQueue)
-  const coreState = useStore((s) => s.assistant.coreState)
-  const notices = useStore((s) => s.assistant.notices)
-  const activePlan = useStore((s) => s.assistant.activePlan)
-  const settings = useStore((s) => s.settings)
-  const updateSettings = useStore((s) => s.updateSettings)
   const apiMode = useStore((s) => s.apiMode)
   const publishMode = useStore((s) => s.mode.publishMode)
 
-  const awaitingLeadership = ideas.filter((i) => i.status === 'pending_leadership').length
-  const openQueue = reviewQueue.filter((q) => !q.resolved).length
-  const needsAttention = awaitingLeadership > 0 || openQueue > 0
-
-  const progress = activePlan
-    ? (activePlan.steps.filter((s) => s.status === 'completed').length / Math.max(1, activePlan.steps.length)) * 100
-    : 0
-
   return (
     <header className="glass relative z-20 flex h-14 shrink-0 items-center justify-end gap-2 border-b border-line px-4">
-      <Holo size={44}>
-        <AssistantCore
-          state={coreState}
-          size={44}
-          progress={progress}
-          badge={notices.length}
-          onClick={() => setPage('assistant')}
-        />
-      </Holo>
-
-      <button
-        type="button"
-        onClick={() => useStore.getState().openBar()}
-        className="mono hidden rounded-md border border-line px-2 py-1 text-[10px] text-ink-3 transition-colors hover:border-line-strong hover:text-ink-2 xl:block"
-      >
-        ⌘K
-      </button>
-
-      <span className="mx-1 h-5 w-px bg-line" aria-hidden="true" />
-
       <ThemeToggle />
 
       <Badge tone="magenta">{apiMode === 'connected' ? `${publishMode.toUpperCase()} MODE` : 'STANDALONE'}</Badge>
@@ -273,34 +230,6 @@ function Header() {
         </span>
         <span className="tabular">{knowledge.filter((k) => k.active).length}</span>
       </button>
-
-      <button
-        type="button"
-        onClick={() => setPage(user?.role === 'leadership' ? 'leadership' : 'orchestration')}
-        aria-label="Notifications"
-        className="relative rounded-lg border border-line p-1.5 text-ink-3 transition-colors hover:border-line-strong hover:text-ink"
-      >
-        <Bell size={15} />
-        {needsAttention ? (
-          <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-critical" aria-hidden="true" />
-        ) : null}
-      </button>
-
-      {voiceSupport.any ? (
-        <button
-          type="button"
-          onClick={() => {
-            const next = !settings.assistantVoice
-            updateSettings({ assistantVoice: next })
-            setVoiceEnabled(next)
-          }}
-          aria-label={settings.assistantVoice ? 'Mute Ethara' : 'Unmute Ethara'}
-          title={settings.assistantVoice ? 'Mute Ethara' : 'Unmute Ethara'}
-          className="rounded-lg border border-line p-1.5 text-ink-3 transition-colors hover:border-line-strong hover:text-ink"
-        >
-          {settings.assistantVoice ? <Volume2 size={15} /> : <VolumeX size={15} />}
-        </button>
-      ) : null}
 
       <span className="mx-1 h-5 w-px bg-line" aria-hidden="true" />
 
@@ -377,16 +306,12 @@ export function PageHeader({
   subtitle,
   agents,
   actions,
-  askPrompt,
 }: {
   title: string
   subtitle: string
   agents?: AgentId[]
   actions?: ReactNode
-  /** Pre-fills the command bar with a prompt appropriate to this screen. */
-  askPrompt?: string
 }) {
-  const openBar = useStore((s) => s.openBar)
 
   return (
     <header className="mb-5 flex flex-wrap items-start justify-between gap-4">
@@ -397,11 +322,6 @@ export function PageHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {askPrompt ? (
-          <Btn variant="ghost" onClick={() => openBar(askPrompt)}>
-            <Sparkles size={13} /> Ask Ethara about this screen
-          </Btn>
-        ) : null}
         {actions}
       </div>
     </header>

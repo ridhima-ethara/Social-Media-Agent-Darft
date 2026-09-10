@@ -3,7 +3,7 @@
  *
  * It receives a prompt describing an abstract field and returns pixels. It is
  * never asked for brand text; the headline, kicker, logomark and footer are
- * composited over the result as vectors by the brand renderer (rule 12).
+ * composited over the result as vectors by the brand renderer (invariant 21).
  */
 
 import { config } from '../../../config'

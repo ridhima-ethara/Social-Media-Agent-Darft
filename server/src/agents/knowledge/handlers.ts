@@ -12,7 +12,7 @@
  */
 
 import type { Confidence } from '../../../../shared/agent-contract'
-import { similarity } from '../../../../shared/brand-voice'
+import { BRAND_RULE_TAG, similarity } from '../../../../shared/brand-voice'
 import {
   insertKnowledgeEntry,
   insertLineage,
@@ -439,6 +439,11 @@ export function scoreEntryAgainstQuery(entry: { title: string; content: string; 
 }
 
 export interface RetrieveOptions {
+  /**
+   * Include brand RULE entries. Off by default: grounding is for facts, and
+   * the rules govern the writing rather than supplying its evidence.
+   */
+  includeRules?: boolean
   query: string
   maxResults: number
   includeInactive: boolean
@@ -458,6 +463,16 @@ export async function retrieveKnowledge(
   const rows = await listKnowledge(workspaceId, {
     activeOnly: !opts.includeInactive,
     ...(opts.category === undefined ? {} : { category: opts.category }),
+    /*
+     * Rule 6 grounding is a factual question, and a compliance rule is not a
+     * fact about the world. "Two human approvals before publication" is true of
+     * how we ship, not of reward modelling, and offering it as grounding for a
+     * claim about reward modelling both wastes a grounding slot and invites a
+     * caption to cite the approval policy as evidence. The rules still govern
+     * the writing — they arrive through the brand voice layer, which is where
+     * they belong.
+     */
+    ...(opts.includeRules ? {} : { withoutTag: BRAND_RULE_TAG }),
     limit: 500,
   })
 
@@ -482,11 +497,51 @@ export async function retrieveKnowledge(
 }
 
 /** Shapes a retrieved row as the grounding contract the caption agent reads. */
+/**
+ * Lines that are layout, not language.
+ *
+ * A corpus section extracted from a research PDF carries the document's
+ * furniture along with its prose: code listings, figure and table labels,
+ * running headers, page numbers, citation blocks. Handed to a caption writer as
+ * grounding, that furniture is indistinguishable from a finding — so captions
+ * came back quoting `import pandas as pd` and a conference venue line.
+ *
+ * Dropped here, at the one function that turns a stored row into grounding, so
+ * every consumer — the caption writer, the review rewriter, the image brief —
+ * sees the same cleaned text. The stored entry is untouched: this is a reading
+ * filter, not an edit, and the Knowledge Base still shows the section as
+ * captured.
+ */
+const LAYOUT_LINE =
+  /^(?:\s*(?:\d+|[ivxlc]+)\s*$|\s*(?:figure|fig\.?|table|tbl\.?|algorithm|listing|appendix|eq\.?|equation)\s*\d|\s*(?:abstract|references|bibliography|acknowledge?ments|keywords|index terms|ccs concepts)\s*:?\s*$|\s*(?:copyright|©|permission to make digital)|\s*(?:arxiv|doi|isbn)\b)/i
+
+const CODE_LINE =
+  /(?:^\s*(?:import|from|def|class|return|const|let|var|function|package|public|private|#include|\$|>>>)\b|[{};]\s*$|=>|::|\w+\.\w+\(|^\s*[\w.]+\s*=\s*[^=]|_{2,})/
+
+/** Keeps the sentences and drops the furniture. */
+export function groundingProse(content: string): string {
+  const kept = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (line.length === 0) return false
+      if (LAYOUT_LINE.test(line)) return false
+      if (CODE_LINE.test(line)) return false
+      // Prose is mostly letters and spaces; a table row or an equation is not.
+      const prose = (line.match(/[a-z ]/gi) ?? []).length / line.length
+      return prose >= 0.7
+    })
+
+  // If filtering took everything, the entry had no prose to offer. Returning the
+  // original would reintroduce exactly what this exists to remove.
+  return kept.join('\n')
+}
+
 export function toGroundingEntry(row: KnowledgeEntryRow): GroundingEntry {
   return {
     id: row.id,
     title: row.title,
-    content: row.content,
+    content: groundingProse(row.content),
     confidence: row.confidence,
     category: row.category,
     sources: row.sources,

@@ -11,7 +11,7 @@
  */
 
 import type { AgentSpec } from '../contracts/src/index'
-import { SKILLS_BY_AGENT } from '../../shared/agent-registry'
+import { AGENT_BY_ID as REGISTRY_AGENT_BY_ID, SKILLS_BY_AGENT } from '../../shared/agent-registry'
 
 import { AGENT_MODULES } from './roster'
 
@@ -79,6 +79,16 @@ export function assertToolAllowlists(): AllowlistProblem[] {
 export function assertFoldersMatchRegistry(): AllowlistProblem[] {
   const problems: AllowlistProblem[] = []
   for (const agent of AGENT_ROSTER) {
+    const registryAgent = REGISTRY_AGENT_BY_ID[agent.id as keyof typeof REGISTRY_AGENT_BY_ID]
+    if (!registryAgent) {
+      problems.push({ agentId: agent.id, message: 'folder agent is missing from the shared registry.' })
+    } else if (registryAgent.name !== agent.name) {
+      problems.push({
+        agentId: agent.id,
+        message: `folder name "${agent.name}" does not match registry name "${registryAgent.name}".`,
+      })
+    }
+
     const declared = (SKILLS_BY_AGENT[agent.id as keyof typeof SKILLS_BY_AGENT] ?? []).map((s) => s.id).sort()
     const folder = [...(SKILLS_BY_FOLDER[agent.id] ?? [])].sort()
     if (declared.join(',') !== folder.join(',')) {

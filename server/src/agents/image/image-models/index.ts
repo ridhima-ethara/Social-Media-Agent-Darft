@@ -61,7 +61,7 @@ export function availableImageModels(): Array<{
  * Renders the creative.
  *
  * `compositeBrandLayer` being off would mean asking a diffusion model to draw
- * brand text, which rule 12 forbids. The request is honoured as far as it can
+ * brand text, which invariant 21 forbids. The request is honoured as far as it can
  * be — the brand layer is always drawn — and the attempt is recorded in the
  * fallback reason so the operator can see the knob had no effect.
  */

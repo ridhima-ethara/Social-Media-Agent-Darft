@@ -290,7 +290,7 @@ function offerFor(act: StepOutcome, snapshot: SituationSnapshot): string | null 
       return 'I can adjust it further, or send the post to Leadership.'
     case 'idea.publish':
     case 'idea.approve.leadership':
-      return 'The Analytics Agent will report the first reading in about an hour.'
+      return `${AGENT_BY_ID.analytics.name} will report the first reading in about an hour.`
     case 'knowledge.build':
       return 'The Caption Agent will read these before the next draft.'
     case 'keyword.add':

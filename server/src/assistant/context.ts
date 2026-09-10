@@ -88,6 +88,15 @@ export interface SituationSnapshot {
   platformThisWeek: Array<{ platform: Platform; count: number }>
   history: SnapshotTurn[]
   lastEntity: Record<string, unknown> | null
+  /**
+   * The post the operator is looking at, stated by the screen they typed on.
+   *
+   * Distinct from `lastEntity`: that is what the conversation last touched, and
+   * it only resolves a subject when the utterance actually points at one ("make
+   * IT shorter"). A focus is the subject whether or not the sentence contains a
+   * pronoun, because the operator was looking at it when they typed.
+   */
+  focus: Record<string, unknown> | null
   brief: { at: string; recommendation: string | null } | null
   mode: {
     publishMode: 'demo' | 'live'
@@ -105,6 +114,20 @@ export interface AssembleOptions {
   historyTurns: number
   includeKnowledge: boolean
   maxSnapshotChars: number
+  /**
+   * What the operator is looking at when they typed.
+   *
+   * A screen-embedded surface — the calendar's assistant panel — knows which
+   * post is in focus, and the conversation does not: on a first turn there is no
+   * prior entity to resolve "this" against, so the plane could only ask which
+   * post and which platform. The client states the focus instead of the operator
+   * having to retype what is already on screen.
+   *
+   * It seeds `lastEntity` and never overrides it: something referenced earlier in
+   * the conversation is a stronger signal of intent than whatever the page
+   * happens to be showing.
+   */
+  focus?: Record<string, unknown> | null
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -162,6 +185,7 @@ export async function assembleSnapshot(opts: AssembleOptions): Promise<Situation
     }
     lastEntity = await lastReferencedEntity(opts.conversationId)
   }
+
 
   const thisWeek = ideas
     .filter((i) => i.scheduled_date >= weekStartIso && i.scheduled_date < weekEndIso)
@@ -256,6 +280,7 @@ export async function assembleSnapshot(opts: AssembleOptions): Promise<Situation
     })),
     history,
     lastEntity,
+    focus: opts.focus ?? null,
     brief: brief ? { at: brief.created_at, recommendation: brief.recommendation } : null,
     mode: {
       publishMode: config.core.publishMode,
@@ -355,9 +380,17 @@ export function renderSnapshotText(snapshot: SituationSnapshot, maxChars: number
   if (unconfigured.length > 0) {
     lines.push(`Unconfigured: ${unconfigured.map((i) => `${i.label} — ${i.reason}`).join('; ')}.`)
   }
-  if (snapshot.lastEntity) {
-    lines.push(`Last referenced: ${JSON.stringify(snapshot.lastEntity)}.`)
+  // Stated before the conversation history, and unambiguously, because it is the
+  // answer to "which one" that the operator should never have to type twice.
+  if (snapshot.focus) {
+    lines.push(
+      `ON SCREEN NOW — the operator is looking at this post and it is the subject of ` +
+        `anything they say without naming another: ${JSON.stringify(snapshot.focus)}. ` +
+        `Use its id and platform directly. Do not ask which post they mean.`,
+    )
   }
+  if (snapshot.lastEntity) {
+    lines.push(`Last referenced: ${JSON.stringify(snapshot.lastEntity)}.`)  }
   if (snapshot.history.length > 0) {
     lines.push(
       'Recent turns: ' +

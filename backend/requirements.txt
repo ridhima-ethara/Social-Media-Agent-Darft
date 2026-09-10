@@ -24,3 +24,7 @@ crawl4ai==0.9.3
 # anthropic is optional. It is imported lazily inside `run_loop`, and its
 # absence degrades to the deterministic pipeline rather than failing.
 anthropic==1.4.0
+
+# Corpus ingestion: extracts the text layer from operator-supplied PDFs.
+# A scan with no text layer is reported, never OCR-guessed.
+pypdf==6.18.0

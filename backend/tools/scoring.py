@@ -12,6 +12,7 @@ answer is.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 from core.brain import similarity
@@ -32,6 +33,26 @@ ALIASES: list[set[str]] = [
 
 def _normalise(value: float, ceiling: float) -> float:
     return 0.0 if ceiling <= 0 else min(100.0, (value / ceiling) * 100.0)
+
+
+def _freshness(last_seen_at: str, half_life_hours: float) -> int:
+    """
+    Exponential decay: 100 at the moment of posting, 50 one half-life later.
+
+    A candidate with no timestamp scores 0 and the reason says the date was
+    missing — decaying from *now* would score an undated tag as brand new,
+    which is the one answer that is certainly wrong.
+    """
+    if not last_seen_at:
+        return 0
+    try:
+        seen = datetime.fromisoformat(last_seen_at.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    hours = max(0.0, (datetime.now(timezone.utc) - seen).total_seconds() / 3600)
+    return round(100 * math.pow(0.5, hours / max(1.0, half_life_hours)))
 
 
 def _is_alias(a: str, b: str) -> bool:
@@ -133,6 +154,7 @@ def rank_hashtags(
     candidates: list[dict[str, Any]],
     trending_terms: list[str],
     top_per_keyword: int = 5,
+    freshness_half_life_hours: int = 72,
 ) -> dict[str, Any]:
     """Ranks each trending keyword's hashtags on engagement per post and volume."""
     max_engagement = max((c.get("total_engagement", 0) for c in candidates), default=0)
@@ -153,6 +175,10 @@ def rank_hashtags(
                 "keyword": term,
                 "engagement_per_post": round(per_post, 1),
                 "hashtag_score": score,
+                # Reported alongside the score rather than folded into it. A tag
+                # that ranks well on stale evidence should say so, not quietly
+                # rank one place lower.
+                "freshness": _freshness(candidate.get("last_seen_at", ""), freshness_half_life_hours),
             })
         rows.sort(key=lambda r: r["hashtag_score"], reverse=True)
         for index, row in enumerate(rows[:top_per_keyword]):

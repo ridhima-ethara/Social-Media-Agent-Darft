@@ -522,6 +522,38 @@ export const TOOLS: ToolSpec[] = [
     ],
   },
   {
+    id: 'calendar.reshuffle',
+    name: 'Reshuffle the calendar',
+    summary:
+      'Re-ranks the week and re-draws the top slots against a stated preference, and stores the preference so the next run honours it too.',
+    agentId: 'calendar',
+    risk: 'mutating',
+    args: z
+      .object({
+        platform: platformEnum.optional().describe('Favour this platform for the calendar slots'),
+        instruction: z
+          .string()
+          .optional()
+          .describe('What the operator asked for, in their own words'),
+        remember: z
+          .boolean()
+          .optional()
+          .describe('Store the preference in the Knowledge Base. Defaults to true.'),
+      })
+      .strict(),
+    returns: 'The new calendar slots per platform, what moved, and whether the preference was stored.',
+    group: 'Calendar',
+    examples: [
+      'reshuffle the calendar',
+      'shuffle the calendar',
+      'redo the calendar for linkedin',
+      'favour linkedin on the calendar',
+      'rebalance the week',
+      'reshuffle but do not remember it',
+    ],
+  },
+
+  {
     id: 'idea.demote',
     name: 'Demote to suggestions',
     summary: 'Takes an idea off the calendar and returns it to the ranked suggestions.',
@@ -743,8 +775,19 @@ export const TOOLS: ToolSpec[] = [
     risk: 'safe',
     args: z
       .object({
-        platform: platformEnum.optional(),
-        month: z.string().optional().describe('YYYY-MM, or a month name'),
+        /*
+         * `all` is accepted and means every platform, which is what omitting it
+         * already did. A model asked "how did last month perform?" answers with
+         * `platform: 'all'` — the natural word — and the closed enum rejected it,
+         * so the whole query failed with an enum error instead of reporting the
+         * account. Normalised to `undefined` rather than adding a fifth platform
+         * anywhere else: `Platform` stays a closed union of four.
+         */
+        platform: z
+          .union([platformEnum, z.enum(['all', 'every', 'overall'])])
+          .optional()
+          .transform((value) => (value === undefined || value === 'all' || value === 'every' || value === 'overall' ? undefined : value)),
+        month: z.string().optional().describe('YYYY-MM, a month name, or the words "last month" / "this month"'),
         metric: z.string().optional().describe('Which figure, e.g. reach or engagement rate'),
       })
       .strict(),

@@ -23,5 +23,18 @@ the operator tunes to decide how much the calendar holds.
 
 ## `recall_knowledge(topic, limit)`
 
-The Knowledge Base read path. Use it to check what has been learned about timing and platform
-preference for this account before placing — the store may already know that a slot underperforms.
+The Knowledge Base read path, and the reason the calendar improves without anyone editing it.
+
+It is filtered to the entries that can legitimately move a placement: platform preference, what has
+performed before, audience insight, and standing instructions the operator gave the assistant.
+Research findings are deliberately excluded — they belong in the caption's claims, not in the choice
+of a day.
+
+The operator instructions are what make "reshuffle the calendar, favour LinkedIn" outlive the run it
+was said in. The reshuffle changes the calendar now; the entry it stores is what this tool returns on
+the next run, so the plan comes back the same way instead of being quietly planned away.
+
+This runs before ideas are formed, so what it returns has already shaped the platform each idea
+carries by the time you rank anything. Call it to see the entries by name and to state which ones a
+placement rested on. If it returns nothing, the store has learned nothing about platforms yet, and
+the placement reasons will say so.

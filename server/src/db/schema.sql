@@ -281,6 +281,14 @@ CREATE TABLE IF NOT EXISTS posts (
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- One receipt, one row. Publishing is irreversible, so a duplicate dispatch --
+-- a retried request, a double-clicked button, two concurrent calls -- must not
+-- be able to record itself twice. Partial, because external_id is NULL until a
+-- dispatch actually returns one and several NULLs are not a conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS posts_workspace_external_id_key
+  ON posts (workspace_id, external_id)
+  WHERE external_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS posts_workspace_published_idx
   ON posts (workspace_id, published_at DESC);
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from agents.names import identity_for
 from core.agent import Agent
 from core.llm import Reasoning, ToolSpec
 from core.schema import utcnow
@@ -36,6 +37,19 @@ def check_approvals(idea: dict[str, Any]) -> dict[str, Any]:
             f"Approved by {marketing.get('by')} then {leadership.get('by')}."
         ),
     }
+
+
+def caption_body(caption: Any) -> str:
+    """
+    The Content Agent hands over a caption object; older callers hand a string.
+
+    Reading the object's text form would validate `{'body': ...}` against the
+    platform's character limit and publish it — so the body is taken explicitly
+    rather than coerced.
+    """
+    if isinstance(caption, dict):
+        return str(caption.get("body", ""))
+    return str(caption or "")
 
 
 def validate_format(caption: str, platform: str = "linkedin", has_media: bool = False) -> dict[str, Any]:
@@ -101,14 +115,20 @@ def dispatch(title: str, caption: str, platform: str = "linkedin", mode: str = "
 
 class PublishingAgent(Agent):
     agent_id = "publishing_agent"
-    name = "Publishing Agent"
+    identity = identity_for(agent_id)
+    name = identity["name"]
+    role = identity["role"]
+    icon = identity["icon"]
     stage = "ship"
     hands_off_to = ["analytics_agent"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         platform = payload.get("platform", "linkedin")
         mode = payload.get("mode", "demo")
-        caption = payload.get("caption", "")
+        caption = caption_body(payload.get("caption"))
+        # The Image Creation Agent runs immediately before this one, so a
+        # platform that requires media has it by the time the gate is checked.
+        has_media = bool(payload.get("has_media") or payload.get("asset", {}).get("data_uri"))
 
         return [
             ToolSpec(
@@ -124,7 +144,9 @@ class PublishingAgent(Agent):
                     "type": "object",
                     "properties": {"caption": {"type": "string"}, "platform": {"type": "string"}},
                 },
-                handler=lambda caption=caption, platform=platform: validate_format(caption, platform),
+                handler=lambda caption=caption, platform=platform: validate_format(
+                    caption, platform, has_media
+                ),
             ),
             ToolSpec(
                 name="dispatch",
@@ -159,7 +181,11 @@ class PublishingAgent(Agent):
         if not approvals["approved"]:
             return {**output, "published": False, "refused_because": approvals["reason"]}
 
-        fmt = validate_format(payload.get("caption", ""), payload.get("platform", "linkedin"))
+        fmt = validate_format(
+            caption_body(payload.get("caption")),
+            payload.get("platform", "linkedin"),
+            bool(payload.get("has_media") or payload.get("asset", {}).get("data_uri")),
+        )
         output["format"] = fmt
         if not fmt["valid"]:
             return {
@@ -170,7 +196,7 @@ class PublishingAgent(Agent):
 
         if "published" not in output:
             output.update(dispatch(
-                payload.get("title", ""), payload.get("caption", ""),
+                payload.get("title", ""), caption_body(payload.get("caption")),
                 payload.get("platform", "linkedin"), payload.get("mode", "demo"),
             ))
         return output

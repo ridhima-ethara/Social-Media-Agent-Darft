@@ -17,9 +17,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'calendar',
-  name: 'Calendar & Ideas Agent',
+  name: 'Dora',
   stage: 'plan',
-  role: 'Places ideas on dates, times and platforms, and ranks them.',
+  role: 'Calendar Agent · Places ideas on dates, times and platforms, and ranks them.',
   description:
     'Forms ideas, places them with evidence-bearing slot reasons, and applies the per-platform slot cap. A promotion past the cap demotes the weakest primary and says which.',
   consumes: [

@@ -14,6 +14,7 @@ import { REGISTRY_SUMMARY } from '../../shared/agent-registry'
 import { TOOL_SUMMARY } from '../../shared/tool-registry'
 import { config, describeConfiguration } from './config'
 import { assertDb, closePool } from './db/pool'
+import { describeDrift, findSchemaDrift } from './db/schema-drift'
 import { createApiRouter } from './api'
 import { auditSkillCoverage } from './agents/skills/_register'
 import { auditToolCoverage } from './assistant/tools/index'
@@ -31,6 +32,18 @@ async function main(): Promise<void> {
   /* ── 1 · The database must be reachable ────────────────────────────────── */
   // Silently serving fabricated data would be worse than failing loudly.
   await assertDb()
+
+  /*
+   * The same standard the database check holds itself to: refuse to start
+   * rather than serve requests that will fail later. A missing column surfaces
+   * here, in milliseconds and naming its fix, instead of from inside a crawl
+   * that has already spent three minutes of network time.
+   */
+  const drift = await findSchemaDrift()
+  if (drift.length > 0) {
+    console.error(`\n  ${describeDrift(drift)}\n`)
+    process.exit(1)
+  }
 
   /* ── 2 · Coverage audits ───────────────────────────────────────────────── */
   const skills = auditSkillCoverage()

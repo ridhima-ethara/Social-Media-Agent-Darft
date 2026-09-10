@@ -334,6 +334,7 @@ export function KpiCard({
   onClick,
   tone,
   index = 0,
+  unavailable,
 }: {
   label: string
   value: number
@@ -344,18 +345,33 @@ export function KpiCard({
   onClick?: () => void
   tone?: 'good' | 'warn' | 'serious'
   index?: number
+  /**
+   * Why there is no figure. When set, an em dash is shown instead of a number
+   * and this replaces the hint.
+   *
+   * Constraint 2 — `N/A` is never `0`. An unreported engagement rate rendered as
+   * "0.00%" is a measurement nobody took, and it reads as a catastrophic month
+   * rather than as an absence.
+   */
+  unavailable?: string
 }) {
   const positive = (delta ?? 0) >= 0
 
   return (
-    <Tilt maxDeg={5} className="rounded-[14px]">
+    // The grid stretches this wrapper, so the card inside has to fill it or the
+    // row ends up ragged — the wrapper was sized by the row and the card by its
+    // own content.
+    <Tilt maxDeg={5} className="h-full rounded-[14px]">
     <div
-      className={`card card-hover anim-fade-up p-4 ${onClick ? 'cursor-pointer' : ''}`}
+      className={`card card-hover anim-fade-up flex h-full flex-col p-4 ${onClick ? 'cursor-pointer' : ''}`}
       style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
       {...(onClick ? { onClick, role: 'button', tabIndex: 0 } : {})}
     >
       <div className="flex items-start justify-between gap-2">
-        <p className="text-[11px] uppercase tracking-[0.1em] text-ink-3 leading-tight">{label}</p>
+        {/* Two lines' worth either way. "Total reach" sits on one line and
+            "Awaiting leadership" on two, and without this the figures below
+            them start at different heights across the strip. */}
+        <p className="min-h-[2.5em] text-[11px] uppercase tracking-[0.1em] text-ink-3 leading-tight">{label}</p>
         {spark && spark.length > 1 ? (
           <Sparkline
             points={spark}
@@ -372,20 +388,33 @@ export function KpiCard({
 
       <p
         className={`display mt-2 text-2xl ${
-          tone === 'serious' ? 'text-serious' : tone === 'warn' ? 'text-warn' : 'text-ink'
+          unavailable
+            ? 'text-ink-3'
+            : tone === 'serious'
+              ? 'text-serious'
+              : tone === 'warn'
+                ? 'text-warn'
+                : 'text-ink'
         }`}
       >
-        <CountUp value={value} format={format} />
+        {unavailable ? '—' : <CountUp value={value} format={format} />}
       </p>
 
-      <div className="mt-1 flex items-center gap-2">
-        {delta !== undefined && delta !== null ? (
+      {/* Pinned to the bottom so the hint line sits on one baseline across the
+          row, whether or not the card has a delta. */}
+      <div className="mt-auto flex items-center gap-2 pt-1">
+        {/* A delta against an absent figure would be arithmetic on nothing. */}
+        {!unavailable && delta !== undefined && delta !== null ? (
           <span className={`tabular text-[11px] font-medium ${positive ? 'text-good-ink' : 'text-critical-ink'}`}>
             {positive ? '+' : ''}
             {delta.toFixed(1)}%
           </span>
         ) : null}
-        {hint ? <span className="text-[11px] text-ink-3 leading-tight">{hint}</span> : null}
+        {unavailable ? (
+          <span className="text-[11px] leading-tight text-ink-3">{unavailable}</span>
+        ) : hint ? (
+          <span className="text-[11px] text-ink-3 leading-tight">{hint}</span>
+        ) : null}
       </div>
     </div>
     </Tilt>
@@ -654,7 +683,11 @@ export function Dialog({
             <X size={18} />
           </button>
         </header>
-        <div className="flex-1 overflow-hidden">{children}</div>
+        {/* `min-h-0` so this body can never be taller than the card, whatever
+            a child asks for. The review panel's grid still has to pin its own
+            row to this height — see there — or its columns inherit a
+            content-sized row and the post is clipped instead of scrolled. */}
+        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
       </div>
     </div>
   )
@@ -875,9 +908,13 @@ export function Metric({
             : 'text-ink'
 
   return (
-    <div className={`rounded-lg border border-line bg-surface-2 px-3 py-2 ${className}`}>
+    // The grid already makes every tile in a row the same height. Pinning the
+    // figure to the bottom is what makes the figures line up when one label
+    // wraps to two lines and its neighbours do not — and it costs no height
+    // when none of them wrap.
+    <div className={`flex flex-col rounded-lg border border-line bg-surface-2 px-3 py-2 ${className}`}>
       <p className="text-[10px] uppercase tracking-[0.09em] text-ink-3 leading-tight">{label}</p>
-      <p className={`tabular mt-1 text-[13px] font-medium ${toneClass}`}>{value}</p>
+      <p className={`tabular mt-auto pt-1 text-[13px] font-medium ${toneClass}`}>{value}</p>
     </div>
   )
 }

@@ -200,6 +200,49 @@ export function textAdapter(): ServiceAdapter<GcpTextInput, string> {
   }
 }
 
+/**
+ * The deterministic template writer, expressed as an adapter that is never
+ * configured.
+ *
+ * Selecting "Ethara Writer" is a positive choice for the local template path,
+ * not a failure to reach a model. Modelling it as a never-configured adapter
+ * means `withFallback` takes the template branch by the same route it always
+ * does, so the choice needs no second code path and is stamped with a reason
+ * like every other fallback.
+ */
+export const templateWriter: ServiceAdapter<GcpTextInput, string> = {
+  id: 'ethara.writer',
+  label: 'Ethara Writer (local template)',
+  isConfigured(): boolean {
+    return false
+  },
+  unavailableReason(): string {
+    return 'Ethara Writer was selected — the deterministic template writer is the intended path, not a fallback'
+  },
+  async run(): Promise<string> {
+    throw new AdapterError(this.id, this.unavailableReason())
+  },
+}
+
+/**
+ * The adapter for an explicitly chosen caption model.
+ *
+ * An unknown or absent id falls through to `textAdapter()`, so a caller that
+ * expresses no preference keeps the environment's own resolution order.
+ */
+export function textAdapterFor(modelId?: string): ServiceAdapter<GcpTextInput, string> {
+  switch (modelId) {
+    case 'ethara-writer':
+      return templateWriter
+    case 'ollama-qwen3':
+      return ollamaText
+    case 'gcp-gemini':
+      return gcpText
+    default:
+      return textAdapter()
+  }
+}
+
 /** The model id that actually produced a caption, for the artefact stamp. */
 export function textModelId(fast = false): string {
   const adapter = textAdapter()
@@ -250,7 +293,7 @@ export const ollamaImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
             options: {
               width: input.width,
               height: input.height,
-              // Rule 12: the model is never asked for brand text, and is told
+              // Invariant 21: the model is never asked for brand text, and is told
               // so explicitly as well as being denied the opportunity.
               negative_prompt:
                 'text, words, letters, typography, logo, watermark, signature, caption',

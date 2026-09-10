@@ -7,7 +7,7 @@
  *   1. an optional model-painted BACKGROUND
  *   2. a vector BRAND LAYER drawn locally on top
  *
- * Rule 12 is structural, not advisory: no diffusion model is ever asked to draw
+ * Invariant 21 is structural, not advisory: no diffusion model is ever asked to draw
  * brand text. Headline, kicker, accent bar, logomark and footer are vectors
  * composed here. A model that is unreachable costs the background only — the
  * post still ships with a picture, labelled with why.
@@ -37,7 +37,7 @@ export interface RenderRequest {
   headlineMaxWords: number
   timeoutMs: number
   retries: number
-  /** Rule 12. Off produces unusable creative and is never correct. */
+  /** Invariant 21. Off produces unusable creative and is never correct. */
   compositeBrandLayer: boolean
 }
 

@@ -17,9 +17,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'validation',
-  name: 'Validation Agent',
+  name: 'Dexter',
   stage: 'assess',
-  role: 'Gives every candidate exactly one verdict, with its evidence.',
+  role: 'Validation Agent · Gives every candidate exactly one verdict, with its evidence.',
   description:
     'Ranks keywords on a declared weighted composite, ranks each trending keyword’s hashtags, and routes every candidate through the four-verdict gate. Duplicates are linked, never deleted.',
   consumes: [

@@ -17,9 +17,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'image',
-  name: 'Image Creator Agent',
+  name: 'Minnie',
   stage: 'create',
-  role: 'Produces the shipping creative.',
+  role: 'Image Agent · Produces the shipping creative.',
   description:
     'Two layers, always: an optional painted background under a locally drawn brand layer. No diffusion model is ever asked to draw brand text.',
   consumes: [

@@ -124,6 +124,14 @@ class HashtagCandidate(BaseModel):
     feed_url: str = ""
     top_post_url: str | None = None
     top_post_title: str | None = None
+    #: Share of the posts carrying this tag whose text actually names the
+    #: keyword that surfaced them. A tag that travels with our topics scores
+    #: high; one that merely appeared alongside them once does not.
+    brand_relevance: int = 0
+    #: The most recent `posted_at` among the posts carrying the tag. The
+    #: Validation Agent turns this into a freshness score against a half-life;
+    #: capture only records when it was last seen.
+    last_seen_at: str = ""
 
 
 class ScoredKeyword(BaseModel):

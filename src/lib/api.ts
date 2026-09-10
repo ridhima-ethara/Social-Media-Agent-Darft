@@ -23,6 +23,7 @@ import type {
   KnowledgeEntry,
   LineageEdge,
   MediaAsset,
+  ModelReference,
   Platform,
   RegistrySkill,
   ReviewQueueItem,
@@ -192,6 +193,13 @@ export const api = {
   runs: (): Promise<{ agentRuns: unknown[]; skillRuns: unknown[]; latest: unknown }> =>
     request('/runs'),
 
+  /* ── The Python agent backend ──────────────────────────────────────────── */
+
+  agentRoster: (): Promise<AgentRosterResponse> => request('/agents', { timeoutMs: 30_000 }),
+
+  agentBrain: (): Promise<{ entries: unknown[]; stats: Record<string, number> }> =>
+    request('/agents/brain', { timeoutMs: 30_000 }),
+
   /* ── Knowledge ─────────────────────────────────────────────────────────── */
 
   buildKnowledge: (body: { hashtagCount?: number; forceRefresh?: boolean } = {}): Promise<
@@ -206,7 +214,49 @@ export const api = {
     category: string
     content: string
     confidence?: string
+    tags?: string[]
   }): Promise<{ entry: KnowledgeEntry }> => request('/knowledge', { method: 'POST', body }),
+
+  /* ── The brand corpus ──────────────────────────────────────────────────── */
+
+  knowledgeCorpus: (): Promise<{
+    entries: KnowledgeEntry[]
+    stats: {
+      total: number
+      active: number
+      domain: number
+      rules: number
+      brandTopics: number
+      corpusTerms: number
+      keywordTerms: number
+      alignmentTerms: number
+    }
+    available: Array<{ title: string; category: string; tags: string[]; keyPoints: string[]; domain: boolean }>
+  }> => request('/knowledge/corpus'),
+
+  addCorpusEntry: (body: {
+    title: string
+    category?: string
+    content: string
+    confidence?: string
+    tags: string[]
+    keyPoints?: string[]
+    domain?: boolean
+  }): Promise<{ entry: KnowledgeEntry; appliesTo: string }> =>
+    request('/knowledge/corpus', { method: 'POST', body }),
+
+  uploadCorpusFiles: (
+    files: Array<{ name: string; content: string }>,
+  ): Promise<{
+    inserted: number
+    skipped: number
+    deactivated: number
+    files: Array<{ file: string; sections: number; outcome: 'inserted' | 'unchanged' | 'unreadable'; detail: string | null }>
+    summary: string
+  }> => request('/knowledge/corpus/upload', { method: 'POST', body: { files }, timeoutMs: 300_000 }),
+
+  restoreCorpus: (): Promise<{ restored: string[]; skipped: number; reason: string }> =>
+    request('/knowledge/corpus/restore', { method: 'POST', body: {} }),
 
   toggleKnowledge: (id: string, active: boolean): Promise<{ entry: KnowledgeEntry }> =>
     request(`/knowledge/${id}`, { method: 'PATCH', body: { active } }),
@@ -221,15 +271,28 @@ export const api = {
 
   renderImage: (
     id: string,
-    body: { platform: Platform; model?: string; prompt?: string; instruction?: string },
+    body: {
+      platform: Platform
+      model?: string
+      prompt?: string
+      instruction?: string
+      references?: ModelReference[]
+    },
   ): Promise<{ media: MediaAsset }> =>
     request(`/ideas/${id}/image`, { method: 'POST', body, timeoutMs: 120_000 }),
 
   instruct: (
     id: string,
-    body: { platform: Platform; instruction: string },
+    body: {
+      platform: Platform
+      instruction: string
+      model?: string
+      references?: ModelReference[]
+    },
   ): Promise<{
     draft: Draft
+    /** False when the instruction produced no change. */
+    applied: boolean
     note: string
     compliance: unknown
     preference: { title: string; content: string } | null
@@ -348,4 +411,87 @@ export function subscribeToEvents(onEvent: (event: RuntimeEvent) => void): () =>
   return () => {
     source?.close()
   }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE AGENT PIPELINE, STREAMED
+
+   `/agents/run` is a POST that answers with an SSE stream, which `EventSource`
+   cannot do — it only ever issues a GET. So the body is read off `fetch` and
+   the frames are parsed by hand.
+
+   Every frame is handed over the moment it arrives. A run takes as long as the
+   scrape takes, and an operator watching a progress bar that only moves at the
+   end has been told nothing.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface AgentFrame {
+  event: string
+  [key: string]: unknown
+}
+
+export interface AgentRosterResponse {
+  event?: string
+  order?: string[]
+  model?: { configured: boolean; reason: string }
+  agents?: unknown[]
+  error?: string
+}
+
+/**
+ * Runs the eight-agent pipeline, calling `onFrame` for each event.
+ *
+ * Resolves when the stream ends. Rejects only when the run could not be
+ * started — once frames are arriving, a failure is reported *in* the stream,
+ * because a run that produced six agents' work before stopping did produce it.
+ */
+export async function runAgentPipeline(
+  body: {
+    keywords: string[]
+    overrides?: Record<string, Record<string, string | number | boolean>>
+    stopAfter?: string
+  },
+  onFrame: (frame: AgentFrame) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/agents/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+
+  if (!response.ok || !response.body) {
+    throw new Error(
+      `The agent backend answered ${response.status}. Is the API running on ${API_BASE}?`,
+    )
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const drain = (chunk: string): void => {
+    buffer += chunk
+    // SSE frames are separated by a blank line; a partial frame stays buffered.
+    const frames = buffer.split('\n\n')
+    buffer = frames.pop() ?? ''
+    for (const frame of frames) {
+      const line = frame.split('\n').find((l) => l.startsWith('data:'))
+      if (!line) continue
+      try {
+        onFrame(JSON.parse(line.slice(5).trim()) as AgentFrame)
+      } catch {
+        // A malformed frame costs one event, never the run.
+      }
+    }
+  }
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    drain(decoder.decode(value, { stream: true }))
+  }
+  drain(decoder.decode())
 }

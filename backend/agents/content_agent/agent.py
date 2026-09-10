@@ -3,12 +3,24 @@ THE CONTENT AGENT
 
 Writes captions grounded in the Knowledge Base, and checks every one against
 the twenty rules before returning it.
+
+Two kinds of entry reach this agent and they are not interchangeable:
+
+    evidence     what we know to be true. It becomes the claim in the caption.
+    constraints  how we are required to write. Brand rules, compliance limits,
+                 and the standing instructions the Learning Agent captured from
+                 the operator in the assistant. These shape the sentence; they
+                 are never quoted in it.
+
+The second kind is why an operator can say "stop opening with a question" in
+the assistant and every later caption obeys, with no edit to this file.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from agents.names import identity_for
 from core.agent import Agent
 from core.llm import Reasoning, ToolSpec
 from tools import check_brand_voice, derive_hashtags, draft_caption, similarity_check
@@ -16,9 +28,12 @@ from tools import check_brand_voice, derive_hashtags, draft_caption, similarity_
 
 class ContentAgent(Agent):
     agent_id = "content_agent"
-    name = "Content Agent"
+    identity = identity_for(agent_id)
+    name = identity["name"]
+    role = identity["role"]
+    icon = identity["icon"]
     stage = "create"
-    hands_off_to = ["publishing_agent"]
+    hands_off_to = ["image_agent"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         topic = payload.get("topic", "")
@@ -95,6 +110,12 @@ class ContentAgent(Agent):
     #: govern *how* to write; they are never the evidence a claim rests on.
     EVIDENCE_CATEGORIES = ["Research", "High Performer", "Audience Insight", "Platform Preference"]
 
+    #: Categories that govern how to write rather than what is true.
+    #: `Human Directive` is what the Learning Agent stores when an operator
+    #: asked for something in the assistant, so it belongs here and nowhere
+    #: else: an instruction is binding on the writing, and is not evidence.
+    CONSTRAINT_CATEGORIES = ["Brand Voice", "Brand Guideline", "Compliance Rule", "Human Directive"]
+
     def prepare(self, payload: dict[str, Any]) -> None:
         """
         The brain is read first, always — before any tool closes over it.
@@ -104,22 +125,60 @@ class ContentAgent(Agent):
         not what the rule is for.
         """
         topic = payload.get("topic", "")
+
+        # Origin decides which pile an entry lands in, and it overrules the
+        # category. The Learning Agent files "prefer LinkedIn for benchmark
+        # posts" under Platform Preference — an evidence category — but a human
+        # asking for something is not a measurement of anything, so it may
+        # constrain the writing and may never become a claim in the caption.
+        recalled = self.brain.recall(topic, limit=6, categories=self.EVIDENCE_CATEGORIES)
         self._grounding = [
             {"id": e.id, "title": e.title, "content": e.content, "confidence": e.confidence.value}
-            for e in self.brain.recall(topic, limit=6, categories=self.EVIDENCE_CATEGORIES)
-        ]
-        # Brand rules still travel with the prompt — as constraints, not content.
-        self._brand = [
-            {"id": e.id, "title": e.title, "content": e.content}
-            for e in self.brain.recall(topic, limit=8, categories=["Brand Voice", "Brand Guideline", "Compliance Rule"])
+            for e in recalled if e.origin != "manual"
         ]
 
+        # Constraints travel with the prompt — as constraints, not content.
+        constraints = list(self.brain.recall(topic, limit=8, categories=self.CONSTRAINT_CATEGORIES))
+        seen = {e.id for e in constraints}
+        constraints += [e for e in recalled if e.origin == "manual" and e.id not in seen]
+        self._brand = [
+            {"id": e.id, "title": e.title, "content": e.content,
+             "category": e.category, "origin": e.origin}
+            for e in constraints
+        ]
+
+    def _directives(self) -> list[dict[str, Any]]:
+        """
+        The constraints a human asked for, as opposed to standing brand rules.
+
+        Told apart by `origin`, not by category. The Learning Agent files an ask
+        under whatever it is *about* — "always open with the number" becomes
+        Brand Voice — so filtering on the `Human Directive` category would only
+        ever catch the asks too general to classify, and an operator would be
+        told their instruction was ignored when it had in fact been applied.
+        """
+        return [b for b in self._brand if b.get("origin") == "manual"]
+
     def task(self, payload: dict[str, Any]) -> str:
+        """
+        The constraints are named in the task itself, not left in the store for
+        the model to maybe look up. An instruction the operator gave is binding,
+        so it is put where it cannot be missed.
+        """
+        constraints = "".join(f"\n- {b['title']}: {b['content']}" for b in self._brand)
+        binding = (
+            f"\n\nThese are binding on how you write, and none of them may appear in the caption "
+            f"as text:{constraints}"
+            if self._brand else
+            "\n\nNothing is stored yet about how we are required to write, so the brand skeleton "
+            "and the twenty rules are the only constraints in force."
+        )
         return (
             f"Write a {payload.get('platform', 'linkedin')} caption for \"{payload.get('title', '')}\" "
             f"on the topic of {payload.get('topic', '')}.\n\n"
             "Recall what we know first, ground every factual claim in it, then check the result "
             "against the twenty rules before returning it."
+            + binding
         )
 
     def finalise(self, reasoning: Reasoning, payload: dict[str, Any]) -> dict[str, Any]:
@@ -127,8 +186,12 @@ class ContentAgent(Agent):
         topic = payload.get("topic", "")
         output = dict(reasoning.payload)
 
+        directives = self._directives()
         output["grounding"] = self._grounding
         output["brand_rules_applied"] = [b["title"] for b in self._brand]
+        output["directives_applied"] = [
+            {"id": d["id"], "title": d["title"], "content": d["content"]} for d in directives
+        ]
 
         if not output.get("caption"):
             output.update(draft_caption(
@@ -155,8 +218,14 @@ class ContentAgent(Agent):
             f"grounded in {grounded} Knowledge Base entr{'y' if grounded == 1 else 'ies'}"
             if grounded else "UNGROUNDED — no Knowledge Base entry matched this topic, so it carries no factual claims"
         )
+        directives = result.get("directives_applied", [])
+        asked = (
+            f" {len(directives)} standing instruction(s) from the assistant were in force: "
+            + "; ".join(d["title"] for d in directives) + "."
+            if directives else ""
+        )
         return (
             f"Caption written and {grounding}. Brand voice: {compliance.get('verdict', 'unchecked')} — "
             f"{compliance.get('reason', '')} Similarity {similarity.get('highest', 0)} against "
-            f"published captions, {'above' if similarity.get('exceeds') else 'below'} the cap."
+            f"published captions, {'above' if similarity.get('exceeds') else 'below'} the cap.{asked}"
         )

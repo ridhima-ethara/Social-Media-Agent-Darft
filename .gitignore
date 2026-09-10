@@ -42,3 +42,8 @@ __pycache__/
 # copies it here at build time, and the runtime process runs with cwd set to
 # packages/runtime/ so the Agent SDK finds them. Never edit, never commit.
 packages/runtime/.claude/
+
+# Operator-supplied reference material. The folder and its README are tracked;
+# the source documents are not — they are inputs, often large and often private.
+corpus/*
+!corpus/README.md

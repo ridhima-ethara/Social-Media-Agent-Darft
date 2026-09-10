@@ -345,6 +345,10 @@ export interface ReviewPayload extends Record<string, unknown> {
   altText?: string
   hasImage?: boolean
   imageHeadline?: string
+  /** The caption model the operator chose in the review panel, if any. */
+  captionModel?: string
+  /** Files the operator attached for the model to work from. */
+  references?: Array<{ name: string; mimeType: string; text?: string; note?: string }>
   /** Produced along the way. */
   revisedBody?: string
   appliedNote?: string
@@ -354,6 +358,10 @@ export interface ReviewPayload extends Record<string, unknown> {
   diffSummary?: string
   revisionSource?: 'live' | 'fixture'
   revisionModel?: string
+  /** False when the revised body came back identical — a no-op, not a revision. */
+  revisionApplied?: boolean
+  /** Why the text model was not used, when it was not. */
+  revisionFallbackReason?: string
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -485,6 +493,8 @@ export interface PipelinePayload extends Record<string, unknown> {
   trendingKeywords?: KeywordTrend[]
   hashtagGroups?: RankedHashtagGroup[]
   buckets?: BucketCounts
+  /** Hashtag verdicts, kept apart from item verdicts so neither count lies about the other. */
+  hashtagBuckets?: BucketCounts
   reviewRequests?: ReviewRequest[]
   opportunities?: Opportunity[]
   topHashtags?: HashtagCandidate[]

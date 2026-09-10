@@ -19,6 +19,7 @@ import {
   defaultSkillConfig,
 } from '@shared/agent-registry'
 import { TOOLS } from '@shared/tool-registry'
+import { AgentIcon } from '../components/agent-icon'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
 import { api } from '../lib/api'
@@ -141,7 +142,6 @@ export function AgentStudio() {
       <PageHeader
         title="Agent Studio"
         subtitle="Every knob the agents read, with the plain-language description of what it does. If it is not here, the operator cannot see it — and that would be a defect."
-        askPrompt="Change the top keywords to 8"
         actions={
           <Badge tone={apiMode === 'connected' ? 'good' : 'warn'}>
             {apiMode === 'connected' ? 'Connected to agent runtime' : 'Standalone — changes are local only'}
@@ -197,6 +197,7 @@ export function AgentStudio() {
                               active ? 'bg-accent/12 text-ink' : 'text-ink-3 hover:bg-surface-2 hover:text-ink-2'
                             }`}
                           >
+                            <AgentIcon agentId={agent.id} size={13} className={`shrink-0 ${active ? 'text-accent-bright' : ''}`} />
                             <span className="min-w-0 flex-1 truncate text-[12px] font-medium">{agent.name}</span>
                             {anyOff ? <span className="h-1.5 w-1.5 rounded-full bg-warn" aria-hidden="true" /> : null}
                             <span className="tabular text-[10.5px] text-ink-3">{count}</span>
@@ -215,7 +216,10 @@ export function AgentStudio() {
             <section className="card mb-3 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <h2 className="display text-lg">{agentSpec?.name}</h2>
+                  <h2 className="display flex items-center gap-2 text-lg">
+                    {selectedAgent ? <AgentIcon agentId={selectedAgent} size={17} className="text-accent-bright" /> : null}
+                    {agentSpec?.name}
+                  </h2>
                   <p className="mt-0.5 text-[12px] text-ink-3">{agentSpec?.role}</p>
                   <p className="mt-1.5 max-w-2xl text-[11.5px] leading-relaxed text-ink-3">
                     {agentSpec?.description}

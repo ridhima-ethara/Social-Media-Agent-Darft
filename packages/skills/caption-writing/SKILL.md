@@ -35,7 +35,14 @@ and `variants[]` when variant generation is enabled.
 7. **Similarity against previously published captions is computed, never judged.** Above the caption
    cap, the draft is regenerated with a different angle; the model is never asked to estimate how
    similar something is.
-8. **When the language model is unconfigured, the deterministic template writer runs instead** and
+8. **The platform changes the copy, not just the label.** `PLATFORM_VOICE` in
+   `shared/brand-voice.ts` declares the register, structure, opening and prohibitions for each of the
+   four platforms, and `platformVoiceInstruction()` is the only renderer of it. It is injected into
+   every generation and every rewrite, so the same finding reads differently on LinkedIn, Instagram,
+   X and Facebook. **Moving a post to another platform re-writes it**: changing the platform in the
+   review panel regenerates the draft and the creative for the new channel, because copy carried
+   across unchanged is copy written for somewhere else.
+9. **When the language model is unconfigured, the deterministic template writer runs instead** and
    the output is stamped `fixture` with the env key that would enable the model. The output shape is
    identical, so nothing downstream branches on which produced it.
 

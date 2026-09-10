@@ -197,6 +197,12 @@ export interface RunCommandOptions {
   conversationId?: string
   actor: string
   role: OperatorRole
+  /**
+   * What the operator was looking at. Lets a screen-embedded surface resolve
+   * "this post" without asking, and is ignored once the conversation has its own
+   * referenced entity.
+   */
+  focus?: Record<string, unknown> | null
   /** Streams frames as they happen. */
   emit: FrameSink
 }
@@ -254,6 +260,7 @@ export async function runCommand(opts: RunCommandOptions): Promise<RunCommandRes
       historyTurns: knobs.historyTurns,
       includeKnowledge: knobs.includeKnowledge,
       maxSnapshotChars: knobs.maxSnapshotChars,
+      ...(opts.focus === undefined ? {} : { focus: opts.focus }),
     })
 
     /* ── 2 · INTERPRET ───────────────────────────────────────────────────── */
@@ -634,7 +641,13 @@ export async function conversationTranscript(
     confidence: number | null
     plan: Record<string, unknown> | null
     steps: Array<Record<string, unknown>>
-    createdAt: string
+    /**
+     * snake_case to mirror the row, which is the convention that lets
+     * `/state` flow into the store with no adapter. It was `createdAt`, which
+     * `src/types.ts` never reads — so every timestamp in the transcript
+     * rendered as an em dash.
+     */
+    created_at: string
   }>
 }> {
   const turns = await listTurns(conversationId, limit)
@@ -664,7 +677,7 @@ export async function conversationTranscript(
         durationMs: s.duration_ms,
         error: s.error,
       })),
-      createdAt: turn.created_at,
+      created_at: turn.created_at,
     })
   }
 

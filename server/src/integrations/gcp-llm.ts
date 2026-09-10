@@ -138,7 +138,7 @@ export function temperatureFromPercent(percent: number): number {
 /* ═══════════════════════════════════════════════════════════════════════════
    IMAGES — Imagen paints a BACKGROUND ONLY.
    The brand layer is always drawn locally as vectors over the result
-   (rule 12: no diffusion model is ever asked to render brand text).
+   (invariant 21: no diffusion model is ever asked to render brand text).
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export interface GcpImageInput {
@@ -209,7 +209,7 @@ export const gcpImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
         instances: [
           {
             // The prompt is explicitly background-only. Any request for text in
-            // the image would violate rule 12.
+            // the image would violate invariant 21.
             prompt: `${input.prompt}. Abstract technical background artwork, no text, no words, no letters, no logos, no watermarks.`,
           },
         ],

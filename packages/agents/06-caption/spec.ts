@@ -17,9 +17,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'caption',
-  name: 'Caption Creator Agent',
+  name: 'SpongeBob',
   stage: 'create',
-  role: 'Writes platform copy grounded in cited knowledge.',
+  role: 'Content Agent · Writes platform copy grounded in cited knowledge.',
   description:
     'Every factual claim traces to a cited entry. Brand-voice enforcement runs unconditionally as the final step, whatever produced the text.',
   consumes: [

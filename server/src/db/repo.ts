@@ -30,13 +30,28 @@ import { query, queryOne } from './pool'
    ═══════════════════════════════════════════════════════════════════════════ */
 
 let cachedWorkspaceId: string | null = null
+let cachedWorkspaceAt = 0
 
 /**
  * Resolves the current workspace from `WORKSPACE_SLUG`, creating it if absent
  * so a fresh database is never a hard error.
  */
+/**
+ * How long a resolved workspace id is trusted before it is re-read.
+ *
+ * WHY THIS EXISTS. `db:migrate --fresh` recreates the workspace row with a new
+ * UUID. A memo held for the process lifetime would then point at a row that no
+ * longer exists, and every write would fail with a foreign-key violation until
+ * someone restarted the API — a failure whose message says nothing about the
+ * reset that caused it. Re-reading by slug on a short interval makes a reset
+ * self-healing instead, at the cost of one indexed lookup every thirty seconds.
+ */
+const WORKSPACE_TTL_MS = 30_000
+
 export async function currentWorkspaceId(): Promise<string> {
-  if (cachedWorkspaceId) return cachedWorkspaceId
+  if (cachedWorkspaceId && Date.now() - cachedWorkspaceAt < WORKSPACE_TTL_MS) {
+    return cachedWorkspaceId
+  }
 
   const slug = config.core.workspaceSlug
   const existing = await queryOne<{ id: string }>(
@@ -45,6 +60,7 @@ export async function currentWorkspaceId(): Promise<string> {
   )
   if (existing) {
     cachedWorkspaceId = existing.id
+    cachedWorkspaceAt = Date.now()
     return existing.id
   }
 
@@ -56,12 +72,14 @@ export async function currentWorkspaceId(): Promise<string> {
   )
   if (!created) throw new Error(`Could not resolve workspace "${slug}"`)
   cachedWorkspaceId = created.id
+  cachedWorkspaceAt = Date.now()
   return created.id
 }
 
 /** Clears the memo. Used by tests and after a reseed. */
 export function forgetWorkspace(): void {
   cachedWorkspaceId = null
+  cachedWorkspaceAt = 0
 }
 
 export interface WorkspaceRow {
@@ -397,21 +415,52 @@ export async function listScrapedItems(
 }
 
 /** External ids captured within the look-back window, for the dedupe pre-filter. */
-export async function recentExternalIds(
+export interface RecentCapture {
+  id: string
+  /** When the page was first captured. */
+  scrapedAt: string
+  title: string
+  /** The verdict the earlier run gave it, so a repeat can show it rather than hide it. */
+  validation: ValidationVerdict
+  verdictReason: string | null
+}
+
+/**
+ * Pages captured inside the look-back window, keyed by external id AND by
+ * URL so a repeat is recognised by either. The original's capture date and
+ * title travel with it, so a run can say how long a page has been on record
+ * rather than only that it is.
+ */
+export async function recentCaptures(
   workspaceId: string,
   historyDays: number,
-): Promise<Set<string>> {
-  const rows = await query<{ external_id: string | null; url: string | null }>(
-    `SELECT external_id, url FROM scraped_items
+): Promise<Map<string, RecentCapture>> {
+  const rows = await query<{
+    id: string
+    external_id: string | null
+    url: string | null
+    scraped_at: string
+    title: string
+    validation: ValidationVerdict
+    verdict_reason: string | null
+  }>(
+    `SELECT id, external_id, url, scraped_at, title, validation, verdict_reason FROM scraped_items
       WHERE workspace_id = $1 AND scraped_at > now() - ($2 || ' days')::interval`,
     [workspaceId, String(historyDays)],
   )
-  const set = new Set<string>()
+  const index = new Map<string, RecentCapture>()
   for (const r of rows) {
-    if (r.external_id) set.add(r.external_id)
-    if (r.url) set.add(r.url)
+    const capture: RecentCapture = {
+      id: r.id,
+      scrapedAt: r.scraped_at,
+      title: r.title,
+      validation: r.validation,
+      verdictReason: r.verdict_reason,
+    }
+    if (r.external_id) index.set(r.external_id, capture)
+    if (r.url) index.set(r.url, capture)
   }
-  return set
+  return index
 }
 
 export async function setItemValidation(
@@ -547,6 +596,12 @@ export interface IdeaRow {
   source_item_id: string | null
   hashtag_id: string | null
   hashtag_display: string | null
+  /** The captured page this idea was formed from, joined from scraped_items. */
+  source_url: string | null
+  source_title: string | null
+  source_name: string | null
+  /** The strongest post carrying the originating hashtag, when the idea came from a tag. */
+  hashtag_url: string | null
   title: string
   description: string | null
   source_topic: string | null
@@ -601,9 +656,11 @@ export async function listIdeas(
   params.push(opts.limit ?? 200)
 
   return query<IdeaRow>(
-    `SELECT ci.*, h.display_tag AS hashtag_display
+    `SELECT ci.*, h.display_tag AS hashtag_display, h.top_post_url AS hashtag_url,
+            si.url AS source_url, si.title AS source_title, si.source_name AS source_name
        FROM content_ideas ci
        LEFT JOIN hashtags h ON h.id = ci.hashtag_id
+       LEFT JOIN scraped_items si ON si.id = ci.source_item_id
       WHERE ${where}
       ORDER BY ci.scheduled_date ASC, ci.platform_rank NULLS LAST, ci.scheduled_time ASC
       LIMIT $${params.length}`,
@@ -613,9 +670,11 @@ export async function listIdeas(
 
 export async function getIdea(workspaceId: string, id: string): Promise<IdeaRow | null> {
   return queryOne<IdeaRow>(
-    `SELECT ci.*, h.display_tag AS hashtag_display
+    `SELECT ci.*, h.display_tag AS hashtag_display, h.top_post_url AS hashtag_url,
+            si.url AS source_url, si.title AS source_title, si.source_name AS source_name
        FROM content_ideas ci
        LEFT JOIN hashtags h ON h.id = ci.hashtag_id
+       LEFT JOIN scraped_items si ON si.id = ci.source_item_id
       WHERE ci.workspace_id = $1 AND ci.id = $2`,
     [workspaceId, id],
   )
@@ -631,9 +690,11 @@ export async function findIdeasByTitle(
   limit = 8,
 ): Promise<IdeaRow[]> {
   return query<IdeaRow>(
-    `SELECT ci.*, h.display_tag AS hashtag_display
+    `SELECT ci.*, h.display_tag AS hashtag_display, h.top_post_url AS hashtag_url,
+            si.url AS source_url, si.title AS source_title, si.source_name AS source_name
        FROM content_ideas ci
        LEFT JOIN hashtags h ON h.id = ci.hashtag_id
+       LEFT JOIN scraped_items si ON si.id = ci.source_item_id
       WHERE ci.workspace_id = $1 AND ci.title ILIKE '%' || $2 || '%'
       ORDER BY ci.scheduled_date DESC
       LIMIT $3`,
@@ -920,11 +981,19 @@ export async function insertPost(p: {
   history: Array<Record<string, unknown>>
   mediaAssetId: string | null
 }): Promise<{ id: string } | null> {
-  return queryOne<{ id: string }>(
+  /*
+   * ON CONFLICT DO NOTHING against the unique receipt index: if two concurrent
+   * publishes reach here with the same external_id, the second inserts nothing
+   * and the existing row is returned below. One dispatch, one post, and the
+   * caller still gets an id rather than an error it cannot act on.
+   */
+  const inserted = await queryOne<{ id: string }>(
     `INSERT INTO posts
        (workspace_id, idea_id, title, platform, content, status, external_id,
         publish_mode, published_at, history, media_asset_id)
      VALUES ($1,$2,$3,$4,$5,'published',$6,$7,$8::date,$9,$10)
+     ON CONFLICT (workspace_id, external_id) WHERE external_id IS NOT NULL
+       DO NOTHING
      RETURNING id`,
     [
       p.workspaceId,
@@ -938,6 +1007,13 @@ export async function insertPost(p: {
       JSON.stringify(p.history),
       p.mediaAssetId,
     ],
+  )
+  if (inserted) return inserted
+
+  // The receipt was already recorded. Return the row that holds it.
+  return queryOne<{ id: string }>(
+    'SELECT id FROM posts WHERE workspace_id = $1 AND external_id = $2',
+    [p.workspaceId, p.externalId],
   )
 }
 
@@ -1057,7 +1133,17 @@ export interface KnowledgeEntryRow {
 
 export async function listKnowledge(
   workspaceId: string,
-  opts: { activeOnly?: boolean; category?: string; limit?: number } = {},
+  opts: {
+    activeOnly?: boolean
+    category?: string
+    limit?: number
+    /** Restricts to one origin, e.g. `'brand'` for the brand corpus. */
+    origin?: string
+    /** Every listed entry must carry this tag. Used to separate corpus from rules. */
+    tag?: string
+    /** Excludes entries carrying this tag. */
+    withoutTag?: string
+  } = {},
 ): Promise<KnowledgeEntryRow[]> {
   const params: Array<string | number> = [workspaceId]
   let where = 'ke.workspace_id = $1'
@@ -1065,6 +1151,18 @@ export async function listKnowledge(
   if (opts.category) {
     params.push(opts.category)
     where += ` AND ke.category = $${params.length}`
+  }
+  if (opts.origin) {
+    params.push(opts.origin)
+    where += ` AND ke.origin = $${params.length}`
+  }
+  if (opts.tag) {
+    params.push(opts.tag)
+    where += ` AND $${params.length} = ANY(ke.tags)`
+  }
+  if (opts.withoutTag) {
+    params.push(opts.withoutTag)
+    where += ` AND NOT ($${params.length} = ANY(ke.tags))`
   }
   params.push(opts.limit ?? 500)
 
@@ -1079,6 +1177,26 @@ export async function listKnowledge(
       LIMIT $${params.length}`,
     params,
   )
+}
+
+/**
+ * How many knowledge entries there actually are.
+ *
+ * `/state` sends a capped page of entries (400) for rendering, and the Dashboard
+ * counted the length of that page — so once the corpus pushed the store past the
+ * cap, the "Knowledge base" figure silently became the cap rather than the truth.
+ * A count is one cheap query and cannot be truncated.
+ */
+export async function countKnowledge(
+  workspaceId: string,
+): Promise<{ total: number; active: number }> {
+  const row = await queryOne<{ total: string; active: string }>(
+    `SELECT count(*)::text AS total,
+            count(*) FILTER (WHERE active)::text AS active
+       FROM knowledge_entries WHERE workspace_id = $1`,
+    [workspaceId],
+  )
+  return { total: Number(row?.total ?? 0), active: Number(row?.active ?? 0) }
 }
 
 export async function insertKnowledgeEntry(e: {

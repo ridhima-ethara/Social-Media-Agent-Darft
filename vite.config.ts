@@ -9,6 +9,11 @@ export default defineConfig({
     alias: {
       '@shared': fileURLToPath(new URL('./shared', import.meta.url)),
     },
+    // The source wins. `npm run typecheck` (tsc with emit on) writes a `.js`
+    // beside every `.tsx`, and Vite's default order would bundle that stale
+    // emit instead of the file being edited. Sources here are TypeScript;
+    // nothing legitimate lives in a `.js` that shadows a `.ts`.
+    extensions: ['.tsx', '.ts', '.mts', '.mjs', '.js', '.jsx', '.json'],
   },
   server: {
     port: 5173,

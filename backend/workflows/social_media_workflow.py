@@ -5,13 +5,33 @@ Runs the agents in hand-off order, threading one payload through them. The
 order is **derived** from each agent's `hands_off_to`, never written down as a
 list — if the order is wrong, the graph is wrong, and that is where to fix it.
 
-    Research → Validation → Calendar → Content → Publishing → Analytics
-                    │                                             │
-                    └──────────── the Brain ──────────────────────┘
-                        read before every act, written after every outcome
+    Scraping → Validation → Calendar → Content → Image → Publishing
+                    │                                          │
+                    │                                     Analytics
+                    │                                          │
+                    │                                     Learning
+                    │                                          │
+                    └───────────── the Brain ──────────────────┘
+                       read before every act, grown after every outcome
 
-The Brain is not an agent. It is the shared memory every agent reads from and
-writes back to, which is what makes the next run better than the last.
+The Brain is not an agent. It is the shared memory every agent reads from,
+which is what makes the next run better than the last.
+
+Two ends of the loop are worth naming, because the value of the whole thing
+sits in the fact that they meet:
+
+    Scraping  is also the research. There is no separate research agent — the
+              keywords are the question and the sources are the answer.
+
+    Learning  is what closes the circle. It reads what the operator asked for
+              in the assistant and what the audience did with what shipped,
+              and writes both into the Brain. Everything upstream then reads
+              it: the Calendar Agent places on it, the Content Agent writes
+              under it, the Image Agent draws under it.
+
+So the pipeline is not a line that runs once. What comes out of the end
+changes what happens at the start of the next run, with no code edited in
+between — that is the entire point of the Brain sitting where it does.
 """
 
 from __future__ import annotations
@@ -96,7 +116,39 @@ class WorkflowRun:
             "hashtags_consolidated": len(self.payload.get("top_hashtags", [])),
             "ideas_on_calendar": self.payload.get("primary_count", 0),
             "ideas_in_suggestions": self.payload.get("suggestion_count", 0),
+            "images_rendered": 1 if self.payload.get("asset", {}).get("data_uri") else 0,
             "published": bool(self.payload.get("published")),
+            # What the run added to what the platform knows. `learned` counts
+            # entries actually written; `merged` folded into an existing entry;
+            # `withheld` is what did not clear the evidence floor and was kept
+            # out rather than padded into place.
+            "knowledge_learned": len(self.payload.get("written", [])),
+            "knowledge_merged": len(self.payload.get("merged", [])),
+            "knowledge_withheld": len(self.payload.get("discarded", [])),
+        }
+
+    def artefacts(self) -> dict[str, Any]:
+        """
+        The things themselves, not the count of them.
+
+        `summary()` says four ideas took a calendar slot. This carries the four
+        ideas. The API tier writes them to Postgres, and the UI renders from
+        Postgres — never from the event stream — so anything missing from here
+        is something an operator will never see, however loudly the run
+        reported it.
+
+        A halted run still returns what the agents that did run produced.
+        Partial and labelled beats complete and invented.
+        """
+        return {
+            "keywords": self.payload.get("keywords", []),
+            "keywords_scored": self.payload.get("keywords_scored", []),
+            "trending": self.payload.get("trending", []),
+            "ranked_hashtags": self.payload.get("ranked_hashtags", []),
+            "top_hashtags": self.payload.get("top_hashtags", []),
+            "ranked_ideas": self.payload.get("ranked_ideas", []),
+            "review_queue": self.payload.get("review_queue", []),
+            "status": "failed" if self.failed else "completed",
         }
 
 
@@ -106,13 +158,24 @@ def run_workflow(
     overrides: dict[str, dict[str, Any]] | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
     stop_after: str | None = None,
+    seed: dict[str, Any] | None = None,
 ) -> WorkflowRun:
     """
     Runs the pipeline end to end.
 
     Each agent receives the accumulated payload and contributes to it — which is
-    how a hand-off works: the Validation Agent sees exactly what Research
-    captured, and nothing is passed around out of band.
+    how a hand-off works: the Validation Agent sees exactly what the Scraping
+    Agent captured, and nothing is passed around out of band.
+
+    `seed` is what the run cannot discover for itself: the assistant transcript
+    and the published posts with their measured engagement. Both are inputs to
+    the Learning Agent, and neither is produced anywhere in this pipeline — the
+    operator typed one and the platforms reported the other. Without a way in,
+    the Learning Agent would read an empty transcript on every run and correctly
+    report that it had learned nothing, forever.
+
+    Seeded keys never overwrite what an agent produces; agents run after the
+    seed is laid down and update over it.
 
     A failed agent halts the run. What ran before it stands and is reported;
     nothing is rolled back, because a partial run that lies about being complete
@@ -121,14 +184,18 @@ def run_workflow(
     brain = brain or Brain()
     overrides = overrides or {}
     run = WorkflowRun()
-    run.payload = {"keywords": keywords}
+    run.payload = {"keywords": keywords, **(seed or {})}
 
     order = hand_off_order()
     if stop_after and stop_after in order:
         order = order[: order.index(stop_after) + 1]
 
     emit = on_event or (lambda event, data: None)
-    emit("workflow.started", {"agents": order, "keywords": keywords})
+    emit("workflow.started", {
+        "agents": order,
+        "keywords": keywords,
+        "seeded": sorted(seed or {}),
+    })
 
     for agent_id in order:
         agent_class = AGENT_BY_ID[agent_id]
@@ -158,6 +225,9 @@ def run_workflow(
             emit("workflow.failed", {"agent_id": agent_id, "error": result.error})
             break
 
+    # Output before finished: the API tier persists what is in this frame, and
+    # `workflow.finished` should mean the run is over — including the writing.
+    emit("workflow.output", run.artefacts())
     emit("workflow.finished", run.summary())
     return run
 
@@ -190,7 +260,8 @@ def main() -> int:
     print("\n  ── summary ──")
     for key in ("status", "agents_run", "posts_captured", "keywords_trending",
                 "hashtags_consolidated", "ideas_on_calendar", "ideas_in_suggestions",
-                "used_model", "injection_attempts", "duration_ms"):
+                "images_rendered", "knowledge_learned", "knowledge_merged",
+                "knowledge_withheld", "used_model", "injection_attempts", "duration_ms"):
         print(f"    {key:24} {summary[key]}")
 
     Path("backend/data").mkdir(parents=True, exist_ok=True)

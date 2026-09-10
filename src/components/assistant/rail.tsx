@@ -8,12 +8,11 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { Volume2, X, Bell } from 'lucide-react'
+import { X, Bell } from 'lucide-react'
 import { useStore } from '../../store'
-import { Badge, Btn, timeAgo } from '../ui'
-import { AssistantCore } from './core'
-import { PlanCard } from './plan-card'
+import { Badge, Btn } from '../ui'
 import { ConfirmCard } from './confirm-card'
+import { Exchange } from './exchange'
 import { voiceSupport } from '../../lib/voice'
 
 export function AssistantRail() {
@@ -105,52 +104,22 @@ export function AssistantRail() {
           </p>
         ) : null}
 
-        {turns.map((turn) =>
-          turn.speaker === 'operator' ? (
-            <div key={turn.id} className="anim-fade-up flex justify-end">
-              <div className="max-w-[86%] rounded-xl rounded-br-sm border border-accent/35 bg-accent/10 px-3 py-2">
-                <p className="text-[12px] leading-relaxed text-ink">{turn.utterance}</p>
-                <p className="mono mt-1 text-right text-[10px] text-ink-3">
-                  {turn.channel === 'voice' ? 'voice · ' : ''}
-                  {timeAgo(turn.created_at)}
-                </p>
-              </div>
-            </div>
-          ) : (
-            <div key={turn.id} className="anim-fade-up flex gap-2.5">
-              <AssistantCore state={turn.status === 'running' ? 'working' : 'dormant'} size={22} className="mt-0.5 shrink-0" />
-              <div className="min-w-0 flex-1 space-y-2">
-                {turn.plan ? (
-                  <PlanCard plan={turn.plan} greyed={turn.status === 'awaiting_confirmation'} compact />
-                ) : null}
-
-                {turn.narration ? (
-                  <div className="group">
-                    <p
-                      className={`whitespace-pre-wrap text-[12px] leading-relaxed text-ink-2 ${
-                        streaming && turn.status === 'running' ? 'assistant-caret' : ''
-                      }`}
-                    >
-                      {turn.narration}
-                    </p>
-                    {voiceSupport.output ? (
-                      <button
-                        type="button"
-                        onClick={() => speak(turn.narration ?? '')}
-                        aria-label="Speak this"
-                        className="mt-1 inline-flex items-center gap-1 text-[10px] text-ink-3 opacity-0 transition-opacity hover:text-ink-2 group-hover:opacity-100"
-                      >
-                        <Volume2 size={11} /> Speak
-                      </button>
-                    ) : null}
-                  </div>
-                ) : turn.status === 'planning' ? (
-                  <p className="text-[12px] text-ink-3">Working.</p>
-                ) : null}
-              </div>
-            </div>
-          ),
-        )}
+        {/* The shared renderer, so the rail and the calendar panel agree. It
+            reads the narration off the operator turn — the server stores one row
+            per exchange, and the rail used to drop every answer by rendering
+            only the utterance. */}
+        <ul className="space-y-3.5">
+          {turns
+            .filter((turn) => turn.speaker === 'operator' || turn.plan || turn.narration)
+            .map((turn) => (
+              <Exchange
+                key={turn.id}
+                turn={turn}
+                streaming={streaming}
+                {...(voiceSupport.output ? { onSpeak: speak } : {})}
+              />
+            ))}
+        </ul>
 
         {pendingConfirm ? <ConfirmCard confirm={pendingConfirm} onDecision={confirmPlan} /> : null}
       </div>

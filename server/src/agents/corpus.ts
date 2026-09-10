@@ -174,17 +174,67 @@ export function titleCaseWords(input: string): string {
 }
 
 /** A headline from a body of text: the first sentence, clamped to N words. */
+/**
+ * Words a truncated line must not end on.
+ *
+ * A hard word-count cut lands wherever the count runs out, which is how a
+ * headline ends up reading "…models that are helpful, harmless and" or
+ * "…machine learning separate from psychological". The text is grammatically
+ * unfinished but is presented as a finished line, and it then travels: the
+ * idea title becomes the caption's hook and the image headline. Dropping the
+ * dangling tail costs a word or two and always reads as a complete phrase.
+ *
+ * These are closed-class function words, not a tunable — the list is a fact
+ * about English, so it is not a knob.
+ */
+const DANGLING_TAIL = new Set([
+  'a', 'an', 'the',
+  'and', 'or', 'but', 'nor', 'so', 'yet',
+  'of', 'to', 'in', 'on', 'for', 'with', 'from', 'by', 'at', 'as', 'into',
+  'onto', 'over', 'under', 'about', 'against', 'between', 'through', 'during',
+  'before', 'after', 'above', 'below', 'across', 'behind', 'beyond', 'within',
+  'without', 'upon', 'toward', 'towards', 'per', 'via',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'has', 'have', 'had', 'do', 'does', 'did',
+  'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must',
+  'that', 'which', 'who', 'whom', 'whose', 'what', 'when', 'where', 'while',
+  'because', 'if', 'than', 'then', 'though', 'although', 'unless', 'until',
+  'its', 'their', 'our', 'your', 'his', 'her', 'this', 'these', 'those', 'it',
+  'not', 'no', 'more', 'most', 'very', 'such', 'both', 'each', 'every',
+])
+
+/**
+ * Removes a trailing run of function words left behind by a hard truncation,
+ * so a clamped line ends on a word that can actually end a phrase.
+ *
+ * Never empties the string: a line made only of function words is returned as
+ * it was, because reporting nothing is worse than reporting an awkward line.
+ */
+export function trimDanglingTail(text: string): string {
+  const words = text.trim().split(/\s+/).filter(Boolean)
+  while (words.length > 1) {
+    const last = words[words.length - 1]
+    if (last === undefined) break
+    const bare = last.toLowerCase().replace(/[^\p{L}\p{N}]+$/gu, '')
+    if (!DANGLING_TAIL.has(bare)) break
+    words.pop()
+  }
+  return words.join(' ').replace(/[,;:]+$/, '')
+}
+
 export function headlineFrom(text: string, maxWords: number): string {
   const firstLine = text.split(/\n+/).find((l) => l.trim().length > 0) ?? text
   const sentence = firstLine.split(/(?<=[.!?])\s/)[0] ?? firstLine
   const cleaned = sentence.replace(/#[\p{L}\p{N}_]+/gu, '').replace(/\s+/g, ' ').trim()
   const words = cleaned.split(' ').filter(Boolean)
-  return words.slice(0, maxWords).join(' ').replace(/[,;:]$/, '')
+  if (words.length <= maxWords) return cleaned.replace(/[,;:]+$/, '')
+  return trimDanglingTail(words.slice(0, maxWords).join(' '))
 }
 
 export function clampWords(text: string, maxWords: number): string {
   const words = text.split(/\s+/).filter(Boolean)
-  return words.length <= maxWords ? text.trim() : `${words.slice(0, maxWords).join(' ')}`
+  if (words.length <= maxWords) return text.trim()
+  return trimDanglingTail(words.slice(0, maxWords).join(' '))
 }
 
 export function clampChars(text: string, maxChars: number): string {
@@ -407,6 +457,23 @@ export function isWeekend(dateIso: string): boolean {
 }
 
 /** Monday of the week containing `d`, in UTC. */
+/**
+ * The first day the planner may place a post on.
+ *
+ * The week's Monday, unless the week is already underway, in which case today.
+ *
+ * WHY THIS EXISTS. Spreading from the week's Monday means a run on Thursday
+ * places its first ideas on Monday and Tuesday — days that have already gone.
+ * Those slots can never be published: the calendar looks full, the approval
+ * queue fills up, and nothing can ship from the first third of it. Planning
+ * from today costs nothing and makes every slot reachable.
+ */
+export function planningStart(now: Date = new Date()): Date {
+  const monday = startOfWeek(now)
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  return monday.getTime() > today.getTime() ? monday : today
+}
+
 export function startOfWeek(d: Date): Date {
   const out = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
   const day = out.getUTCDay()
@@ -425,6 +492,7 @@ export function monthKeyOf(dateIso: string): string {
 }
 
 export function monthLabelOf(monthKey: string): string {
+  if (!/^\d{4}-\d{2}$/.test(monthKey)) return monthKey
   const [y, m] = monthKey.split('-')
   const names = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
     'August', 'September', 'October', 'November', 'December']

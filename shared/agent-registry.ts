@@ -94,6 +94,7 @@ export const AGENTS: AgentSpec[] = [
   {
     id: 'assistant',
     name: 'Ethara Command',
+    icon: 'command',
     stage: 'command',
     role: 'The command plane',
     description:
@@ -117,9 +118,10 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'scraping',
-    name: 'Scraping Agent',
+    name: 'Sherlock',
+    icon: 'search',
     stage: 'discover',
-    role: 'Keyword-driven capture across LinkedIn, Instagram, X, Facebook and the open web',
+    role: 'Scraping Agent · Keyword-driven capture across LinkedIn, Instagram, X, Facebook and the open web',
     description:
       'Resolves the active keyword set and captures each term with crawl4ai on every platform lane in turn — LinkedIn, Instagram, X, Facebook — and once against the open web. Each captured page is scored against the brand topic set and the live Knowledge Base before it is admitted, so what reaches the pipeline is on-brand as well as on-keyword. Harvests the hashtags out of the bodies that carry them, then reads the strongest tags independently of the keyword query that surfaced them.',
     consumes: ['The keyword set', 'Registered competitor sources', 'The Knowledge Base'],
@@ -129,9 +131,10 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'validation',
-    name: 'Validation Agent',
+    name: 'Dexter',
+    icon: 'flask',
     stage: 'assess',
-    role: 'Verdicts on every candidate',
+    role: 'Validation Agent · Verdicts on every candidate',
     description:
       'Ranks the keywords on volume, engagement, velocity and growth against their own prior runs, and takes the top five. For each of those, ranks and validates its hashtags and takes the top five. Every candidate — item and hashtag — leaves with exactly one verdict and a plain-language reason naming the evidence.',
     consumes: ['Raw posts', 'Hashtag candidates', 'Prior-run signals'],
@@ -147,6 +150,7 @@ export const AGENTS: AgentSpec[] = [
   {
     id: 'analysis',
     name: 'Analysis Agent',
+    icon: 'chart-cluster',
     stage: 'assess',
     role: 'Opportunities and the consolidated hashtag set',
     description:
@@ -158,11 +162,12 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'calendar',
-    name: 'Calendar & Ideas Agent',
+    name: 'Dora',
+    icon: 'calendar',
     stage: 'plan',
-    role: 'The weekly plan',
+    role: 'Calendar Agent · The weekly plan',
     description:
-      'Turns opportunities into content ideas, picks the platform and the slot, balances cadence across the week, and ranks everything. The top ten per platform take a calendar slot; the rest keep their rank and wait in More suggestions.',
+      'Turns opportunities into content ideas, picks the platform and the slot, balances cadence across the week, and ranks everything. The top five per platform take a calendar slot; the rest keep their rank and wait in More suggestions.',
     consumes: ['Ranked opportunities', 'Knowledge Base entries', 'The existing calendar'],
     produces: ['Content ideas', 'Dates, times and platforms', 'Calendar slots and platform ranks'],
     handsOffTo: ['caption'],
@@ -170,9 +175,10 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'caption',
-    name: 'Caption Creator Agent',
+    name: 'SpongeBob',
+    icon: 'pen',
     stage: 'create',
-    role: 'Platform copy, grounded in the Knowledge Base',
+    role: 'Content Agent · Platform copy, grounded in the Knowledge Base',
     description:
       'Writes the post. Retrieves the Knowledge Base entries for the originating hashtag and uses them as the grounding for the model call, builds the caption through the nine-stage structure, adapts it per platform, and passes the result through the brand-voice enforcer unconditionally.',
     consumes: ['A content idea', 'Knowledge Base entries', 'Brand voice'],
@@ -182,9 +188,10 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'image',
-    name: 'Image Creator Agent',
+    name: 'Minnie',
+    icon: 'palette',
     stage: 'create',
-    role: 'The shipping creative',
+    role: 'Image Agent · The shipping creative',
     description:
       'Renders the picture in two layers: an optional model-painted background, and a vector brand layer drawn locally over it. No diffusion model is ever asked to draw brand text. If the model is unreachable the local renderer ships alone, labelled — a post is never left without a picture.',
     consumes: ['The caption payload', 'Brand visual tokens', 'The chosen image model'],
@@ -195,6 +202,7 @@ export const AGENTS: AgentSpec[] = [
   {
     id: 'review',
     name: 'Review Agent',
+    icon: 'check-shield',
     stage: 'create',
     role: 'Human edits and compliance',
     description:
@@ -207,6 +215,7 @@ export const AGENTS: AgentSpec[] = [
   {
     id: 'knowledge',
     name: 'Knowledge Agent',
+    icon: 'book',
     stage: 'learn',
     role: 'The cited Knowledge Base',
     description:
@@ -218,9 +227,10 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'publishing',
-    name: 'Publishing Agent',
+    name: 'Mickey',
+    icon: 'send',
     stage: 'ship',
-    role: 'The one irreversible act',
+    role: 'Publishing Agent · The one irreversible act',
     description:
       'Validates the format against the platform, uploads the media, dispatches the post and records a receipt. Demo mode fabricates ids; live mode requires real credentials. The mode is recorded permanently on every receipt and demo and live are never mixed.',
     consumes: ['An approved idea', 'The draft', 'The media asset'],
@@ -230,9 +240,10 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'analytics',
-    name: 'Analytics Agent',
+    name: 'Jerry',
+    icon: 'bar-chart',
     stage: 'learn',
-    role: 'Measurement against our own baseline',
+    role: 'Analytics Agent · Measurement against our own baseline',
     description:
       'Ingests platform metrics and judges every post against this account\u2019s own trailing baseline, never an industry benchmark. A metric that has not been reported yet is excluded, never counted as zero. Explains why a post performed as it did, and composes the monthly report.',
     consumes: ['Published posts', 'Platform metrics', 'Prior periods'],
@@ -242,9 +253,10 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'learning',
-    name: 'Learning Agent',
+    name: 'Velma',
+    icon: 'graduation',
     stage: 'learn',
-    role: 'Turning outcomes into durable knowledge',
+    role: 'Learning Agent · Turning outcomes into durable knowledge',
     description:
       'Detects patterns across human edit instructions and post outcomes, writes them back to the Knowledge Base, raises confidence after repeated confirmations and lowers it after contradictions. The demotion path is implemented, not optional.',
     consumes: ['Post outcomes', 'Human edit instructions', 'Approval and rejection reasons'],
@@ -1133,10 +1145,15 @@ const CALENDAR_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     critical: true,
     config: [
+      text('enabledPlatforms', 'Platforms in play', 'linkedin,instagram,x,facebook',
+        'Comma-separated platform ids an idea may be placed on: linkedin, instagram, x, facebook. ' +
+        'Set it to `linkedin` and nothing else is ever suggested — the fit matrix only scores what is ' +
+        'listed here. This is the restriction; `Tie-break toward` below is only a preference and never ' +
+        'excluded a platform.'),
       enumField('primaryPlatform', 'Tie-break toward', ['linkedin', 'instagram', 'x', 'facebook'], 'linkedin',
-        'Which platform wins when two score equally. LinkedIn is where this audience actually is.'),
+        'Which platform wins when two enabled platforms score equally. LinkedIn is where this audience actually is.'),
       pct('alternateThreshold', 'Alternate threshold', 55,
-        'A platform scoring at or above this is offered as an alternate in the review panel.'),
+        'An enabled platform scoring at or above this is offered as an alternate in the review panel.'),
     ],
   },
   {
@@ -1216,7 +1233,7 @@ const CALENDAR_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     critical: true,
     config: [
-      num('topPerPlatform', 'Calendar slots per platform', 10,
+      num('topPerPlatform', 'Calendar slots per platform', 5,
         'How many ideas per platform actually take a slot on the week. Everything else keeps its rank and waits in More suggestions.',
         { min: 1, max: 30, step: 1 }),
       pct('rankConfidenceWeight', 'Confidence weight', 45,
@@ -1226,7 +1243,7 @@ const CALENDAR_SKILLS: SkillSpec[] = [
       pct('rankTrendWeight', 'Trend weight', 20,
         'How much the strength of the originating trend counts toward its rank.'),
       bool('balanceAcrossPlatforms', 'Rank per platform independently', true,
-        'On, each platform gets its own top ten, so a strong LinkedIn week cannot starve Instagram. Off ranks globally.'),
+        'On, each platform gets its own top five, so a strong LinkedIn week cannot starve Instagram. Off ranks globally.'),
     ],
   },
 ]
@@ -1340,7 +1357,7 @@ const CAPTION_SKILLS: SkillSpec[] = [
         'How many distinct beats the body works through — reframe, mechanism, evidence by default.',
         { min: 1, max: 6, step: 1 }),
       bool('citeGrounding', 'Reference the grounding inline', true,
-        'On, the body names where a claim came from. This is what makes rule 7 pass.'),
+        'On, the body names where a claim came from. This is what makes invariant 26 pass, and rule 6 with it.'),
     ],
   },
   {
@@ -1490,7 +1507,7 @@ const IMAGE_SKILLS: SkillSpec[] = [
         'How many recent creatives inform the new one.',
         { min: 0, max: 60, step: 1 }),
       pct('maxSimilarity', 'Similarity ceiling', 85,
-        'How close a new creative may be to an existing one before it is regenerated. This is the visual half of rule 18.'),
+        'How close a new creative may be to an existing one before it is regenerated. This is the visual half of rule 17.'),
     ],
   },
   {
@@ -1558,7 +1575,7 @@ const IMAGE_SKILLS: SkillSpec[] = [
         'How many times to retry a failed model render before falling back.',
         { min: 0, max: 4, step: 1 }),
       bool('compositeBrandLayer', 'Composite the brand layer locally', true,
-        'This is rule 12 and should never be off: no diffusion model is asked to draw brand text. Off produces unusable creative.'),
+        'This is invariant 21 and should never be off: no diffusion model is asked to draw brand text, which is what makes rules 12, 13 and 15 hold. Off produces unusable creative.'),
     ],
   },
   {
@@ -1916,7 +1933,7 @@ const PUBLISHING_SKILLS: SkillSpec[] = [
       bool('blockOnFailure', 'Block on a failed check', true,
         'On, a format failure stops the publish. This should stay on: the platform will reject it anyway, and later.'),
       bool('requireAltText', 'Require alt text', true,
-        'On, an asset without alt text cannot be published. This is rule 16.'),
+        'On, an asset without alt text cannot be published. This is invariant 23.'),
     ],
   },
   {
@@ -2028,7 +2045,7 @@ const ANALYTICS_SKILLS: SkillSpec[] = [
     section: 'Baseline',
     name: 'Compute our own baseline',
     summary:
-      'Builds the trailing baseline from this account\u2019s own history. Never an industry benchmark — that is rule 9.',
+      'Builds the trailing baseline from this account\u2019s own history. Never an industry benchmark — that is invariant 24.',
     inputs: ['Metrics rows', 'Reported periods'],
     outputs: ['Baselines', 'Standard deviations'],
     order: 3,
@@ -2101,7 +2118,7 @@ const ANALYTICS_SKILLS: SkillSpec[] = [
       bool('includeRecommendation', 'Include a recommendation', true,
         'On, the explanation ends with the one thing to do differently next time.'),
       bool('neverUseIndustryBenchmark', 'Compare only against our own baseline', true,
-        'This is rule 9 and should stay on. An industry benchmark we did not measure is not evidence.'),
+        'This is invariant 24 and should stay on. An industry benchmark we did not measure is not evidence.'),
     ],
   },
   {

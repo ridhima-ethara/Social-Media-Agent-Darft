@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agents import ROSTER  # noqa: E402
 from core.brain import Brain  # noqa: E402
+from core.schema import MemoryEntry  # noqa: E402
 from core.config import REGISTRY  # noqa: E402
 from core.llm import is_configured, unavailable_reason  # noqa: E402
 from workflows.social_media_workflow import hand_off_order, run_workflow  # noqa: E402
@@ -33,6 +34,22 @@ def emit(event: str, data: dict) -> None:
     print(json.dumps({"event": event, **data}, default=str), flush=True)
 
 
+def _seed(path: str | None, key: str) -> dict[str, list]:
+    """
+    Reads a JSON list off disk into the starting payload.
+
+    Refuses rather than defaults: a caller who mistypes the path meant to supply
+    something, and quietly starting with an empty list would have the Learning
+    Agent report that the operator had never asked for anything.
+    """
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError(f"{path} must hold a JSON list of {key}, not {type(data).__name__}.")
+    return {key: data}
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     keywords = [k.strip() for k in (args.keywords or "").split(",") if k.strip()]
     if not keywords:
@@ -40,12 +57,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     overrides = json.loads(args.overrides) if args.overrides else {}
+    seed = {
+        **_seed(args.assistant, "assistant_messages"),
+        **_seed(args.posts, "published_posts"),
+    }
     run = run_workflow(
         keywords,
         brain=Brain(args.brain) if args.brain else None,
         overrides=overrides,
         on_event=emit,
         stop_after=args.stop_after,
+        seed=seed,
     )
     return 0 if run.summary()["status"] == "completed" else 1
 
@@ -54,6 +76,38 @@ def cmd_brain(args: argparse.Namespace) -> int:
     brain = Brain(args.brain) if args.brain else Brain()
     entries = [e.model_dump() for e in brain._entries]  # noqa: SLF001 — the CLI is the store's own surface
     emit("brain", {"entries": entries, "stats": brain.stats()})
+    return 0
+
+
+def cmd_learn(args: argparse.Namespace) -> int:
+    """
+    Writes one operator instruction into the Knowledge Base.
+
+    This is the Learning Agent's assistant surface, reached from the other side
+    of the process boundary. An operator who tells the assistant "keep more of
+    the calendar on LinkedIn" has said something durable, and it has to land in
+    the store the Calendar Agent reads on its next run — otherwise the change
+    holds until the next run and then quietly reverts.
+
+    `origin` is `manual`, and that word is load-bearing everywhere downstream.
+    It is what tells the Content Agent to treat this as an instruction binding
+    on how it writes rather than as evidence it may cite in a caption. An
+    operator's preference is not a finding about the world, and the two must
+    never be confused.
+    """
+    brain = Brain(args.brain) if args.brain else Brain()
+    action, entry, reason = brain.learn(MemoryEntry(
+        title=args.title,
+        category=args.category,
+        content=args.content,
+        origin="manual",
+    ))
+    emit("learned", {
+        "action": action,
+        "entry": entry.model_dump() if entry else None,
+        "reason": reason,
+        "stats": brain.stats(),
+    })
     return 0
 
 
@@ -66,6 +120,8 @@ def cmd_agents(_: argparse.Namespace) -> int:
             {
                 "id": cls.agent_id,
                 "name": cls.name,
+                "role": cls.role,
+                "icon": cls.icon,
                 "stage": cls.stage,
                 "hands_off_to": cls.hands_off_to,
                 "folder": f"backend/agents/{cls.agent_id}/",
@@ -96,11 +152,20 @@ def main() -> int:
     run.add_argument("--overrides", help="JSON: {agent_id: {knob: value}}")
     run.add_argument("--stop-after", dest="stop_after")
     run.add_argument("--brain")
+    run.add_argument("--assistant", help="JSON file: the assistant transcript the Learning Agent reads")
+    run.add_argument("--posts", help="JSON file: our own published posts with their measured engagement")
     run.set_defaults(handler=cmd_run)
 
     brain = sub.add_parser("brain", help="Dump the Knowledge Base")
     brain.add_argument("--brain")
     brain.set_defaults(handler=cmd_brain)
+
+    learn = sub.add_parser("learn", help="Store one operator instruction in the Knowledge Base")
+    learn.add_argument("--title", required=True)
+    learn.add_argument("--content", required=True)
+    learn.add_argument("--category", default="Human Directive")
+    learn.add_argument("--brain")
+    learn.set_defaults(handler=cmd_learn)
 
     sub.add_parser("agents", help="The roster and its contracts").set_defaults(handler=cmd_agents)
     sub.add_parser("last", help="The last run's summary").set_defaults(handler=cmd_last)

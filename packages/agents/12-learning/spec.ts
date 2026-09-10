@@ -17,9 +17,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'learning',
-  name: 'Learning Agent',
+  name: 'Velma',
   stage: 'learn',
-  role: 'Turns outcomes and human edits into durable knowledge.',
+  role: 'Learning Agent · Turns outcomes and human edits into durable knowledge.',
   description:
     'Raises confidence after repeated confirmation and lowers it after contradiction. The demotion path is not optional.',
   consumes: [

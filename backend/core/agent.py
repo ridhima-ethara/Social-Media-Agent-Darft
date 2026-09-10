@@ -22,7 +22,7 @@ from typing import Any
 
 from .brain import Brain
 from .config import Config
-from .llm import Reasoning, ToolSpec, run_loop
+from .llm import TURN_CAP_TEXT, Reasoning, ToolSpec, run_loop
 from .schema import AgentResult, InjectionAttempt, SourceMode
 
 
@@ -31,6 +31,8 @@ class Agent:
 
     agent_id: str = ""
     name: str = ""
+    role: str = ""
+    icon: str = ""
     stage: str = ""
     hands_off_to: list[str] = []
     max_turns: int = 8
@@ -67,7 +69,21 @@ class Agent:
             f"---\n\n# Tools\n\n{self._read('tools.md')}\n\n"
             f"---\n\n# Resolved settings for this run\n\n{settings or '  (none declared)'}\n\n"
             "Every number you need is above. Never invent one, and never use a "
-            "number that is not listed here."
+            "number that is not listed here.\n\n"
+            "---\n\n# How this run reaches you\n\n"
+            "You are running inside a pipeline, not a conversation. Nobody is "
+            "reading this and nobody will answer a question, so a reply that "
+            "asks for input ends your turn having produced nothing.\n\n"
+            "The evidence is already captured and already loaded. Your tools "
+            "read it directly: they operate on this run's real data, and the "
+            "ones that need the corpus already hold it. That is why they do not "
+            "ask you to pass it — you could only pass your memory of it, and "
+            "your memory of evidence is not evidence.\n\n"
+            "So call your tools. The task below states what was captured in "
+            "counts, not contents; the contents are behind the tools. If a tool "
+            "comes back empty, say so plainly and name what was missing — an "
+            "honest empty result is a correct answer, and asking for the data "
+            "again is not."
         )
 
     # ── What subclasses implement ──────────────────────────────────────────
@@ -109,11 +125,19 @@ class Agent:
         try:
             self.prepare(payload)
             tools = self.tools(payload)
+            # An agent must be able to call each tool it holds at least once,
+            # plus a few turns to read the results and answer. A flat cap did
+            # not survive contact with the roster: the Image Agent carries nine
+            # tools against a cap of eight, so its instructions asked for a
+            # sequence it could not finish, and it reported a turn cap instead
+            # of a creative. The declared `max_turns` stays a floor an agent
+            # may raise, never a ceiling below its own toolset.
+            turns = max(self.max_turns, len(tools) + 3)
             reasoning = run_loop(
                 system=self.system_prompt(),
                 task=self.task(payload),
                 tools=tools,
-                max_turns=self.max_turns,
+                max_turns=turns,
             )
             output = self.finalise(reasoning, payload)
 
@@ -121,7 +145,7 @@ class Agent:
                 agent_id=self.agent_id,
                 status="completed",
                 payload=output,
-                summary=reasoning.text.strip() or self.summarise(output),
+                summary=self._summary_for(reasoning, output),
                 tool_calls=[turn.tool for turn in reasoning.turns],
                 injection_attempts=self._injection,
                 source=SourceMode.LIVE if reasoning.used_model else SourceMode.FIXTURE,
@@ -140,6 +164,25 @@ class Agent:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 error=str(error),
             )
+
+    def _summary_for(self, reasoning: Reasoning, output: dict[str, Any]) -> str:
+        """
+        What the run produced, in one sentence.
+
+        The model's own words are preferred — they name the evidence it saw.
+        But running out of turns is a fact about the loop, not a report on the
+        work: the deterministic path still filled the payload, and answering
+        "reached the turn cap" would hide a complete result behind a message
+        about the machinery. So the cap is appended to the real summary rather
+        than substituted for it.
+        """
+        text = reasoning.text.strip()
+        if text and text != TURN_CAP_TEXT:
+            return text
+        settled = self.summarise(output)
+        if text == TURN_CAP_TEXT and settled:
+            return f"{settled} (The model reached its turn cap; this is the settled result.)"
+        return settled or text
 
     # ── Shared helpers ─────────────────────────────────────────────────────
 

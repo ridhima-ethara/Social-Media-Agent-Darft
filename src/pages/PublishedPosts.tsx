@@ -70,7 +70,6 @@ export function PublishedPosts() {
         title="Published Posts"
         subtitle="What actually went out, what it did, and why — measured against this account's own trailing baseline."
         agents={['publishing', 'analytics', 'learning']}
-        askPrompt="What was our strongest post?"
         actions={
           <DownloadMenu
             options={[
@@ -276,7 +275,7 @@ export function PublishedPosts() {
 
             {detail.analysis_summary ? (
               <section className="rounded-xl border border-accent/40 bg-accent/8 p-3 lg:col-span-2">
-                <h4 className="display text-[12px]">Analytics Agent · post analysis</h4>
+                <h4 className="display text-[12px]">Jerry · Analytics Agent · post analysis</h4>
                 <p className="mt-1.5 text-[12px] leading-relaxed text-ink-2">{detail.analysis_summary}</p>
                 {detail.analysis_recommendation ? (
                   <p className="mt-2 text-[12px] leading-relaxed text-ink">

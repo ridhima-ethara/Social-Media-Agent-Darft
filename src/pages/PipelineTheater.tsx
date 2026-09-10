@@ -7,13 +7,14 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Pause, Play, X } from 'lucide-react'
+import { CalendarDays, Check, Pause, Play, X } from 'lucide-react'
 import { useStore } from '../store'
 import { Logo } from '../components/logo'
 import { PipelineGraph, type GraphBucket, type GraphSource } from '../components/pipeline-graph'
 import { AssistantCore } from '../components/assistant/core'
-import { Badge, Btn, PlatformIcon, Progress, fmt } from '../components/ui'
-import type { ValidationVerdict } from '../types'
+import { Badge, Btn, PlatformIcon, Progress, fmt, timeAgo } from '../components/ui'
+import { PLATFORMS } from '../../shared/agent-contract'
+import type { Platform, ValidationVerdict } from '../types'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE FEED
@@ -27,8 +28,17 @@ type FeedRow =
       keyword: string
       source: string
       title: string
-      engagement: number
+      /** The lane it came from. `null` is the open-web tier, not a gap. */
+      platform: Platform | null
+      /**
+       * Null when the source stated no engagement figures — which is the norm
+       * for a crawled page. Rendered as N/A, never as a zero that would read
+       * as "this performed badly".
+       */
+      engagement: number | null
       relevance: number
+      /** Held back by the scraping stage as already on record. Never reached scoring. */
+      held: { since: string; originalTitle: string } | null
     }
   | {
       kind: 'verdict'
@@ -38,6 +48,8 @@ type FeedRow =
       title: string
       reason: string
       resolvedBy?: string
+      /** Set when the verdict was reached by an earlier run: relative time of that capture. */
+      onRecord?: string
     }
   | {
       kind: 'scoring'
@@ -47,6 +59,16 @@ type FeedRow =
       relevance: number
       freshness: number
       unique: number
+    }
+  | {
+      kind: 'lane'
+      id: string
+      keyword: string
+      platform: string
+      status: 'running' | 'ok' | 'warn'
+      kept: number | null
+      captured: number | null
+      reason: string | null
     }
 
 const BUCKET_META: Array<{ id: ValidationVerdict; label: string; tone: string }> = [
@@ -67,6 +89,13 @@ export function PipelineTheater() {
   const signals = useStore((s) => s.keywordSignals)
   const ideas = useStore((s) => s.ideas)
   const setValidation = useStore((s) => s.setValidation)
+  const scrapeRunning = useStore((s) => s.scrapeRun.running)
+  const runSummary = useStore((s) => s.scrapeRun.summary)
+  const liveCaptures = useStore((s) => s.scrapeRun.captures)
+  const liveLanes = useStore((s) => s.scrapeRun.lanes)
+  const liveVerdicts = useStore((s) => s.scrapeRun.verdicts)
+  const liveNotes = useStore((s) => s.scrapeRun.notes)
+  const keywordCount = useStore((s) => s.keywords.filter((k) => k.active).length)
   const setPage = useStore((s) => s.setPage)
 
   const [tick, setTick] = useState(0)
@@ -74,6 +103,7 @@ export function PipelineTheater() {
   const [filter, setFilter] = useState<string | null>(null)
   const [resolved, setResolved] = useState<Record<string, string>>({})
   const feedRef = useRef<HTMLDivElement | null>(null)
+  // The 3D graph needs WebGL; without it the SVG graph is the same picture.
 
   /**
    * The script is derived once from state, then revealed by the clock. The
@@ -89,17 +119,26 @@ export function PipelineTheater() {
         keyword: item.keyword_term ?? '—',
         source: item.source_name ?? 'crawl4ai',
         title: item.title,
-        engagement: item.engagement,
+        platform: item.platform,
+        engagement: item.metrics_available ? item.engagement : null,
         relevance: item.relevance,
+        held: null,
       })
     }
 
-    rows.push({
-      kind: 'note',
-      id: 'note-handoff',
-      text: 'Scraping Agent finished. Handing 42 items and 60 hashtag candidates to Validation.',
-      tone: 'ok',
-    })
+    // The hand-off is only stated when there is something to hand off, and the
+    // figures are the ones actually held. A fixed sentence here claimed a
+    // capture that never happened and contradicted every counter on screen.
+    if (scraped.length > 0) {
+      rows.push({
+        kind: 'note',
+        id: 'note-handoff',
+        text:
+          `Sherlock finished scraping. Handing ${scraped.length} item${scraped.length === 1 ? '' : 's'} ` +
+          `and ${topHashtags.length} hashtag candidate${topHashtags.length === 1 ? '' : 's'} to Dexter.`,
+        tone: 'ok',
+      })
+    }
 
     for (const item of scraped.slice(0, 22)) {
       rows.push({
@@ -122,18 +161,121 @@ export function PipelineTheater() {
     }
 
     return rows
-  }, [scraped])
+  }, [scraped, topHashtags.length])
+
+  /**
+   * What the run itself reported, in arrival order: each lane as it opens and
+   * each page as it lands. This is the scraping agent's actual work, so it is
+   * shown as it happens rather than replayed on a clock — a virtual clock over
+   * a stored snapshot cannot show a capture that is happening now.
+   */
+  const liveRows = useMemo(() => {
+    const rows: FeedRow[] = []
+    for (const lane of liveLanes) {
+      rows.push({
+        kind: 'lane',
+        id: `lane-${lane.id}`,
+        keyword: lane.keyword,
+        platform: lane.platform,
+        status: lane.status,
+        kept: lane.kept,
+        captured: lane.captured,
+        reason: lane.reason,
+      })
+    }
+    for (const capture of liveCaptures) {
+      rows.push({
+        kind: 'capture',
+        id: `live-${capture.id}`,
+        keyword: capture.keyword,
+        source: capture.source,
+        title: capture.title,
+        platform: (PLATFORMS as readonly string[]).includes(capture.platform)
+          ? (capture.platform as Platform)
+          : null,
+        // A crawled page carries no reaction count and none is invented.
+        engagement: null,
+        relevance: capture.relevance ?? 0,
+        held: capture.held,
+      })
+    }
+    // Each stage's own conclusion, including the reason it produced nothing.
+    for (const note of liveNotes) {
+      rows.push({ kind: 'note', id: `note-${note.id}`, text: note.message, tone: note.status })
+    }
+    // A page held back already carries the verdict an earlier run gave it. That
+    // verdict is on record, so it is shown and routed into its bucket — marked
+    // as on record, never passed off as this run's scoring.
+    for (const capture of liveCaptures) {
+      if (capture.held === null || capture.held.verdict === 'pending') continue
+      rows.push({
+        kind: 'verdict',
+        id: `heldver-${capture.id}`,
+        entityId: capture.held.originalId || capture.id,
+        verdict: capture.held.verdict,
+        title: capture.title,
+        reason: capture.held.reason,
+        onRecord: timeAgo(capture.held.since),
+      })
+    }
+    // Verdicts sit after the captures they judge, so the feed reads in the
+    // order the pipeline actually works: capture, then score.
+    for (const verdict of liveVerdicts) {
+      rows.push({
+        kind: 'verdict',
+        id: `livever-${verdict.id}`,
+        entityId: verdict.id,
+        verdict: verdict.verdict,
+        title: verdict.title,
+        reason: verdict.reason,
+      })
+    }
+    return rows
+  }, [liveLanes, liveCaptures, liveVerdicts, liveNotes])
+
+  // A run that has reported anything owns the feed. Only when it has reported
+  // nothing at all does the theater fall back to replaying what is stored.
+  const live = liveRows.length > 0
+  // Pages the scraping stage held back never reach Dexter. Counting them
+  // apart is what lets the graph say "0 new" instead of an unexplained "Done".
+  const heldCount = liveCaptures.filter((c) => c.held !== null).length
+  const handedOver = liveCaptures.length - heldCount
 
   // The scraping half runs to 45%, validation to 100%.
   const revealed = Math.min(script.length, Math.floor(tick / 4))
-  const finished = revealed >= script.length
-  const progress = finished ? 100 : Math.round((revealed / Math.max(1, script.length)) * 100)
+  // The feed replays what the store holds, on a clock. The run is the API's,
+  // and takes as long as the crawl takes. "Complete" is said only when both
+  // are true: a feed that has caught up while Sherlock is still capturing is
+  // caught up, not complete — and the bar holds short of full to say so.
+  const caughtUp = revealed >= script.length
+  const finished = live ? !scrapeRunning : caughtUp && !scrapeRunning
+  const shown = caughtUp && !finished ? Math.max(0, script.length - 1) : revealed
 
+  // Live progress is lanes settled over lanes opened — the run's own unit of
+  // work. It is never a timer, so the bar cannot run ahead of the crawl.
+  const settledLanes = liveLanes.filter((l) => l.status !== 'running').length
+  const liveProgress =
+    liveVerdicts.length > 0
+      ? // Scoring: verdicts returned over pages captured.
+        Math.round((liveVerdicts.length / Math.max(1, liveCaptures.length)) * 100)
+      : Math.round((settledLanes / Math.max(1, liveLanes.length)) * 100)
+  const progress = finished
+    ? 100
+    : live
+      ? Math.min(100, liveProgress)
+      : Math.round((shown / Math.max(1, script.length)) * 100)
+
+  // A live run is scoring once the first verdict lands, so the stage follows the
+  // run rather than a tick count.
   const stage: 'scrape' | 'validate' | 'done' = finished
     ? 'done'
-    : revealed < 28
-      ? 'scrape'
-      : 'validate'
+    : live
+      ? liveVerdicts.length > 0
+        ? 'validate'
+        : 'scrape'
+      : revealed < 28
+        ? 'scrape'
+        : 'validate'
 
   useEffect(() => {
     if (!theaterOpen) {
@@ -170,7 +312,7 @@ export function PipelineTheater() {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' })
   }, [revealed, paused])
 
-  const rows = script.slice(0, revealed)
+  const rows = live ? liveRows : script.slice(0, revealed)
 
   const filtered = filter
     ? rows.filter((row) => {
@@ -186,6 +328,23 @@ export function PipelineTheater() {
   }))
 
   const sources: GraphSource[] = useMemo(() => {
+    // While a run reports, the source nodes are the keywords that run is
+    // actually working — not the keywords already stored, which is why the
+    // graph stood empty on a first run with nothing captured yet.
+    if (live) {
+      const terms = [...new Set(liveLanes.map((l) => l.keyword))].slice(0, 6)
+      return terms.map((term) => {
+        const lanes = liveLanes.filter((l) => l.keyword === term)
+        const kept = lanes.reduce((sum, l) => sum + (l.kept ?? 0), 0)
+        const working = lanes.some((l) => l.status === 'running')
+        return {
+          id: term,
+          label: term,
+          count: kept,
+          status: working ? 'working' : 'done',
+        }
+      })
+    }
     const names = [...new Set(scraped.map((s) => s.keyword_term ?? 'unknown'))].slice(0, 6)
     return names.map((name, i) => {
       const captured = rows.filter((row) => row.kind === 'capture' && row.keyword === name).length
@@ -196,20 +355,72 @@ export function PipelineTheater() {
         status: stage === 'done' || captured > 3 ? 'done' : captured > 0 ? 'working' : i === 0 ? 'working' : 'idle',
       }
     })
-  }, [scraped, rows, stage])
+  }, [scraped, rows, stage, live, liveLanes])
 
   const narration = useMemo(() => {
     if (stage === 'scrape') {
       const captured = rows.filter((r) => r.kind === 'capture').length
-      return `Scraping Agent: ${captured} posts captured across twelve keywords.`
+      if (live) {
+        const open = liveLanes.filter((l) => l.status === 'running').length
+        const empty = liveLanes.filter((l) => l.status === 'warn').length
+        const terms = new Set(liveLanes.map((l) => l.keyword)).size
+        // An empty lane is a finding about that lane, so it is counted out
+        // loud rather than folded into a total that reads as failure.
+        return (
+          `Sherlock: ${captured} page${captured === 1 ? '' : 's'} kept from ` +
+          `${liveLanes.length} lane${liveLanes.length === 1 ? '' : 's'} across ` +
+          `${terms} keyword${terms === 1 ? '' : 's'}` +
+          (open > 0 ? ` · ${open} still working` : '') +
+          (empty > 0 ? ` · ${empty} came back empty` : '') +
+          '.'
+        )
+      }
+      return (
+        `Sherlock: ${captured} post${captured === 1 ? '' : 's'} captured across ` +
+        `${keywordCount} active keyword${keywordCount === 1 ? '' : 's'}.`
+      )
     }
     if (stage === 'validate') {
       const verdicts = rows.filter((r) => r.kind === 'verdict').length
       const review = buckets.find((b) => b.id === 'needs_review')?.count ?? 0
-      return `Validation Agent: ${verdicts} of ${scraped.length} items scored. ${review} are heading for review.`
+      const total = live ? liveCaptures.length : scraped.length
+      // Rule 6: a zero must name its cause. Everything captured being already
+      // held is a finding about the run, not a failure of the validation agent.
+      if (live && verdicts === 0) {
+        if (heldCount > 0 && handedOver === 0) {
+          const onRecord = rows.filter((r) => r.kind === 'verdict' && r.onRecord !== undefined)
+          const tally = (v: ValidationVerdict): number => onRecord.filter((r) => r.kind === 'verdict' && r.verdict === v).length
+          return (
+            `Dexter: nothing new to score — all ${heldCount} captured page${heldCount === 1 ? '' : 's'} ` +
+            `already carr${heldCount === 1 ? 'ies' : 'y'} a verdict from an earlier run: ` +
+            `${tally('validated')} validated, ${tally('needs_review')} need review, ` +
+            `${tally('duplicate')} duplicate, ${tally('rejected')} rejected.`
+          )
+        }
+        const why = liveNotes.find((n) => /filtered|already-captured|already captured/i.test(n.message))
+        return why
+          ? `Dexter had nothing new to score — ${why.message}`
+          : 'Dexter had nothing new to score: no page survived the capture stage.'
+      }
+      return (
+        `Dexter: ${verdicts} of ${total} item${total === 1 ? '' : 's'} scored. ` +
+        `${review} heading for review.`
+      )
     }
     return `Pipeline complete. Five keywords are trending and ${topHashtags.length} hashtags are queued for research.`
-  }, [stage, rows, buckets, scraped.length, topHashtags.length])
+  }, [stage, rows, buckets, scraped.length, topHashtags.length, live, liveLanes, liveCaptures.length, liveNotes, keywordCount, heldCount, handedOver])
+
+  /**
+   * Leaving the theater for a screen. The run is the server's and keeps going
+   * — closing this dialog stops the replay, not the crawl.
+   */
+  const leaveFor = useCallback(
+    (page: 'calendar' | 'intelligence'): void => {
+      closeTheater()
+      setPage(page)
+    },
+    [closeTheater, setPage],
+  )
 
   const resolveInline = useCallback(
     (entityId: string, verdict: ValidationVerdict) => {
@@ -232,17 +443,25 @@ export function PipelineTheater() {
         <div className="min-w-0">
           <h2 className="display text-[15px]">
             {stage === 'scrape'
-              ? 'Scraping LinkedIn for 12 keywords'
+              ? live
+                ? `Capturing across ${new Set(liveLanes.map((l) => l.platform)).size} lane${
+                    new Set(liveLanes.map((l) => l.platform)).size === 1 ? '' : 's'
+                  }`
+                : `Scraping ${keywordCount} active keyword${keywordCount === 1 ? '' : 's'}`
               : stage === 'validate'
-                ? 'Validation Agent at work'
+                ? live || !caughtUp
+                  ? 'Dexter at work'
+                  : 'Sherlock is still capturing live'
                 : 'Pipeline run complete'}
           </h2>
           <p className="text-[11px] text-ink-3">
             {stage === 'scrape'
               ? 'Every post is captured with its author, engagement and hashtags before anything is scored.'
               : stage === 'validate'
-                ? 'Every candidate gets exactly one verdict, and every verdict names its evidence.'
-                : 'The Calendar Agent placed the strongest trends into the week.'}
+                ? live || !caughtUp
+                  ? 'Every candidate gets exactly one verdict, and every verdict names its evidence.'
+                  : 'The feed has caught up with the store. Nothing is declared complete until the run returns.'
+                : 'Dora placed the strongest trends into the week.'}
           </p>
         </div>
 
@@ -258,6 +477,10 @@ export function PipelineTheater() {
               )
             })}
           </span>
+
+          <Btn variant="subtle" onClick={() => leaveFor('calendar')}>
+            <CalendarDays size={13} /> Weekly Calendar
+          </Btn>
 
           <Btn variant="ghost" onClick={() => setPaused(!paused)}>
             {paused ? <Play size={13} /> : <Pause size={13} />}
@@ -291,6 +514,27 @@ export function PipelineTheater() {
               buckets={buckets}
               scrapingStatus={stage === 'scrape' ? 'working' : 'done'}
               validationStatus={stage === 'validate' ? 'working' : stage === 'done' ? 'done' : 'idle'}
+              validationLabel={
+                live && finished && liveVerdicts.length === 0
+                  ? heldCount > 0
+                    ? 'On record'
+                    : 'Nothing to score'
+                  : undefined
+              }
+              handoffLabel={
+                live
+                  ? // Only once the hold-back has been reported; before that the
+                    // count would be every capture and then fall, which is not
+                    // information, it is noise.
+                    heldCount > 0 || liveVerdicts.length > 0 || finished
+                    ? heldCount > 0
+                      ? `${handedOver} new · ${heldCount} on record`
+                      : `${handedOver} new to score`
+                    : undefined
+                  : stage === 'scrape'
+                    ? undefined
+                    : `${rows.filter((r) => r.kind === 'capture').length} to score`
+              }
               paused={paused}
               activeFilter={filter}
               onFilter={setFilter}
@@ -304,6 +548,13 @@ export function PipelineTheater() {
                 {meta.label}
               </span>
             ))}
+            {live && finished && liveVerdicts.length === 0 && heldCount > 0 ? (
+              <span className="basis-full text-ink-2">
+                All {heldCount} captured page{heldCount === 1 ? '' : 's'} {heldCount === 1 ? 'was' : 'were'} already on record
+                from a recent run, so nothing new reached Dexter. The buckets show the verdicts those pages already carry,
+                each marked in the feed with when it was first captured.
+              </span>
+            ) : null}
             <span className="ml-auto">Click a source or a bucket to filter the feed.</span>
           </div>
 
@@ -345,10 +596,7 @@ export function PipelineTheater() {
               resolved={resolved}
               onResolve={resolveInline}
               onFilter={setFilter}
-              onNavigate={(page) => {
-                closeTheater()
-                setPage(page)
-              }}
+              onNavigate={leaveFor}
               onClose={closeTheater}
             />
           ) : null}
@@ -365,6 +613,12 @@ export function PipelineTheater() {
             {rows.filter((r) => r.kind === 'verdict').length} scored ·{' '}
             {buckets.find((b) => b.id === 'needs_review')?.count ?? 0} for review
           </span>
+          {finished && runSummary ? (
+            <span className="tabular text-ink-2">
+              This run · {runSummary.postsScraped ?? 0} captured live · {runSummary.duplicate ?? 0} already held ·{' '}
+              {runSummary.trending ?? 0} trending · {runSummary.ideas ?? 0} ideas placed
+            </span>
+          ) : null}
           <span className="ml-auto rounded-full border border-line px-2 py-0.5">Space · pause</span>
         </div>
       </footer>
@@ -407,14 +661,65 @@ function FeedItem({
 
   if (row.kind === 'capture') {
     return (
-      <div className="anim-stream-in flex flex-wrap items-center gap-2 rounded-lg border border-line px-3 py-1.5">
+      <div
+        className={`anim-stream-in flex flex-wrap items-center gap-2 rounded-lg border border-line px-3 py-1.5 ${
+          row.held ? 'opacity-70' : ''
+        }`}
+      >
         <span className="rounded-full border border-line px-2 py-0.5 text-[10px] text-ink-3">{row.keyword}</span>
-        <PlatformIcon platform="linkedin" size={12} />
+        {row.platform === null ? (
+          <span className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3">Open web</span>
+        ) : (
+          <PlatformIcon platform={row.platform} size={12} />
+        )}
         <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2">{row.title}</span>
-        <span className="tabular text-[11px] text-ink-3">{fmt(row.engagement)}</span>
-        <span className="tabular rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3">
-          Rel {row.relevance}%
+        <span
+          className="tabular text-[11px] text-ink-3"
+          title={row.engagement === null ? 'The source stated no engagement figures' : undefined}
+        >
+          {row.engagement === null ? 'N/A' : fmt(row.engagement)}
         </span>
+        {row.held ? (
+          <span
+            className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3"
+            title={row.held.originalTitle ? `On record as “${row.held.originalTitle}”` : undefined}
+          >
+            Already held · captured {timeAgo(row.held.since)}
+          </span>
+        ) : (
+          <span className="tabular rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3">
+            Rel {row.relevance}%
+          </span>
+        )}
+      </div>
+    )
+  }
+
+  if (row.kind === 'lane') {
+    const laneLabel = row.platform === 'open-web' ? 'Open web' : row.platform
+    const tone =
+      row.status === 'warn'
+        ? 'border-warn/40 bg-warn/8'
+        : row.status === 'running'
+          ? 'border-accent/35 bg-accent/6'
+          : 'border-line'
+    return (
+      <div className={`anim-stream-in flex flex-wrap items-center gap-2 rounded-lg border px-3 py-1.5 ${tone}`}>
+        <span className="rounded-full border border-line px-2 py-0.5 text-[10px] capitalize text-ink-3">
+          {laneLabel}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2">{row.keyword}</span>
+        {row.status === 'running' ? (
+          <span className="text-[11px] text-accent-bright">capturing…</span>
+        ) : row.status === 'warn' ? (
+          <span className="truncate text-[11px] text-warn" title={row.reason ?? undefined}>
+            nothing captured{row.reason === null ? '' : ` · ${row.reason}`}
+          </span>
+        ) : (
+          <span className="tabular text-[11px] text-ink-3">
+            {row.kept ?? 0} kept{row.captured === null ? '' : ` of ${row.captured}`}
+          </span>
+        )}
       </div>
     )
   }
@@ -464,6 +769,14 @@ function FeedItem({
         >
           {style.label}
         </span>
+        {row.onRecord ? (
+          <span
+            className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3"
+            title="Reached by an earlier run. Not re-scored this run."
+          >
+            On record · captured {row.onRecord}
+          </span>
+        ) : null}
       </div>
 
       {row.reason ? <p className="mt-1 text-[11px] leading-relaxed text-ink-3">{row.reason}</p> : null}
@@ -521,7 +834,7 @@ function CompletionPanel({
     <section className="anim-fade-up card mt-3 p-4">
       <h3 className="display text-sm">Pipeline run complete</h3>
       <p className="mt-0.5 text-[12px] text-ink-3">
-        The Calendar Agent placed the strongest trends into the week.
+        Dora placed the strongest trends into the week.
       </p>
 
       <div className="mt-3">

@@ -1,4 +1,4 @@
-"""Typed input and output for the Research Agent."""
+"""Typed input and output for the Scraping Agent."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from pydantic import BaseModel, Field
 from core.schema import HashtagCandidate, RawPost, SourceMode
 
 
-class ResearchInput(BaseModel):
+class ScrapingInput(BaseModel):
     keywords: list[str] = Field(description="The keyword set to scan, in weight order.")
 
 
-class ResearchOutput(BaseModel):
+class ScrapingOutput(BaseModel):
     posts: list[RawPost] = Field(default_factory=list)
     hashtag_candidates: list[HashtagCandidate] = Field(default_factory=list)
     post_count: int = 0

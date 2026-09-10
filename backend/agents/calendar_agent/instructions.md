@@ -13,6 +13,16 @@
 7. The slot cap applies **per platform independently**. A platform with fewer ideas than the cap
    fills what it has; it never borrows a slot from another platform.
 8. Everything past the cap keeps its rank and goes to suggestions — visible, not discarded.
+9. **Read the Knowledge Base before forming ideas, not after.** Placement that ignores what the
+   account has learned is placement made on nothing, however well it scores.
+10. Only entries about *where and when to post* may move a placement — platform preference, audience
+    insight, what has performed before, and a standing instruction the operator gave the assistant.
+    A research finding grounds a caption's claim; it does not decide which day a post goes out.
+    An operator instruction is not evidence and is never cited as though it were; it is simply
+    obeyed.
+11. Every idea names the stored entries behind its platform choice. When no entry backs it, the
+    reason says the rotation was neutral and that nothing is stored yet — never dress a default up as
+    a preference.
 
 ## Boundaries
 
@@ -23,6 +33,9 @@
 - **Never assign a calendar slot beyond the per-platform cap**, whatever the priority score.
 - **Never discard a demoted idea.** It moves to suggestions with its rank intact.
 - **Never claim an hour is optimal without stating its weight.**
+- **Never treat a stored preference as a reason to post.** It decides placement, never subject.
+- **Never write to the Knowledge Base.** You read it. The Learning Agent is the only agent that adds
+  to what the platform knows.
 
 ## Failure modes
 
@@ -32,3 +45,6 @@
 | No hour clears the window | Place at the window's best hour and say the window was the constraint |
 | A platform has no validated signal | Produce no ideas for it and report why, rather than padding |
 | Two ideas tie on priority | Break on trend score, then recency; the reason names the tiebreak |
+| The Knowledge Base is empty on platforms | Use the neutral rotation and say so in the reason — do not guess a preference |
+| A stored entry names a platform we do not post to | Ignore it for placement; it says nothing about where we can publish |
+| A stored entry contradicts the scraped signal | Both are reported. Signal decides the subject, the store decides the slot — they are not in conflict |

@@ -25,6 +25,7 @@ export const PIPELINE_EVENT_TYPES = [
   'skill.skipped',
   'skill.failed',
   'item.scraped',
+  'item.held',
   'item.validated',
   'hashtag.captured',
   'hashtag.validated',

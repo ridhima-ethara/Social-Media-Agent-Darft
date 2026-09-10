@@ -50,6 +50,16 @@ export interface CommandRequest {
   conversationId?: string
   actor: string
   role: 'marketing' | 'leadership'
+  /** The post the screen has in focus, so "this" needs no follow-up question. */
+  focus?: AssistantFocus
+}
+
+/** What a screen-embedded assistant declares it is looking at. */
+export interface AssistantFocus {
+  type: string
+  id: string
+  title?: string
+  platform?: string
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

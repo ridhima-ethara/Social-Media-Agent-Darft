@@ -449,6 +449,34 @@ body {
   }
 }
 
+/* ── The boot emblem ──────────────────────────────────────────────────────────
+   Social-media grammar rather than HUD grammar: a story ring that turns, and
+   broadcast pulses that swell and fade. Both are plain keyframes, so the
+   reduced-motion block at the end of this file neutralises them. */
+
+@keyframes boot-story-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes boot-broadcast {
+  0% {
+    transform: scale(0.84);
+    opacity: 0;
+  }
+  22% {
+    opacity: 0.42;
+  }
+  100% {
+    transform: scale(1.42);
+    opacity: 0;
+  }
+}
+
 @keyframes ring-spin {
   from {
     transform: rotate(0deg);
@@ -596,16 +624,6 @@ body {
   }
 }
 
-@keyframes neural-twinkle {
-  0%,
-  100% {
-    opacity: 0.14;
-  }
-  50% {
-    opacity: 0.6;
-  }
-}
-
 @keyframes neural-flow {
   from {
     stroke-dashoffset: 40;
@@ -626,48 +644,12 @@ body {
   }
 }
 
-@keyframes neural-halo {
-  0%,
-  100% {
-    opacity: 0.25;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.7;
-    transform: scale(1.16);
-  }
-}
-
 @keyframes neural-transit {
   from {
     transform: translateX(-100%);
   }
   to {
     transform: translateX(100%);
-  }
-}
-
-@keyframes edge-hot {
-  0%,
-  100% {
-    opacity: 0.55;
-    stroke-width: 1.5;
-  }
-  50% {
-    opacity: 1;
-    stroke-width: 2.6;
-  }
-}
-
-@keyframes bucket-land {
-  0% {
-    transform: scale(1);
-  }
-  40% {
-    transform: scale(1.1);
-  }
-  100% {
-    transform: scale(1);
   }
 }
 
@@ -857,10 +839,12 @@ body {
     transform: translateY(0);
   }
   50% {
-    transform: translateY(-9px);
+    transform: translateY(-4px);
   }
 }
 
+/* The halo breathes; it does not pulse. Half the travel, a third of the
+   contrast, twice the period — a thing that is alive rather than alarmed. */
 @keyframes auth-halo {
   0%,
   100% {
@@ -868,8 +852,8 @@ body {
     transform: scale(1);
   }
   50% {
-    opacity: 0.72;
-    transform: scale(1.07);
+    opacity: 0.5;
+    transform: scale(1.03);
   }
 }
 
@@ -877,11 +861,11 @@ body {
   0%,
   100% {
     transform: translate3d(0, 0, 0);
-    opacity: 0.5;
+    opacity: 0.55;
   }
   50% {
-    transform: translate3d(26px, -20px, 0);
-    opacity: 0.85;
+    transform: translate3d(14px, -10px, 0);
+    opacity: 0.7;
   }
 }
 
@@ -987,6 +971,47 @@ body {
   }
   to {
     offset-distance: 100%;
+    opacity: 0;
+  }
+}
+
+/* A stage lighting: a pop that settles, not a twitch. */
+@keyframes boot-stage-light {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.16);
+  }
+  100% {
+    transform: scale(1.03);
+  }
+}
+
+/* The emblem settling into place at the top of the assembly beat. */
+@keyframes boot-settle {
+  from {
+    transform: scale(0.72);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+/* One slow highlight crossing the primary action, most of the cycle at rest. */
+@keyframes boot-sheen {
+  0%,
+  58% {
+    transform: translateX(-140%) skewX(-18deg);
+    opacity: 0;
+  }
+  66% {
+    opacity: 0.7;
+  }
+  100% {
+    transform: translateX(260%) skewX(-18deg);
     opacity: 0;
   }
 }
@@ -1249,6 +1274,19 @@ body {
 .anim-pulse-dot {
   animation: pulse-dot 1.4s var(--ease-in-out-soft) infinite;
 }
+.boot-cta {
+  position: relative;
+  overflow: hidden;
+}
+.boot-cta::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 38%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-accent) 24%, transparent), transparent);
+  animation: boot-sheen 5.4s var(--ease-in-out-soft) 1.4s infinite;
+}
 .anim-ping-slow {
   animation: ping-slow 2.2s var(--ease-out-soft) infinite;
 }
@@ -1267,9 +1305,6 @@ body {
 }
 .anim-count-up {
   animation: count-up 400ms var(--ease-out-expo) both;
-}
-.anim-bucket-land {
-  animation: bucket-land 420ms var(--ease-out-soft);
 }
 .anim-neural-transit {
   animation: neural-transit 900ms var(--ease-in-out-soft) infinite;
@@ -1524,14 +1559,285 @@ body {
   stroke-dasharray: 6 8;
   animation: nn-dashflow 1.6s linear infinite;
 }
-.edge-hot {
-  animation: edge-hot 1.2s var(--ease-in-out-soft) infinite;
+/* ═══════════════════════════════════════════════════════════════════════════
+   ORCHESTRATION SCENE — the 3D network's HTML layer
+   Everything readable is HTML over the canvas; the canvas only draws light.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.orch-stage {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 100%, var(--color-hud), transparent 70%),
+    radial-gradient(ellipse 40% 35% at 12% 20%, var(--color-hud-glow), transparent 70%),
+    radial-gradient(ellipse 40% 35% at 88% 25%, var(--color-hud), transparent 70%),
+    var(--color-page);
 }
-.node-halo {
-  animation: neural-halo 2.6s var(--ease-in-out-soft) infinite;
+.orch-stage::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--color-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-line) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 70% 70% at 50% 45%, black 20%, transparent 80%);
+  opacity: 0.35;
 }
-.twinkle {
-  animation: neural-twinkle 9s var(--ease-in-out-soft) infinite;
+
+/* Stage headings float above each column. */
+.orch-stage-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  white-space: nowrap;
+  user-select: none;
+}
+.orch-stage-step {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+.orch-stage-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-ink-2);
+}
+.orch-stage-name-command {
+  color: var(--color-magenta-ink);
+}
+
+/* Agent labels sit beneath each core. */
+.orch-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+  user-select: none;
+  transition: transform var(--dur-base) var(--ease-out-soft);
+}
+.orch-label-hover,
+.orch-label-focused {
+  transform: translateY(2px) scale(1.06);
+}
+.orch-label-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.orch-label-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  border: 1px solid var(--color-line-strong);
+  background: color-mix(in srgb, var(--color-surface) 70%, transparent);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--color-ink-2);
+  backdrop-filter: blur(6px);
+}
+.orch-label-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-ink);
+  text-shadow: 0 1px 8px var(--color-page);
+}
+.orch-label-real {
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--color-ink-3);
+}
+.orch-label-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  color: var(--color-ink-3);
+}
+.orch-status-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+}
+.orch-status-running {
+  color: var(--color-accent-bright);
+}
+.orch-status-completed {
+  color: var(--color-good-ink);
+}
+.orch-status-failed {
+  color: var(--color-critical-ink);
+}
+.orch-status-needs_review {
+  color: var(--color-serious);
+}
+.orch-status-waiting {
+  color: var(--color-magenta-ink);
+}
+
+/* The memory core's caption. */
+.orch-memory-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+  user-select: none;
+}
+.orch-memory-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-accent-bright);
+}
+.orch-memory-sub {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+.orch-memory-state {
+  margin-top: 2px;
+  font-size: 9.5px;
+  color: var(--color-ink-3);
+  transition: color var(--dur-base) var(--ease-out-soft);
+}
+.orch-memory-label-busy .orch-memory-state {
+  color: var(--color-accent-bright);
+}
+
+/* The hover HUD: glass, near the pointer, never under it. */
+.orch-hud {
+  position: absolute;
+  z-index: 30;
+  width: 240px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--color-hud-strong);
+  background: color-mix(in srgb, var(--color-surface) 78%, transparent);
+  box-shadow:
+    0 12px 40px -18px var(--color-glow),
+    inset 0 1px 0 color-mix(in srgb, var(--color-ink) 8%, transparent);
+  backdrop-filter: blur(14px) saturate(1.2);
+  pointer-events: none;
+  animation: orch-hud-in var(--dur-base) var(--ease-out-expo) both;
+}
+@keyframes orch-hud-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* The completion card: rises, holds, and lets go. */
+.orch-complete {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  animation: orch-complete 5.4s var(--ease-in-out-soft) both;
+}
+.orch-complete-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 26px 40px;
+  border-radius: 20px;
+  border: 1px solid var(--color-hud-strong);
+  background: color-mix(in srgb, var(--color-surface) 70%, transparent);
+  box-shadow: 0 30px 90px -30px var(--color-glow);
+  backdrop-filter: blur(18px) saturate(1.3);
+  text-align: center;
+}
+.orch-complete-brand {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--color-magenta-ink);
+}
+.orch-complete-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-ink);
+}
+.orch-complete-meta {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+.orch-complete-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 50% 45% at 50% 50%, var(--color-hud-glow), transparent 70%);
+  animation: orch-complete-glow 5.4s var(--ease-in-out-soft) both;
+}
+@keyframes orch-complete {
+  0%,
+  32% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  42%,
+  82% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.02);
+  }
+}
+@keyframes orch-complete-glow {
+  0%,
+  20% {
+    opacity: 0;
+  }
+  45%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.orch-hint {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  z-index: 20;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--color-line);
+  background: color-mix(in srgb, var(--color-surface) 60%, transparent);
+  font-size: 10px;
+  color: var(--color-ink-3);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1562,5 +1868,13 @@ body {
   .scanline,
   .bg-live {
     display: none !important;
+  }
+
+  .orch-complete,
+  .orch-complete-glow,
+  .orch-hud {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
   }
 }

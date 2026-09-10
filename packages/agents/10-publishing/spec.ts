@@ -17,9 +17,9 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'publishing',
-  name: 'Publishing Agent',
+  name: 'Mickey',
   stage: 'ship',
-  role: 'Validates format, dispatches, records a receipt.',
+  role: 'Publishing Agent · Validates format, dispatches, records a receipt.',
   description:
     'The only agent that may write a published status, and only after a real dispatch succeeded. Refuses without both approvals. Never retries an irreversible action automatically.',
   consumes: [

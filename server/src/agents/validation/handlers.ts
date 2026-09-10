@@ -508,6 +508,11 @@ registerSkill<PipelinePayload>('validation.verdict.route', (payload, ctx) => {
   const { acceptThreshold, rejectThreshold } = thresholds
 
   const buckets: BucketCounts = { validated: 0, needs_review: 0, duplicate: 0, rejected: 0 }
+  // Items and hashtags are judged by the same rules but are different
+  // things, and the theater's four buckets count items. Folding hashtag
+  // verdicts into the same totals made the run's own note contradict the
+  // buckets beside it.
+  const hashtagBuckets: BucketCounts = { validated: 0, needs_review: 0, duplicate: 0, rejected: 0 }
 
   const posts = payload.posts ?? []
   for (const post of posts) {
@@ -577,7 +582,7 @@ registerSkill<PipelinePayload>('validation.verdict.route', (payload, ctx) => {
     })
     candidate.validation = verdict.validation
     candidate.verdictReason = verdict.reason
-    buckets[verdict.validation] += 1
+    hashtagBuckets[verdict.validation] += 1
 
     ctx.emit('hashtag.validated', `#${candidate.displayTag}`, {
       tag: candidate.tag,
@@ -589,15 +594,27 @@ registerSkill<PipelinePayload>('validation.verdict.route', (payload, ctx) => {
 
   ctx.emit(
     'activity',
-    `Verdicts: ${buckets.validated} validated, ${buckets.needs_review} need review, ${buckets.duplicate} duplicate, ${buckets.rejected} rejected`,
-    { status: buckets.needs_review > 0 ? 'warn' : 'ok', ...buckets },
+    posts.length === 0
+      ? `No items reached scoring this run. Hashtags: ${describe(hashtagBuckets)}`
+      : `Items: ${describe(buckets)} · Hashtags: ${describe(hashtagBuckets)}`,
+    {
+      status: buckets.needs_review > 0 || hashtagBuckets.needs_review > 0 ? 'warn' : 'ok',
+      items: posts.length,
+      ...buckets,
+      hashtags: hashtagBuckets,
+    },
   )
   ctx.log(
-    `${buckets.validated} validated · ${buckets.needs_review} needs review · ${buckets.duplicate} duplicate · ${buckets.rejected} rejected`,
+    `Items ${buckets.validated} validated · ${buckets.needs_review} needs review · ${buckets.duplicate} duplicate · ${buckets.rejected} rejected` +
+      ` · hashtags ${hashtagBuckets.validated} validated · ${hashtagBuckets.needs_review} needs review · ${hashtagBuckets.duplicate} duplicate · ${hashtagBuckets.rejected} rejected`,
   )
 
-  return { posts, hashtagCandidates: candidates, buckets }
+  return { posts, hashtagCandidates: candidates, buckets, hashtagBuckets }
 })
+
+function describe(b: BucketCounts): string {
+  return `${b.validated} validated, ${b.needs_review} need review, ${b.duplicate} duplicate, ${b.rejected} rejected`
+}
 
 interface RouteInput {
   isDuplicate: boolean

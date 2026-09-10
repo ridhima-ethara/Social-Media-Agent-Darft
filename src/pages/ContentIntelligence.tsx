@@ -1,4 +1,4 @@
-/**
+/** 
  * CONTENT INTELLIGENCE
  *
  * Everything the discovery half of the pipeline produced, with the evidence
@@ -7,7 +7,7 @@
  */
 
 import { useMemo, useState } from 'react'
-import { Check, Search, X, Sparkles, ArrowRight, Brain, ExternalLink, Download } from 'lucide-react'
+import { Check, Search, X, Sparkles, ArrowRight, Brain, ExternalLink, Download, Maximize2 } from 'lucide-react'
 import { API_BASE } from '../lib/api'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
@@ -91,7 +91,6 @@ export function ContentIntelligence() {
         title="Content Intelligence"
         subtitle="What the discovery pipeline found, why each candidate was scored the way it was, and what is still waiting on you."
         agents={['scraping', 'validation', 'analysis']}
-        askPrompt="What's trending this week?"
         actions={
           <>
             <Btn variant="ghost" onClick={() => void runValidation()} disabled={validating}>
@@ -110,20 +109,30 @@ export function ContentIntelligence() {
         }
       />
 
+      {/* The same strip as the dashboard's, and the same contract: it is the way
+          back into the run once the theater has been closed. */}
       {scrapeRun.running || validating ? (
-        <section className="anim-fade-in mb-4 rounded-xl border border-accent/40 bg-accent/8 px-4 py-3">
+        <button
+          type="button"
+          onClick={openTheater}
+          aria-label="Reopen the pipeline run screen"
+          className="anim-fade-in group mb-4 block w-full rounded-xl border border-accent/40 bg-accent/8 px-4 py-3 text-left transition-colors hover:border-accent hover:bg-accent/12 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-[12px] text-ink">
               {scrapeRun.running
-                ? `Scraping Agent · ${scrapeRun.currentKeyword || 'starting'}`
-                : 'Validation Agent · scoring candidates against the four-verdict gate'}
+                ? `Sherlock · ${scrapeRun.currentKeyword || 'starting'}`
+                : 'Dexter · scoring candidates against the four-verdict gate'}
             </p>
-            <p className="tabular text-[12px] text-ink-3">
+            <p className="tabular flex items-center gap-2 text-[12px] text-ink-3">
               {scrapeRun.running ? `${scrapeRun.found} items · ${scrapeRun.progress}%` : 'in progress'}
+              <span className="flex items-center gap-1 rounded-full border border-line px-1.5 py-0.5 text-[10px] transition-colors group-hover:border-accent group-hover:text-accent-bright">
+                <Maximize2 size={10} aria-hidden="true" /> Open run
+              </span>
             </p>
           </div>
           <Progress value={scrapeRun.running ? scrapeRun.progress : 45} className="mt-2" />
-        </section>
+        </button>
       ) : null}
 
       <Tabs<TabId>
@@ -435,7 +444,7 @@ function ScrapedTab() {
       <EmptyState
         icon={<Search size={22} />}
         title="Nothing captured yet"
-        body="Run discovery and the Scraping Agent will surface LinkedIn posts across the active keyword set."
+        body="Run discovery and Sherlock will surface LinkedIn posts across the active keyword set."
         action={
           <PlayButton
             label="Run SocialAI"
@@ -677,7 +686,7 @@ function AnalysisTab() {
               <Btn
                 variant="primary"
                 onClick={() => {
-                  toast(`"${item.title}" queued for the Calendar Agent.`, 'good')
+                  toast(`"${item.title}" queued for Dora.`, 'good')
                   setPage('calendar')
                 }}
               >

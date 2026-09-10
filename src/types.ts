@@ -234,6 +234,10 @@ export interface Idea {
   source_item_id: string | null
   hashtag_id: string | null
   hashtag_display: string | null
+  source_url: string | null
+  source_title: string | null
+  source_name: string | null
+  hashtag_url: string | null
   title: string
   description: string | null
   source_topic: string | null
@@ -597,6 +601,24 @@ export interface IntegrationStatus {
   reason: string
 }
 
+/**
+ * A file the operator attached for a model to work from when revising a caption
+ * or a creative.
+ *
+ * `text` OR `dataUri` carries the contents; when neither is present the file was
+ * attached by name only and `unreadableReason` says why, so the model is told
+ * what it does not have rather than being left to assume it has everything.
+ */
+export interface ModelReference {
+  id: string
+  name: string
+  mimeType: string
+  size: number
+  text?: string
+  dataUri?: string
+  unreadableReason?: string
+}
+
 export interface ApiHealth {
   ok: boolean
   database: string
@@ -629,6 +651,11 @@ export interface StatePayload {
   media: Record<string, MediaAsset>
   published: PublishedPost[]
   knowledge: KnowledgeEntry[]
+  /**
+   * The true totals. `knowledge` above is a capped page for rendering, so
+   * counting its length under-reports once the store passes the cap.
+   */
+  knowledgeCounts?: { total: number; active: number }
   knowledgeBuild: KnowledgeBuild | null
   agents: AgentState[]
   activity: ActivityEvent[]
@@ -661,12 +688,136 @@ export interface Toast {
   hint?: string
 }
 
+/**
+ * One captured page, as the run reported it over the event stream.
+ *
+ * This is the run's own account of its work, not a re-read of stored state:
+ * it exists so the theater can show capture as it happens rather than replay a
+ * snapshot after the fact. Nothing is inferred here — a field the run did not
+ * state stays null.
+ */
+export interface LiveCapture {
+  id: string
+  title: string
+  keyword: string
+  /** The lane it was captured on. `open-web` for the unscoped tier. */
+  platform: string
+  source: string
+  /** The alignment score the capture carried, or null if it stated none. */
+  relevance: number | null
+  /**
+   * Set when the scraping stage held the page back because it was already on
+   * record inside the look-back window. Not a verdict: the page never reached
+   * scoring. `since` is when the original was captured.
+   */
+  held: {
+    since: string
+    originalId: string
+    originalTitle: string
+    /** The verdict the earlier run gave the page. Shown as on record, never as fresh. */
+    verdict: ValidationVerdict
+    reason: string
+  } | null
+}
+
+/**
+ * One verdict, as the validation agent reported it.
+ *
+ * Every candidate gets exactly one, and every verdict names its evidence, so
+ * the reason travels with it rather than being re-derived on the client.
+ */
+export interface LiveVerdict {
+  id: string
+  title: string
+  verdict: ValidationVerdict
+  reason: string
+  relevance: number | null
+  credibility: string | null
+}
+
+/**
+ * An agent-level line from the run: what a skill concluded, in its own words.
+ *
+ * These carry the reason a stage produced nothing. Four zero buckets with no
+ * explanation reads as a failure; "15 already-captured pages filtered" reads
+ * as the finding it actually is.
+ */
+export interface LiveNote {
+  id: string
+  agentId: string
+  message: string
+  status: 'ok' | 'warn'
+}
+
+/** One keyword on one lane, and what that pairing has reported so far. */
+export interface LiveLane {
+  id: string
+  keyword: string
+  platform: string
+  status: 'running' | 'ok' | 'warn'
+  /** Pages kept. Null while the lane is still working. */
+  kept: number | null
+  /** Pages seen before the brand-alignment floor was applied. */
+  captured: number | null
+  /** Why a lane came back empty. Null unless it did. */
+  reason: string | null
+}
+
 export interface ScrapeRunState {
   running: boolean
   progress: number
   currentSource: string
   currentKeyword: string
   found: number
+  /**
+   * Which run the live rows below belong to. Latched from the first event that
+   * arrives, then held: more than one run can be in flight at once, and
+   * interleaving two of them would show a total that belongs to neither.
+   */
+  runId: string | null
+  /**
+   * Captures in the order the run reported them. Event-sourced, so an empty
+   * list means nothing was captured — never that nothing was looked at.
+   */
+  captures: LiveCapture[]
+  /** Per lane-and-keyword progress, so the operator sees WHERE work is going. */
+  lanes: LiveLane[]
+  /** Verdicts as they land, so the four buckets count real decisions. */
+  verdicts: LiveVerdict[]
+  /** Agent-level conclusions, in run order. */
+  notes: LiveNote[]
+  /**
+   * What the last connected run reported once it returned — captured, held
+   * as duplicate, trending, placed. Null while running, and after a
+   * standalone run, which measures nothing and so reports nothing.
+   */
+  summary: Record<string, number> | null
+}
+
+/**
+ * One run of the Python agent backend, as it narrates itself.
+ *
+ * There is no progress percentage here on purpose. The run advances when an
+ * agent actually starts or finishes, and `order` against `done` is the honest
+ * measure of how far along it is — a timer would only ever be a guess dressed
+ * as a fact.
+ */
+export interface AgentRunState {
+  running: boolean
+  /** The hand-off order the backend derived, as agent ids in its own namespace. */
+  order: string[]
+  done: string[]
+  current: AgentId | null
+  frames: AgentRunFrame[]
+  summary: Record<string, unknown> | null
+  /** What the run wrote to the database, once it has. */
+  persisted: Record<string, unknown> | null
+  error: string | null
+}
+
+export interface AgentRunFrame {
+  event: string
+  [key: string]: unknown
 }
 
 export type PublishPhase =
@@ -685,6 +836,8 @@ export interface Settings {
   autoScheduling: boolean
   autoPublish: boolean
   imageModel: string
+  /** Which model writes and revises captions. See `shared/text-models.ts`. */
+  captionModel: string
   topKeywords: number
   topHashtagsPerKeyword: number
   knowledgeHashtagCount: number

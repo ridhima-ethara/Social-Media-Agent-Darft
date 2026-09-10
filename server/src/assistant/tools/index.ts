@@ -10,7 +10,7 @@
  * structured `data` the rail renders.
  */
 
-import type { Platform } from '../../../../shared/agent-contract'
+import type { CalendarSlot, IdeaStatus, Platform } from '../../../../shared/agent-contract'
 import { TOOLS, TOOL_BY_ID, type ToolSpec } from '../../../../shared/tool-registry'
 import {
   checkBrandCompliance,
@@ -19,8 +19,10 @@ import {
 import { AGENTS, AGENT_BY_ID, SKILL_BY_ID, defaultSkillConfig } from '../../../../shared/agent-registry'
 import { config } from '../../config'
 import { PLATFORM_LABEL, monthLabelOf } from '../../agents/corpus'
+import { detectDay, detectMonth, detectTime } from '../intent'
 import { availableImageModels } from '../../agents/image/image-models/index'
 import { retrieveKnowledge } from '../../agents/knowledge/handlers'
+import { rememberDirective } from '../../agents/brain-bridge'
 import {
   applyInstruction,
   approveMarketing,
@@ -157,7 +159,9 @@ async function resolveIdea(
   }
 
   if (typeof args.day === 'string') {
-    const onDay = await listIdeas(ctx.workspaceId, { date: args.day, limit: 20 })
+    const { date, unreadable } = resolveDay(args.day)
+    if (unreadable) throw unreadableDay(unreadable)
+    const onDay = await listIdeas(ctx.workspaceId, { date, limit: 20 })
     const wanted = typeof args.platform === 'string' ? (args.platform as Platform) : undefined
     const filtered = wanted ? onDay.filter((i) => i.platform === wanted) : onDay
     const chosen = filtered.find((i) => i.calendar_slot === 'primary') ?? filtered[0]
@@ -816,10 +820,12 @@ tool('knowledge.toggle', async (args, ctx) => {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 tool('idea.list', async (args, ctx) => {
+  const day = resolveDay(args.day)
+  if (day.unreadable) throw unreadableDay(day.unreadable)
   const rows = await listIdeas(ctx.workspaceId, {
     ...(typeof args.platform === 'string' ? { platform: args.platform as Platform } : {}),
     ...(typeof args.status === 'string' ? { status: args.status as 'approved' } : {}),
-    ...(typeof args.day === 'string' ? { date: args.day } : {}),
+    ...(day.date === undefined ? {} : { date: day.date }),
     ...(typeof args.slot === 'string' ? { slot: args.slot as 'primary' } : {}),
     limit: typeof args.limit === 'number' ? args.limit : 60,
   })
@@ -856,8 +862,11 @@ tool('idea.list', async (args, ctx) => {
 tool('idea.move', async (args, ctx) => {
   const target = await resolveIdea(args, ctx)
   const patch: { scheduledDate?: string; scheduledTime?: string; platform?: Platform } = {}
-  if (typeof args.day === 'string') patch.scheduledDate = args.day
-  if (typeof args.time === 'string') patch.scheduledTime = args.time
+  const day = resolveDay(args.day)
+  if (day.unreadable) throw unreadableDay(day.unreadable)
+  if (day.date !== undefined) patch.scheduledDate = day.date
+  const time = resolveTime(args.time)
+  if (time !== undefined) patch.scheduledTime = time
   if (typeof args.platform === 'string') patch.platform = args.platform as Platform
 
   if (Object.keys(patch).length === 0) {
@@ -908,6 +917,116 @@ tool('idea.promote', async (args, ctx) => {
     render: 'text',
     entity: { id: idea.id, title: idea.title, platform: idea.platform, type: 'content_idea' },
     postcondition: { description: 'Calendar slot is primary', satisfied: updated?.calendar_slot === 'primary' },
+  }
+})
+
+/**
+ * Statuses this tool will not touch.
+ *
+ * An idea a human has approved, or that is scheduled or published, is not a
+ * planning suggestion any more — moving it would silently invalidate an
+ * approval or contradict something already live. Reshuffling reorders the part
+ * of the calendar that is still a plan, and says how much it left alone.
+ */
+const RESHUFFLE_FROZEN = new Set<IdeaStatus>([
+  'approved', 'scheduled', 'published', 'pending_leadership', 'rejected',
+])
+
+tool('calendar.reshuffle', async (args, ctx) => {
+  const preferred = typeof args.platform === 'string' ? (args.platform as Platform) : null
+  const instruction = typeof args.instruction === 'string' ? args.instruction.trim() : ''
+  const remember = args.remember !== false
+  const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
+
+  const all = await listIdeas(ctx.workspaceId, { limit: 200 })
+  const movable = all.filter((i) => !RESHUFFLE_FROZEN.has(i.status as IdeaStatus))
+  const frozen = all.length - movable.length
+
+  if (movable.length === 0) {
+    throw new Error(
+      all.length === 0
+        ? 'There is nothing on the calendar to reshuffle. Run the agents first.'
+        : `All ${all.length} idea(s) are approved, scheduled or published. Reshuffling would ` +
+          'undo an approval, so nothing was moved.',
+    )
+  }
+
+  // Favouring a platform means moving work onto it, not merely sorting it
+  // first — every platform fills its own cap independently, so a preference
+  // that did not move anything would change nothing at all.
+  const moved: string[] = []
+  if (preferred) {
+    for (const idea of movable) {
+      if (idea.platform === preferred) continue
+      await updateIdea(ctx.workspaceId, idea.id, { platform: preferred })
+      idea.platform = preferred
+      moved.push(idea.title)
+    }
+  }
+
+  // The cap re-applied from the priority scores the Calendar Agent computed.
+  // Nothing is re-scored here: this redraws the line, it does not re-judge
+  // what is above it.
+  const byPlatform = new Map<Platform, typeof movable>()
+  for (const idea of movable) {
+    const list = byPlatform.get(idea.platform as Platform) ?? []
+    list.push(idea)
+    byPlatform.set(idea.platform as Platform, list)
+  }
+
+  const slots: Array<{ platform: Platform; primary: number; suggestions: number }> = []
+  let promoted = 0
+  let demoted = 0
+
+  for (const [platform, rows] of byPlatform) {
+    rows.sort((a, b) => b.priority_score - a.priority_score || a.title.localeCompare(b.title))
+    for (const [index, idea] of rows.entries()) {
+      const slot: CalendarSlot = index < cap ? 'primary' : 'suggestion'
+      const rank = index + 1
+      if (idea.calendar_slot === slot && idea.platform_rank === rank) continue
+      if (idea.calendar_slot !== slot) slot === 'primary' ? (promoted += 1) : (demoted += 1)
+      await updateIdea(ctx.workspaceId, idea.id, { calendarSlot: slot, platformRank: rank })
+    }
+    slots.push({
+      platform,
+      primary: Math.min(cap, rows.length),
+      suggestions: Math.max(0, rows.length - cap),
+    })
+  }
+
+  // The Learning Agent's half. Without this the reshuffle holds until the next
+  // agent run and is then planned away, because the Calendar Agent would still
+  // know nothing about what was asked for.
+  let stored: Awaited<ReturnType<typeof rememberDirective>> | null = null
+  if (remember && (preferred || instruction)) {
+    const said = instruction || `Favour ${PLATFORM_LABEL[preferred as Platform]} on the calendar.`
+    stored = await rememberDirective(
+      preferred ? `Prefer ${PLATFORM_LABEL[preferred]} for calendar slots` : 'Calendar planning preference',
+      said,
+    )
+  }
+
+  const shape = slots
+    .map((s) => `${PLATFORM_LABEL[s.platform]} ${s.primary} on the calendar, ${s.suggestions} in suggestions`)
+    .join('; ')
+
+  return {
+    summary:
+      `Calendar reshuffled at ${cap} slots per platform — ${shape}.` +
+      (moved.length > 0 ? ` ${moved.length} idea(s) moved to ${PLATFORM_LABEL[preferred as Platform]}.` : '') +
+      (promoted + demoted > 0 ? ` ${promoted} promoted, ${demoted} moved to suggestions.` : ' Nothing changed slot.') +
+      (frozen > 0 ? ` ${frozen} approved or published idea(s) were left alone.` : '') +
+      (stored
+        ? stored.stored
+          ? ' The preference is stored, so the next agent run will plan the same way.'
+          : ` The preference was not stored — ${stored.reason}`
+        : ''),
+    data: { slots, cap, moved, promoted, demoted, frozen, remembered: stored },
+    render: 'text',
+    postcondition: {
+      description: `No platform holds more than ${cap} calendar slots`,
+      satisfied: slots.every((s) => s.primary <= cap),
+    },
   }
 })
 
@@ -1150,7 +1269,7 @@ tool('idea.approve.leadership', async (args, ctx) => {
   return {
     summary: published
       ? `“${idea.title}” is published to ${PLATFORM_LABEL[published.platform]} in ${published.publishMode} mode, receipt ${published.externalId}. ` +
-        `The Analytics Agent will report the first reading in about an hour. The approval is written to the Knowledge Base.`
+        `${AGENT_BY_ID.analytics.name} will report the first reading in about an hour. The approval is written to the Knowledge Base.`
       : `“${idea.title}” has final approval from ${by}. Auto-publish is off, so it is scheduled rather than live.`,
     data: { idea, published },
     render: 'text',
@@ -1217,9 +1336,53 @@ tool('idea.publish', async (args, ctx) => {
    ANALYTICS
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * A model answers "how did last month perform?" with `month: "last_month"` —
+ * the operator's words, not a key. Anything that is not already YYYY-MM goes
+ * through the same resolver the deterministic parser uses.
+ */
+/**
+ * The same for days. The model hands back "next monday" or "next_monday" —
+ * the operator's words — and a SQL DATE column will not take either. Anything
+ * not already YYYY-MM-DD goes through the resolver the deterministic parser
+ * uses, so a stored plan replays to the same date it was confirmed for.
+ */
+function resolveDay(raw: unknown): { date: string | undefined; unreadable: string | null } {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return { date: undefined, unreadable: null }
+  const text = raw.toLowerCase().replace(/_/g, ' ').trim()
+  const date = detectDay(text)
+  return date ? { date, unreadable: null } : { date: undefined, unreadable: raw }
+}
+
+function unreadableDay(raw: string): Error {
+  return new Error(
+    `I could not read “${raw}” as a day. Say a weekday, “tomorrow”, “next monday”, or a date like 2026-09-14.`,
+  )
+}
+
+/** "10:30 am", "morning" and "noon" all land on a posting-time label; an existing label passes through. */
+function resolveTime(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return undefined
+  return detectTime(raw.toLowerCase().replace(/_/g, ' ')) ?? raw.trim()
+}
+
+function resolveMonth(raw: unknown): { key: string | undefined; unreadable: string | null } {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return { key: undefined, unreadable: null }
+  const text = raw.toLowerCase().replace(/_/g, ' ').replace(/\bprevious month\b/, 'last month').replace(/\bcurrent month\b/, 'this month')
+  const key = detectMonth(text)
+  return key ? { key, unreadable: null } : { key: undefined, unreadable: raw }
+}
+
 tool('analytics.query', async (args, ctx) => {
   const platform = typeof args.platform === 'string' ? (args.platform as Platform) : undefined
-  const month = typeof args.month === 'string' ? args.month : undefined
+  const { key: month, unreadable } = resolveMonth(args.month)
+  if (unreadable) {
+    return {
+      summary: `I could not read “${unreadable}” as a month. Name it as YYYY-MM, a month name, or “last month”.`,
+      data: {},
+      render: 'text',
+    }
+  }
 
   const rows = await listPlatformAnalytics(ctx.workspaceId, {
     ...(platform ? { platform } : {}),
@@ -1227,17 +1390,42 @@ tool('analytics.query', async (args, ctx) => {
   })
 
   if (rows.length === 0) {
+    const scope = platform ? PLATFORM_LABEL[platform] : 'Every platform'
     const posts = await listPosts(ctx.workspaceId, { ...(platform ? { platform } : {}), limit: 60 })
     const inMonth = month ? posts.filter((p) => p.published_at?.startsWith(month)) : posts
+
+    if (inMonth.length === 0) {
+      // Nothing for the period asked — say what does exist rather than stopping at "no".
+      const reportedMonths = [...new Set((await listPlatformAnalytics(ctx.workspaceId, platform ? { platform } : {})).filter((r) => r.is_reported).map((r) => r.month))].sort()
+      const postedMonths = [...new Set(posts.map((p) => p.published_at?.slice(0, 7)).filter((m): m is string => Boolean(m)))].sort()
+      const period = month ? monthLabelOf(month) : 'any period'
+      const available =
+        reportedMonths.length > 0
+          ? `Reported months on record: ${reportedMonths.map(monthLabelOf).join(', ')}.`
+          : postedMonths.length > 0
+            ? `No platform has reported a rollup yet; published posts exist for ${postedMonths.map(monthLabelOf).join(', ')}.`
+            : 'No platform has reported a rollup and nothing has been published yet, so there is nothing to measure.'
+      return {
+        summary: `${scope} has no reported figures and no published posts for ${period}. ${available}`,
+        data: {
+          columns: ['Month', 'Reported rollup', 'Published posts'],
+          rows: [...new Set([...reportedMonths, ...postedMonths])].sort().map((m) => [
+            monthLabelOf(m),
+            reportedMonths.includes(m) ? 'yes' : 'no',
+            String(posts.filter((p) => p.published_at?.startsWith(m)).length),
+          ]),
+        },
+        render: 'table',
+      }
+    }
+
     const reach = inMonth.reduce((t, p) => t + Number(p.reach ?? 0), 0)
     return {
-      summary:
-        inMonth.length === 0
-          ? `No reported rollup and no published posts for ${month ? monthLabelOf(month) : 'that period'}.`
-          : `${platform ? PLATFORM_LABEL[platform] : 'That platform'} reports no monthly rollup yet, so this is computed from ${inMonth.length} published post(s): ${fmt(reach)} reach.`,
+      summary: `${scope} reports no monthly rollup${month ? ` for ${monthLabelOf(month)}` : ''} yet, so this is computed from ${inMonth.length} published post(s): ${fmt(reach)} reach.`,
       data: {
-        computed: true,
-        posts: inMonth.map((p) => ({ title: p.title, reach: p.reach, engagementRate: p.engagement_rate })),
+        columns: ['Post', 'Reach', 'Engagement rate'],
+        rows: inMonth.map((p) => [p.title, fmt(Number(p.reach ?? 0)), p.engagement_rate === null || p.engagement_rate === undefined ? 'N/A' : String(p.engagement_rate)]),
+        reasons: ['Computed from post readings, not a platform rollup — the platform has not reported this period.'],
       },
       render: 'table',
     }
@@ -1378,7 +1566,7 @@ tool('post.explain', async (args, ctx) => {
 
 tool('report.export', async (args, ctx) => {
   const { refreshAnalytics } = await import('../../orchestrator')
-  const month = typeof args.month === 'string' ? args.month : new Date().toISOString().slice(0, 7)
+  const month = resolveMonth(args.month).key ?? new Date().toISOString().slice(0, 7)
 
   const payload = await refreshAnalytics({
     workspaceId: ctx.workspaceId,

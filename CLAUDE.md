@@ -230,7 +230,7 @@ src/               the web app
 ## The numbers that define the product
 
 Top **5** trending keywords · top **5** hashtags per keyword · consolidated top
-**25** hashtags · top **10** calendar slots per platform (everything else goes to
+**25** hashtags · top **5** calendar slots per platform (everything else goes to
 "More suggestions" with a rank badge). These are knobs (`topKeywords`,
 `topHashtagsPerKeyword`, `hashtagCount`, `topPerPlatform`) but the defaults are
 load-bearing across the UI copy and the seed data.

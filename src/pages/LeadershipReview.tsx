@@ -88,7 +88,6 @@ export function LeadershipReview() {
         title="Final Approval"
         subtitle="Everything Marketing has approved lands here. Nothing publishes until you say so."
         agents={['review', 'publishing', 'knowledge']}
-        askPrompt="Show me everything waiting on me"
       />
 
       <section className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -386,7 +385,7 @@ export function LeadershipReview() {
 
           <p className="text-[11px] leading-relaxed text-ink-3">
             {user?.name ?? 'You'} will be recorded as the decider. The reason is written to the Knowledge
-            Base as a Rejected Post entry, and the Learning Agent reads it before the next draft.
+            Base as a Rejected Post entry, and Velma, the Learning Agent, reads it before the next draft.
           </p>
         </div>
       </Modal>

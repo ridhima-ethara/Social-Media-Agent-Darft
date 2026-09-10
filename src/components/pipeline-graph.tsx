@@ -1,9 +1,9 @@
 /**
  * THE PIPELINE GRAPH
  *
- * An SVG neural graph of scrape → validate. Edges are smooth S-curve Béziers
- * carrying a travelling pulse animated with SMIL `<animateMotion>`; an edge
- * lights "hot" only while its stage is working and settles to a muted "done".
+ * A flat SVG diagram of scrape → validate. Edges are S-curve Béziers; an edge
+ * that is currently working carries one travelling dot (SMIL `<animateMotion>`)
+ * and settles to a still line once done. Nothing else moves.
  *
  * The graph never owns state, so it cannot disagree with the run. Pause calls
  * `svg.pauseAnimations()` — CSS alone cannot pause SMIL.
@@ -32,26 +32,52 @@ export interface PipelineGraphProps {
   scrapingStatus: 'idle' | 'working' | 'done'
   validationStatus: 'idle' | 'working' | 'done'
   paused?: boolean
-  /** Clicking a finished source or a populated bucket toggles a feed filter. */
+  /** Clicking a finished source or a populated bucket toggles the feed filter. */
   activeFilter?: string | null
   onFilter?: (filter: string | null) => void
+  /** Replaces Dexter's status word when the run has something more exact to say, e.g. "Nothing new". */
+  validationLabel?: string
+  /** What crossed from Sherlock to Dexter, printed on the edge between them. */
+  handoffLabel?: string
 }
+
+type Status = 'idle' | 'working' | 'done'
 
 const WIDTH = 760
 const HEIGHT = 460
 
-/** A smooth S-curve between two points, flattened horizontally at both ends. */
+const SOURCE_X = 92
+const SCRAPE_X = 300
+const VALIDATE_X = 480
+const BUCKET_X = 676
+const SOURCE_W = 108
+const BUCKET_W = 84
+const AGENT_R = 38
+
 function bezier(x1: number, y1: number, x2: number, y2: number): string {
   const dx = (x2 - x1) * 0.55
   return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`
 }
 
-const TWINKLES = Array.from({ length: 34 }, (_, i) => ({
-  cx: 24 + ((i * 137) % (WIDTH - 48)),
-  cy: 18 + ((i * 211) % (HEIGHT - 36)),
-  delay: (i % 9) * 1.1,
-  r: i % 3 === 0 ? 1.4 : 1,
-}))
+function tone(status: Status): string {
+  if (status === 'working') return 'var(--color-accent)'
+  if (status === 'done') return 'var(--color-good)'
+  return 'var(--color-line-strong)'
+}
+
+function Edge({ path, status, colour, weight = 1.25 }: { path: string; status: Status; colour?: string; weight?: number }) {
+  const stroke = colour ?? tone(status)
+  return (
+    <g>
+      <path d={path} fill="none" stroke={stroke} strokeWidth={status === 'idle' ? 1 : weight} opacity={status === 'idle' ? 0.5 : 0.9} />
+      {status === 'working' ? (
+        <circle r={2.5} fill={stroke}>
+          <animateMotion dur="2.2s" repeatCount="indefinite" path={path} />
+        </circle>
+      ) : null}
+    </g>
+  )
+}
 
 export function PipelineGraph({
   sources,
@@ -61,10 +87,11 @@ export function PipelineGraph({
   paused = false,
   activeFilter = null,
   onFilter,
+  validationLabel,
+  handoffLabel,
 }: PipelineGraphProps) {
   const svgRef = useRef<SVGSVGElement | null>(null)
 
-  // SMIL ignores CSS `animation-play-state`, so pausing is explicit.
   useEffect(() => {
     const svg = svgRef.current
     if (!svg) return
@@ -72,25 +99,17 @@ export function PipelineGraph({
     else svg.unpauseAnimations()
   }, [paused])
 
-  // Reduced motion stops SMIL outright — the CSS block cannot reach it.
   useEffect(() => {
     const svg = svgRef.current
     if (!svg) return
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) svg.pauseAnimations()
   }, [])
 
-  const sourceX = 92
-  const scrapeX = 300
-  const validateX = 480
-  const bucketX = 676
-
   const sourceGap = HEIGHT / (sources.length + 1)
   const bucketGap = HEIGHT / (buckets.length + 1)
-  const scrapeY = HEIGHT / 2
-  const validateY = HEIGHT / 2
-
-  const tone = (status: 'idle' | 'working' | 'done'): string =>
-    status === 'working' ? 'var(--color-accent-bright)' : status === 'done' ? 'var(--color-good)' : 'var(--color-line-strong)'
+  const midY = HEIGHT / 2
+  const coreStatus: Status =
+    scrapingStatus === 'working' || validationStatus === 'working' ? 'working' : validationStatus === 'done' ? 'done' : 'idle'
 
   return (
     <svg
@@ -98,119 +117,59 @@ export function PipelineGraph({
       viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
       className="h-full w-full"
       role="img"
-      aria-label="The discovery pipeline: sources feed the Scraping Agent, which feeds the Validation Agent, which sorts every candidate into four buckets."
+      aria-label="The discovery pipeline: keyword sources feed Sherlock, the Scraping Agent, which feeds Dexter, the Validation Agent, who sorts every candidate into four buckets."
     >
-      <defs>
-        <radialGradient id="pg-node" cx="50%" cy="35%" r="70%">
-          <stop offset="0%" stopColor="var(--color-surface-3)" />
-          <stop offset="100%" stopColor="var(--color-surface)" />
-        </radialGradient>
-      </defs>
-
-      {/* Background twinkle field. */}
-      <g aria-hidden="true">
-        {TWINKLES.map((dot, i) => (
-          <circle
-            key={i}
-            className="twinkle"
-            cx={dot.cx}
-            cy={dot.cy}
-            r={dot.r}
-            fill="var(--color-hud-strong)"
-            style={{ animationDelay: `${dot.delay}s` }}
-          />
-        ))}
-      </g>
-
-      {/* Source → scraping edges. */}
       {sources.map((source, i) => {
         const y = sourceGap * (i + 1)
-        const path = bezier(sourceX + 52, y, scrapeX - 44, scrapeY)
-        const hot = source.status === 'working'
-        return (
-          <g key={source.id}>
-            <path
-              d={path}
-              fill="none"
-              stroke={hot ? 'var(--color-accent-bright)' : source.status === 'done' ? 'var(--color-good)' : 'var(--color-line)'}
-              strokeWidth={hot ? 1.8 : 1.2}
-              opacity={source.status === 'idle' ? 0.4 : 0.85}
-              className={hot ? 'edge-hot' : ''}
-            />
-            {source.status !== 'idle' ? (
-              <circle r={2.6} fill={hot ? 'var(--color-magenta)' : 'var(--color-good)'}>
-                <animateMotion dur={hot ? '1.5s' : '3.4s'} repeatCount="indefinite" path={path} />
-              </circle>
-            ) : null}
-          </g>
-        )
+        return <Edge key={source.id} path={bezier(SOURCE_X + SOURCE_W / 2, y, SCRAPE_X - AGENT_R, midY)} status={source.status} />
       })}
 
-      {/* Scraping → validation. */}
-      {(() => {
-        const path = bezier(scrapeX + 44, scrapeY, validateX - 44, validateY)
-        const hot = validationStatus === 'working' || scrapingStatus === 'working'
-        return (
-          <g>
-            <path
-              d={path}
-              fill="none"
-              stroke={hot ? 'var(--color-accent-bright)' : 'var(--color-line-strong)'}
-              strokeWidth={2}
-              className={hot ? 'edge-hot' : ''}
-            />
-            {hot ? (
-              <circle r={3} fill="var(--color-magenta)">
-                <animateMotion dur="1.2s" repeatCount="indefinite" path={path} />
-              </circle>
-            ) : null}
-          </g>
-        )
-      })()}
+      <Edge path={bezier(SCRAPE_X + AGENT_R, midY, VALIDATE_X - AGENT_R, midY)} status={coreStatus} weight={1.6} />
+      {handoffLabel ? (
+        <text x={(SCRAPE_X + VALIDATE_X) / 2} y={midY - 10} textAnchor="middle" fontSize={9} fontWeight={500} fill="var(--color-ink-3)">
+          {handoffLabel}
+        </text>
+      ) : null}
 
-      {/* Validation → buckets. */}
       {buckets.map((bucket, i) => {
         const y = bucketGap * (i + 1)
-        const path = bezier(validateX + 44, validateY, bucketX - 40, y)
-        const live = validationStatus === 'working' && bucket.count > 0
+        const filled = bucket.count > 0
+        const status: Status = validationStatus === 'working' && filled ? 'working' : filled ? 'done' : 'idle'
         return (
-          <g key={bucket.id}>
-            <path
-              d={path}
-              fill="none"
-              stroke={bucket.count > 0 ? bucket.tone : 'var(--color-line)'}
-              strokeWidth={bucket.count > 0 ? 1.6 : 1}
-              opacity={bucket.count > 0 ? 0.85 : 0.35}
-              className={live ? 'edge-hot' : ''}
-            />
-            {live ? (
-              <circle r={2.4} fill={bucket.tone}>
-                <animateMotion dur="1.4s" repeatCount="indefinite" path={path} />
-              </circle>
-            ) : null}
-          </g>
+          <Edge
+            key={bucket.id}
+            path={bezier(VALIDATE_X + AGENT_R, midY, BUCKET_X - BUCKET_W / 2, y)}
+            status={status}
+            colour={filled ? bucket.tone : undefined}
+          />
         )
       })}
 
-      {/* Source nodes. */}
       {sources.map((source, i) => {
         const y = sourceGap * (i + 1)
         const selected = activeFilter === source.id
+        const clickable = source.status === 'done' && Boolean(onFilter)
         return (
           <g
             key={source.id}
-            transform={`translate(${sourceX}, ${y})`}
-            className={source.status === 'done' && onFilter ? 'cursor-pointer' : ''}
+            transform={`translate(${SOURCE_X}, ${y})`}
+            className={clickable ? 'cursor-pointer' : ''}
             onClick={() => {
-              if (source.status === 'done' && onFilter) onFilter(selected ? null : source.id)
+              if (clickable && onFilter) onFilter(selected ? null : source.id)
             }}
           >
-            {source.status === 'working' ? (
-              <circle className="node-halo" r={30} fill="none" stroke="var(--color-accent)" strokeWidth={1} />
-            ) : null}
-            <rect x={-52} y={-17} width={104} height={34} rx={17} fill="url(#pg-node)" stroke={selected ? 'var(--color-magenta)' : tone(source.status)} strokeWidth={selected ? 1.8 : 1.1} />
-            <text x={0} y={-1} textAnchor="middle" fontSize={9.5} fill="var(--color-ink-2)">
-              {source.label.length > 15 ? `${source.label.slice(0, 15)}…` : source.label}
+            <rect
+              x={-SOURCE_W / 2}
+              y={-17}
+              width={SOURCE_W}
+              height={34}
+              rx={8}
+              fill="var(--color-surface)"
+              stroke={selected ? 'var(--color-accent)' : tone(source.status)}
+              strokeWidth={selected ? 1.6 : 1}
+            />
+            <text x={0} y={-2} textAnchor="middle" fontSize={10} fontWeight={500} fill="var(--color-ink)">
+              {source.label.length > 16 ? `${source.label.slice(0, 16)}…` : source.label}
             </text>
             <text x={0} y={10} textAnchor="middle" fontSize={9} fill="var(--color-ink-3)" className="tabular">
               {source.count} items
@@ -219,38 +178,37 @@ export function PipelineGraph({
         )
       })}
 
-      {/* The two agent nodes. */}
-      <AgentNode x={scrapeX} y={scrapeY} label="Scraping Agent" status={scrapingStatus} />
-      <AgentNode x={validateX} y={validateY} label="Validation Agent" status={validationStatus} />
+      <AgentNode x={SCRAPE_X} y={midY} name="Sherlock" role="Scraping Agent" status={scrapingStatus} paused={paused} />
+      <AgentNode x={VALIDATE_X} y={midY} name="Dexter" role="Validation Agent" status={validationStatus} paused={paused} label={validationLabel} />
 
-      {/* Bucket nodes. */}
       {buckets.map((bucket, i) => {
         const y = bucketGap * (i + 1)
+        const filled = bucket.count > 0
         const selected = activeFilter === bucket.id
+        const clickable = filled && Boolean(onFilter)
         return (
           <g
             key={bucket.id}
-            transform={`translate(${bucketX}, ${y})`}
-            className={bucket.count > 0 && onFilter ? 'cursor-pointer' : ''}
+            transform={`translate(${BUCKET_X}, ${y})`}
+            className={clickable ? 'cursor-pointer' : ''}
             onClick={() => {
-              if (bucket.count > 0 && onFilter) onFilter(selected ? null : bucket.id)
+              if (clickable && onFilter) onFilter(selected ? null : bucket.id)
             }}
           >
             <rect
-              x={-40}
-              y={-19}
-              width={80}
-              height={38}
-              rx={10}
-              fill="url(#pg-node)"
-              stroke={selected ? 'var(--color-magenta)' : bucket.count > 0 ? bucket.tone : 'var(--color-line)'}
-              strokeWidth={selected ? 1.8 : 1.1}
-              className={bucket.count > 0 ? 'anim-bucket-land' : ''}
+              x={-BUCKET_W / 2}
+              y={-20}
+              width={BUCKET_W}
+              height={40}
+              rx={8}
+              fill="var(--color-surface)"
+              stroke={selected ? 'var(--color-accent)' : filled ? bucket.tone : 'var(--color-line-strong)'}
+              strokeWidth={selected ? 1.6 : 1}
             />
-            <text x={0} y={-3} textAnchor="middle" fontSize={13} fontWeight={600} fill={bucket.count > 0 ? bucket.tone : 'var(--color-ink-3)'} className="tabular">
+            <text x={0} y={-3} textAnchor="middle" fontSize={14} fontWeight={600} fill={filled ? bucket.tone : 'var(--color-ink-3)'} className="tabular">
               {bucket.count}
             </text>
-            <text x={0} y={10} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)">
+            <text x={0} y={11} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)">
               {bucket.label}
             </text>
           </g>
@@ -263,41 +221,44 @@ export function PipelineGraph({
 function AgentNode({
   x,
   y,
-  label,
+  name,
+  role,
   status,
+  paused,
+  label: labelOverride,
 }: {
   x: number
   y: number
-  label: string
-  status: 'idle' | 'working' | 'done'
+  name: string
+  role: string
+  status: Status
+  paused: boolean
+  label?: string
 }) {
-  const colour =
-    status === 'working' ? 'var(--color-accent-bright)' : status === 'done' ? 'var(--color-good)' : 'var(--color-line-strong)'
-
+  const colour = tone(status)
+  const label = labelOverride ?? (status === 'working' ? 'Working' : status === 'done' ? 'Done' : 'Idle')
   return (
     <g transform={`translate(${x}, ${y})`}>
+      <circle r={AGENT_R} fill="var(--color-surface)" stroke={colour} strokeWidth={1.4} />
       {status === 'working' ? (
-        <>
-          <circle className="node-halo" r={54} fill="none" stroke="var(--color-accent)" strokeWidth={1} />
-          <circle
-            r={44}
-            fill="none"
-            stroke="var(--color-magenta)"
-            strokeWidth={1.4}
-            strokeDasharray="14 200"
-            style={{ transformOrigin: 'center', animation: 'ring-spin 2.4s linear infinite' }}
-          />
-        </>
+        <circle
+          r={AGENT_R + 5}
+          fill="none"
+          stroke={colour}
+          strokeWidth={1.2}
+          strokeLinecap="round"
+          strokeDasharray="60 220"
+          style={{ transformOrigin: 'center', transformBox: 'fill-box', animation: 'ring-spin 1.6s linear infinite', animationPlayState: paused ? 'paused' : 'running' }}
+        />
       ) : null}
-      <circle r={40} fill="url(#pg-node)" stroke={colour} strokeWidth={1.6} />
-      <text x={0} y={-4} textAnchor="middle" fontSize={10} fontWeight={600} fill="var(--color-ink)">
-        {label.split(' ')[0]}
+      <text x={0} y={-2} textAnchor="middle" fontSize={11} fontWeight={600} fill="var(--color-ink)">
+        {name}
       </text>
-      <text x={0} y={8} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)">
-        Agent
+      <text x={0} y={11} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)">
+        {role}
       </text>
-      <text x={0} y={20} textAnchor="middle" fontSize={7.5} fill={colour} className="uppercase">
-        {status}
+      <text x={0} y={AGENT_R + 16} textAnchor="middle" fontSize={9} fontWeight={500} fill={colour}>
+        {label}
       </text>
     </g>
   )

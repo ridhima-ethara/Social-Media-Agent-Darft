@@ -110,7 +110,7 @@ const checks: Array<{ skill: string; key: string; expected: number; why: string 
   { skill: 'validation.keyword.trend', key: 'topKeywords', expected: 5, why: 'top 5 trending keywords' },
   { skill: 'validation.hashtag.rank', key: 'topHashtagsPerKeyword', expected: 5, why: 'top 5 hashtags per keyword' },
   { skill: 'analysis.hashtag.consolidate', key: 'topHashtags', expected: 25, why: 'consolidated top 25' },
-  { skill: 'calendar.rank.select', key: 'topPerPlatform', expected: 10, why: 'top 10 per platform' },
+  { skill: 'calendar.rank.select', key: 'topPerPlatform', expected: 5, why: 'top 5 per platform' },
   { skill: 'knowledge.hashtag.select', key: 'hashtagCount', expected: 25, why: 'the Sunday research set' },
 ]
 
@@ -141,7 +141,7 @@ const required = [
   'server/src/db/schema.sql',
   'src/index.css',
   'src/store.ts',
-  'src/data/demo.ts',
+  'src/data/empty.ts',
   'src/lib/assistant.ts',
   'src/lib/voice.ts',
   'backend/api.py',
@@ -165,11 +165,15 @@ const missingPages = PAGES.filter((name) => !pageFiles.includes(`${name}.tsx`))
 if (missingPages.length === 0) pass(`all ${PAGES.length} screen modules present`)
 else for (const name of missingPages) fail(`screen missing: src/pages/${name}.tsx`)
 
-const AGENT_FOLDERS = [
-  'research_agent', 'validation_agent', 'calendar_agent',
-  'content_agent', 'publishing_agent', 'analytics_agent',
-]
+// Read the folders off disk rather than listing them here. A hardcoded list is
+// a second source of truth that goes stale the first time an agent is added or
+// renamed, and then this check passes while describing a roster that is gone.
+const AGENT_FOLDERS = readdirSync(join(ROOT, 'backend/agents'), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && !entry.name.startsWith('__'))
+  .map((entry) => entry.name)
+  .sort()
 const AGENT_FILES = ['agent.py', 'prompt.md', 'instructions.md', 'tools.md', 'schema.py']
+
 let folderProblems = 0
 for (const folder of AGENT_FOLDERS) {
   for (const file of AGENT_FILES) {
@@ -181,6 +185,15 @@ for (const folder of AGENT_FOLDERS) {
 }
 if (folderProblems === 0) {
   pass(`all ${AGENT_FOLDERS.length} agent folders carry ${AGENT_FILES.join(' · ')}`)
+}
+
+// A folder on disk that the roster never imports is an agent that does not run.
+const rosterSource = readFileSync(join(ROOT, 'backend/agents/__init__.py'), 'utf8')
+const unrostered = AGENT_FOLDERS.filter((folder) => !rosterSource.includes(folder))
+if (unrostered.length === 0) {
+  pass(`the roster in backend/agents/__init__.py accounts for all ${AGENT_FOLDERS.length} folders`)
+} else {
+  fail(`agent folder(s) never reached by the roster: ${unrostered.join(', ')}`)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

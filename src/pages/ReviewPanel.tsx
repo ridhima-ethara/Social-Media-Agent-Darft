@@ -3,14 +3,12 @@
  *
  * A full-screen `Dialog`, three columns, the outer two sticky and
  * independently scrollable so the composer never leaves view. This is where a
- * human shapes what the agents wrote — and where the brand checker reports
- * without ever rewriting behind their back (rule 20).
+ * human shapes what the agents wrote.
  */
 
-import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Check, RefreshCw, Send, Sparkles, X } from 'lucide-react'
-import { BRAND } from '@shared/brand-voice'
-import { complianceFor, useStore } from '../store'
+import { useEffect, useState } from 'react'
+import { AlertTriangle, Check, ExternalLink, FileText, Paperclip, RefreshCw, Send, Sparkles, X } from 'lucide-react'
+import { useStore } from '../store'
 import { ModelMenu } from '../components/model-menu'
 import { PlatformPreview } from '../components/previews'
 import { AssistantCore } from '../components/assistant/core'
@@ -24,8 +22,7 @@ import {
   Tabs,
   timeAgo,
 } from '../components/ui'
-import type { BrandCheck } from '@shared/brand-voice'
-import type { Platform } from '../types'
+import type { Idea, Platform } from '../types'
 
 const POSTING_TIMES = [
   '07:00 AM', '08:00 AM', '08:30 AM', '09:00 AM', '09:30 AM', '10:00 AM', '10:30 AM',
@@ -61,26 +58,69 @@ const IMAGE_PROMPTS = [
   'Re-render at higher contrast',
 ]
 
-const DIMENSION_LABEL: Record<string, string> = {
-  grounding: 'Grounding',
-  voice: 'Voice',
-  structure: 'Structure',
-  platform: 'Platform',
-  visual: 'Visual',
-  captionVisual: 'Caption↔visual',
-}
-
-const VERDICT_TONE: Record<string, 'good' | 'warn' | 'serious' | 'critical'> = {
-  APPROVED: 'good',
-  REVISE: 'warn',
-  CANNOT_VERIFY: 'warn',
-  NEEDS_INTERNAL_APPROVAL: 'serious',
-}
-
 interface Bubble {
   id: string
   speaker: 'operator' | 'assistant'
   text: string
+}
+
+/**
+ * One file the operator attached for the model to work from.
+ *
+ * `text` is filled for anything textual; `dataUri` for an image. Both are
+ * optional because a file whose contents could not be read is still reported as
+ * attached — with the reason — rather than dropped silently.
+ */
+interface Reference {
+  id: string
+  name: string
+  mimeType: string
+  size: number
+  text?: string
+  dataUri?: string
+  unreadableReason?: string
+}
+
+/** Anything larger is truncated, and the truncation is stated on the chip. */
+const MAX_REFERENCE_CHARS = 8_000
+const MAX_REFERENCE_BYTES = 4 * 1024 * 1024
+
+async function readReference(file: File): Promise<Reference> {
+  const base: Reference = {
+    id: `ref-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: file.name,
+    mimeType: file.type || 'application/octet-stream',
+    size: file.size,
+  }
+
+  if (file.size > MAX_REFERENCE_BYTES) {
+    return { ...base, unreadableReason: 'over 4 MB, so its contents were not read' }
+  }
+
+  const isImage = file.type.startsWith('image/')
+  const isTextual =
+    file.type.startsWith('text/') ||
+    /json|csv|xml|yaml|markdown/.test(file.type) ||
+    /\.(md|txt|csv|json|ya?ml)$/i.test(file.name)
+
+  try {
+    if (isImage) {
+      const dataUri = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.onerror = () => reject(new Error('the file could not be read'))
+        reader.readAsDataURL(file)
+      })
+      return { ...base, dataUri }
+    }
+    if (isTextual) {
+      const raw = await file.text()
+      return { ...base, text: raw.slice(0, MAX_REFERENCE_CHARS) }
+    }
+    return { ...base, unreadableReason: 'this file type cannot be read as text or an image' }
+  } catch (error) {
+    return { ...base, unreadableReason: error instanceof Error ? error.message : 'unreadable' }
+  }
 }
 
 export function ReviewPanel() {
@@ -92,6 +132,7 @@ export function ReviewPanel() {
   const user = useStore((s) => s.user)
   const settings = useStore((s) => s.settings)
   const publishPhase = useStore((s) => s.publishPhase)
+  const canPublish = useStore((s) => s.apiMode === 'connected' && s.mode.publishMode === 'live')
   const ensureDraft = useStore((s) => s.ensureDraft)
   const ensureImage = useStore((s) => s.ensureImage)
   const regenerateDraft = useStore((s) => s.regenerateDraft)
@@ -117,6 +158,8 @@ export function ReviewPanel() {
   const [thinking, setThinking] = useState<string | null>(null)
   const [preference, setPreference] = useState<{ title: string; content: string } | null>(null)
   const [confirmPublish, setConfirmPublish] = useState(false)
+  const [references, setReferences] = useState<Reference[]>([])
+  const [attaching, setAttaching] = useState(false)
 
   const draft = idea ? drafts[`${idea.id}|${idea.platform}`] : undefined
   const asset = idea ? media[`${idea.id}|${idea.platform}`] : undefined
@@ -139,11 +182,6 @@ export function ReviewPanel() {
     setImagePrompt(asset?.concept ? `${asset.concept} · ${idea?.source_topic ?? ''}` : '')
   }, [asset?.concept, idea?.source_topic])
 
-  const compliance: BrandCheck | null = useMemo(() => {
-    if (!idea || body.trim().length === 0) return null
-    return complianceFor(body, idea.source_topic ?? idea.title, idea.platform, idea.title)
-  }, [body, idea])
-
   if (!idea) return null
 
   const slotReasons = (idea.analysis?.slotReasons as string[] | undefined) ?? []
@@ -153,12 +191,23 @@ export function ReviewPanel() {
     const text = instruction.trim()
     if (text.length === 0) return
 
-    setBubbles((prev) => [...prev, { id: `q-${Date.now()}`, speaker: 'operator', text }])
+    // The attachments travel with the instruction they were attached for, and
+    // are named in the transcript so the record shows what the model was given.
+    const attached = references
+    const attachedNote =
+      attached.length === 0
+        ? ''
+        : `\n\nReferences: ${attached.map((reference) => reference.name).join(', ')}`
+
+    setBubbles((prev) => [
+      ...prev,
+      { id: `q-${Date.now()}`, speaker: 'operator', text: `${text}${attachedNote}` },
+    ])
     setChatValue('')
     setThinking(target === 'caption' ? 'Rewriting draft…' : `Re-rendering with ${asset?.model ?? 'brand-svg'}…`)
 
     if (target === 'image') {
-      void instructImage(idea.id, text).then(() => {
+      void instructImage(idea.id, text, attached).then(() => {
         setThinking(null)
         setBubbles((prev) => [
           ...prev,
@@ -168,7 +217,7 @@ export function ReviewPanel() {
       return
     }
 
-    void instructAI(idea.id, text).then((note) => {
+    void instructAI(idea.id, text, attached).then((note) => {
       setThinking(null)
       setBubbles((prev) => [...prev, { id: `a-${Date.now()}`, speaker: 'assistant', text: note }])
       // Offer to remember it, rather than silently learning.
@@ -179,6 +228,17 @@ export function ReviewPanel() {
         })
       }
     })
+  }
+
+  const attach = async (files: FileList | null): Promise<void> => {
+    if (!files || files.length === 0) return
+    setAttaching(true)
+    try {
+      const read = await Promise.all(Array.from(files).map(readReference))
+      setReferences((prev) => [...prev, ...read])
+    } finally {
+      setAttaching(false)
+    }
   }
 
   return (
@@ -198,7 +258,7 @@ export function ReviewPanel() {
         </div>
       }
     >
-      <div className="grid h-full grid-cols-1 overflow-hidden lg:grid-cols-[260px_1fr_300px]">
+      <div className="grid h-full grid-cols-1 overflow-y-auto lg:grid-cols-[260px_1fr_300px] lg:grid-rows-[minmax(0,1fr)] lg:overflow-hidden">
         {/* ── LEFT ────────────────────────────────────────────────────── */}
         <aside className="overflow-y-auto border-r border-line p-4">
           <section>
@@ -206,6 +266,7 @@ export function ReviewPanel() {
             <div className="mt-2 space-y-2">
               <Field label="Source topic" value={idea.source_topic ?? '—'} />
               <Field label="Originating hashtag" value={idea.hashtag_display ? `#${idea.hashtag_display}` : '—'} />
+              <ReferenceField idea={idea} />
               <Field label="Suggested angle" value={String(idea.analysis?.angle ?? '—')} />
               <Field label="Target audience" value={String(idea.analysis?.audience ?? '—')} />
               <Field label="Format" value={String(idea.analysis?.format ?? '—')} />
@@ -315,8 +376,6 @@ export function ReviewPanel() {
             />
             <p className="tabular mt-1 text-right text-[10.5px] text-ink-3">{body.length} characters</p>
           </section>
-
-          {compliance ? <ComplianceCard check={compliance} /> : null}
 
           <section className="card mt-3 p-3">
             <header className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -467,6 +526,43 @@ export function ReviewPanel() {
           </div>
 
           <div className="border-t border-line p-3">
+            {references.length > 0 ? (
+              <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Attached references">
+                {references.map((reference) => (
+                  <li
+                    key={reference.id}
+                    className="flex max-w-full items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2 py-1"
+                  >
+                    {reference.dataUri ? (
+                      <img src={reference.dataUri} alt="" className="h-5 w-5 rounded object-cover" />
+                    ) : (
+                      <FileText size={12} className="shrink-0 text-ink-3" aria-hidden="true" />
+                    )}
+                    <span className="min-w-0">
+                      <span className="block truncate text-[11px] text-ink-2">{reference.name}</span>
+                      {reference.unreadableReason ? (
+                        <span className="block text-[10px] text-warn">
+                          Attached by name only — {reference.unreadableReason}.
+                        </span>
+                      ) : reference.text && reference.text.length >= MAX_REFERENCE_CHARS ? (
+                        <span className="block text-[10px] text-ink-3">
+                          truncated to {MAX_REFERENCE_CHARS.toLocaleString()} characters
+                        </span>
+                      ) : null}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setReferences((prev) => prev.filter((r) => r.id !== reference.id))}
+                      aria-label={`Remove ${reference.name}`}
+                      className="shrink-0 rounded p-0.5 text-ink-3 transition-colors hover:text-critical-ink"
+                    >
+                      <X size={11} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
             <form
               onSubmit={(event) => {
                 event.preventDefault()
@@ -474,27 +570,59 @@ export function ReviewPanel() {
               }}
               className="flex items-center gap-2"
             >
+              <label
+                title="Attach a reference file for the model"
+                className="shrink-0 cursor-pointer rounded-lg border border-line p-1.5 text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+              >
+                <Paperclip size={13} aria-hidden="true" />
+                <span className="sr-only">Attach a reference file</span>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*,text/*,.md,.txt,.csv,.json,.yml,.yaml"
+                  className="hidden"
+                  onChange={(event) => {
+                    void attach(event.target.files)
+                    event.target.value = ''
+                  }}
+                />
+              </label>
+
               <input
                 value={chatValue}
                 onChange={(event) => setChatValue(event.target.value)}
                 placeholder={target === 'caption' ? 'Change the caption…' : 'Change the creative…'}
                 aria-label="Instruction"
-                className="flex-1 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[11.5px] outline-none focus:border-accent"
+                className="min-w-0 flex-1 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[11.5px] outline-none focus:border-accent"
               />
               <Btn type="submit" variant="primary" disabled={chatValue.trim().length === 0}>
                 <Sparkles size={12} />
               </Btn>
             </form>
 
+            {attaching ? (
+              <p className="mt-1 text-[10.5px] text-ink-3">Reading the attachment…</p>
+            ) : null}
+
+            {/* Both models are chosen here — the writer for the caption tab, the
+                painter for the image tab, each switching with the tab. */}
             <div className="mt-2">
-              <ModelMenu
-                target={target}
-                selected={settings.imageModel}
-                onSelect={(modelId) => {
-                  updateSettings({ imageModel: modelId })
-                  void regenerateImage(idea.id, idea.platform, modelId)
-                }}
-              />
+              {target === 'caption' ? (
+                <ModelMenu
+                  target="caption"
+                  selected={settings.captionModel}
+                  onSelect={(modelId) => updateSettings({ captionModel: modelId })}
+                />
+              ) : (
+                <ModelMenu
+                  target="image"
+                  selected={settings.imageModel}
+                  onSelect={(modelId) => {
+                    updateSettings({ imageModel: modelId })
+                    void regenerateImage(idea.id, idea.platform, modelId)
+                  }}
+                />
+              )}
             </div>
 
             <FinalApproval
@@ -540,12 +668,23 @@ export function ReviewPanel() {
               <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} />
             </div>
 
-            <footer className="flex items-center justify-end gap-2 border-t border-line px-4 py-3">
+            {/* Demo mode does not publish, and the button says so rather than
+                accepting a click and failing. The server refuses regardless. */}
+            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-3">
+              {!canPublish ? (
+                <p className="mr-auto flex items-start gap-1.5 text-[11px] leading-relaxed text-warn">
+                  <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
+                  Publishing is disabled in demo mode. Set{' '}
+                  <code className="mono rounded bg-surface-2 px-1">PUBLISH_MODE=live</code> and supply
+                  the platform token.
+                </p>
+              ) : null}
               <Btn variant="ghost" onClick={() => setConfirmPublish(false)}>
                 Cancel
               </Btn>
               <Btn
                 variant="primary"
+                disabled={!canPublish}
                 onClick={() => {
                   setConfirmPublish(false)
                   void publishIdea(idea.id)
@@ -564,6 +703,43 @@ export function ReviewPanel() {
 /* ═══════════════════════════════════════════════════════════════════════════
    PIECES
    ═══════════════════════════════════════════════════════════════════════════ */
+
+/** The captured page the idea was formed from — or, for a hashtag-born idea, the strongest post carrying the tag. */
+function ReferenceField({ idea }: { idea: Idea }) {
+  const url = idea.source_url ?? idea.hashtag_url
+  const title = idea.source_url ? idea.source_title : idea.hashtag_display ? `Strongest post carrying #${idea.hashtag_display}` : null
+  let host: string | null = null
+  if (url) {
+    try {
+      host = new URL(url).hostname.replace(/^www\./, '')
+    } catch {
+      host = null
+    }
+  }
+
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-[0.08em] text-ink-3">Reference</p>
+      {url ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="group mt-0.5 block rounded-lg border border-line bg-surface-2 px-2.5 py-2 transition-colors hover:border-accent"
+        >
+          <span className="flex items-center gap-1.5 text-[11px] text-ink-3">
+            <ExternalLink size={11} className="shrink-0 transition-colors group-hover:text-accent-bright" aria-hidden="true" />
+            <span className="truncate">{idea.source_name ?? host ?? url}</span>
+          </span>
+          {title ? <span className="mt-0.5 line-clamp-2 block text-[11.5px] leading-relaxed text-ink-2">{title}</span> : null}
+          <span className="mt-0.5 block truncate text-[10.5px] text-ink-3">{url}</span>
+        </a>
+      ) : (
+        <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">No captured page is linked to this idea.</p>
+      )}
+    </div>
+  )
+}
 
 function Field({ label, value }: { label: string; value: string }) {
   return (
@@ -598,50 +774,6 @@ function PlatformRow({
       <span className="tabular ml-auto text-[11px] text-ink-3">{score}% match</span>
       {active ? <Check size={12} className="text-accent-bright" aria-hidden="true" /> : null}
     </button>
-  )
-}
-
-function ComplianceCard({ check }: { check: BrandCheck }) {
-  return (
-    <section className="card mt-3 p-3">
-      <header className="flex flex-wrap items-center gap-2">
-        <h3 className="display text-[12px]">Brand voice check</h3>
-        <Badge tone={VERDICT_TONE[check.verdict] ?? 'neutral'}>{check.verdict}</Badge>
-        <span className="ml-auto text-[10.5px] text-ink-3">
-          {BRAND.emojiBudget === 0 ? 'emoji budget 0' : ''} · {BRAND.hashtags.min}–{BRAND.hashtags.max} hashtags
-        </span>
-      </header>
-
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {check.dimensions.map((dimension) => (
-          <span
-            key={dimension.dimension}
-            title={dimension.detail}
-            className={`rounded-full border px-2 py-0.5 text-[10.5px] ${
-              dimension.pass ? 'border-good/40 bg-good/10 text-good-ink' : 'border-serious/40 bg-serious/10 text-serious'
-            }`}
-          >
-            {DIMENSION_LABEL[dimension.dimension] ?? dimension.dimension}
-          </span>
-        ))}
-      </div>
-
-      {check.violations.length === 0 ? (
-        <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">{check.reason}</p>
-      ) : (
-        <ul className="mt-2 space-y-1.5">
-          {check.violations.map((violation) => (
-            <li key={violation.rule} className="rounded-lg border border-line bg-surface-2 px-2.5 py-2">
-              <p className="text-[11.5px] font-medium text-ink">
-                Rule {violation.rule} · {violation.title}
-              </p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-ink-3">{violation.detail}</p>
-              <p className="mt-1 text-[11px] text-accent-bright">→ {violation.required_action}</p>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
   )
 }
 

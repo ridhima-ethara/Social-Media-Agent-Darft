@@ -33,3 +33,17 @@ Topic-derived tags, deterministic for a given topic. Generic reach-bait tags are
 
 Dice similarity against previously published captions. Computed, never estimated — above the cap,
 write a different angle.
+
+## What the Learning Agent changes here
+
+The Knowledge Base this agent reads is not static. The Learning Agent writes to it from two places:
+what an operator asked for in the assistant, and what the audience actually did with what was
+published. Both land as recalled entries, and both reach the caption through `recall_knowledge`.
+
+That is the whole loop, and it needs no code change to work: an operator says "lead with the number,
+not the question" in the assistant; the Learning Agent stores it as a `Human Directive`; the next
+caption recalls it as a constraint and obeys it. Nothing here was edited to make that happen.
+
+The same is true of measured outcomes. A `High Performer` entry written after last week's analytics
+is evidence — it can carry a claim, because it rests on posts by permalink and the run that measured
+them. A `Human Directive` is not evidence, whatever it asserts, because nobody measured it.

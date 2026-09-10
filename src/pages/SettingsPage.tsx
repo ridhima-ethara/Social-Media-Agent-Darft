@@ -52,7 +52,6 @@ export function SettingsPage() {
       <PageHeader
         title="Settings"
         subtitle="What the agents are allowed to do, what they read before they do it, and which services are actually connected."
-        askPrompt="Which integrations are not configured?"
       />
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -307,7 +306,7 @@ export function SettingsPage() {
             />
             <Toggle
               label="Auto-scheduling"
-              hint="Lets the Calendar Agent choose dates and times rather than proposing them."
+              hint="Lets Dora, the Calendar Agent, choose dates and times rather than proposing them."
               checked={settings.autoScheduling}
               onChange={(value) => updateSettings({ autoScheduling: value })}
             />

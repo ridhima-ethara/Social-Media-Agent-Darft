@@ -1,7 +1,12 @@
 """
-THE RESEARCH AGENT
+THE SCRAPING AGENT
 
-Captures posts and harvests hashtags. Gathers; never judges.
+The research end of the pipeline. Given a keyword set, it reads every reachable
+source, captures what is genuinely being discussed, and harvests the hashtags
+those posts actually used.
+
+There is no separate research agent: research *is* scraping against the
+keywords supplied. Gathers; never judges.
 
     prompt.md        identity, objective, output contract
     instructions.md  Rules and Boundaries — the specification
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agents.names import identity_for
 from core.agent import Agent
 from core.evidence import prepare
 from core.llm import Reasoning, ToolSpec
@@ -20,11 +26,39 @@ from core.schema import RawPost
 from tools import available_sources, fetch_posts, harvest_hashtags
 
 
-class ResearchAgent(Agent):
-    agent_id = "research_agent"
-    name = "Research Agent"
+class ScrapingAgent(Agent):
+    agent_id = "scraping_agent"
+    identity = identity_for(agent_id)
+    name = identity["name"]
+    role = identity["role"]
+    icon = identity["icon"]
     stage = "discover"
     hands_off_to = ["validation_agent"]
+
+    def prepare(self, payload: dict[str, Any]) -> None:
+        """
+        Clears the capture buffer before either path runs.
+
+        It was a class attribute, which made it shared mutable state across
+        every instance and — because nothing ever assigned to it — permanently
+        empty. Both are fixed by owning it per run, here, where `prepare` is
+        guaranteed to have run before any tool closes over it.
+        """
+        self._captured = []
+
+    def _capture(self, keywords: list[str], max_items: int, window_days: int) -> dict[str, Any]:
+        """
+        Captures, and keeps what was captured.
+
+        `harvest_hashtags` needs the real post bodies. Handing them back to the
+        model so it can pass them to the next tool would mean the evidence
+        makes a round trip through a language model, and what returns is what
+        the model remembered rather than what the source said — the exact
+        fabrication constraint 3 forbids. So the posts stay here.
+        """
+        result = fetch_posts(keywords, max_items, window_days)
+        self._captured = list(result.get("posts", []))
+        return result
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         keywords = payload.get("keywords", [])[: self.config["max_keywords_per_run"]]
@@ -51,27 +85,27 @@ class ResearchAgent(Agent):
                     },
                     "required": ["keywords"],
                 },
-                handler=lambda keywords=keywords, max_items=max_items, window_days=window: fetch_posts(
+                handler=lambda keywords=keywords, max_items=max_items, window_days=window: self._capture(
                     keywords, max_items, window_days
                 ),
             ),
             ToolSpec(
                 name="harvest_hashtags",
-                description="Extract and count hashtags from captured post bodies.",
+                # The schema takes no posts on purpose: it reads the ones
+                # `fetch_posts` actually captured. Advertising a `posts`
+                # parameter invited the model to retype the corpus, and it
+                # retyped two of a hundred and fourteen, without their urls.
+                description=(
+                    "Extract and count hashtags from the posts fetch_posts captured. "
+                    "Operates on the captured corpus itself — you do not pass the posts."
+                ),
                 input_schema={
                     "type": "object",
-                    "properties": {
-                        "posts": {"type": "array", "items": {"type": "object"}},
-                        "min_occurrences": {"type": "integer"},
-                    },
+                    "properties": {"min_occurrences": {"type": "integer"}},
                 },
-                handler=lambda posts=None, min_occurrences=floor: harvest_hashtags(
-                    posts if posts is not None else self._last_posts, min_occurrences
-                ),
+                handler=lambda min_occurrences=floor: harvest_hashtags(self._captured, min_occurrences),
             ),
         ]
-
-    _last_posts: list[dict[str, Any]] = []
 
     def task(self, payload: dict[str, Any]) -> str:
         keywords = payload.get("keywords", [])[: self.config["max_keywords_per_run"]]

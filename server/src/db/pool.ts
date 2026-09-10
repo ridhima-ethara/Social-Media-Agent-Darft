@@ -9,7 +9,35 @@
 import pg from 'pg'
 import { config, redactUrl } from '../config'
 
-const { Pool } = pg
+const { Pool, types } = pg
+
+/**
+ * Timestamps arrive as strings, not `Date` objects.
+ *
+ * Every row type in `repo.ts` declares its timestamp columns as `string`, and
+ * without this the driver hands back a `Date` — so the types were quietly
+ * lying and TypeScript could not catch the difference. It surfaced as
+ * `p.published_at?.startsWith is not a function`, which took out the monthly
+ * report and the analytics export at run time: `?.` guards a null, and a
+ * `Date` is not null.
+ *
+ * Parsed here, at the one boundary where rows are produced, so the declaration
+ * and the value agree for every consumer rather than at each call site that
+ * remembers to convert. ISO 8601 is what the API already serialises to and
+ * what `src/types.ts` mirrors, so this is the shape the product speaks.
+ */
+const TIMESTAMPTZ = 1184
+const TIMESTAMP = 1114
+const DATE = 1082
+
+const asIso = (value: string | null): string | null =>
+  value === null ? null : new Date(value).toISOString()
+
+types.setTypeParser(TIMESTAMPTZ, asIso)
+types.setTypeParser(TIMESTAMP, asIso)
+// A bare `date` has no time and no zone; keeping it as `YYYY-MM-DD` avoids
+// inventing a midnight in some timezone that the column never stated.
+types.setTypeParser(DATE, (value: string | null) => value)
 
 let pool: pg.Pool | null = null
 

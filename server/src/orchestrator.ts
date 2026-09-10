@@ -158,7 +158,7 @@ export async function runDiscoveryPipeline(
 
   if (scraping.status === 'failed') {
     // A critical failure finishes the run failed with NO partial hand-off.
-    return failRun(run.id, scraping.error ?? 'The Scraping Agent failed.', emptySummary(), turnId)
+    return failRun(run.id, scraping.error ?? `${AGENT_BY_ID.scraping.name} failed.`, emptySummary(), turnId)
   }
 
   const afterScrape = scraping.payload
@@ -172,7 +172,7 @@ export async function runDiscoveryPipeline(
   })
 
   if (validation.status === 'failed') {
-    return failRun(run.id, validation.error ?? 'The Validation Agent failed.', emptySummary(), turnId)
+    return failRun(run.id, validation.error ?? `${AGENT_BY_ID.validation.name} failed.`, emptySummary(), turnId)
   }
 
   const afterValidation = validation.payload
@@ -207,7 +207,7 @@ export async function runDiscoveryPipeline(
   })
 
   if (calendar.status === 'failed') {
-    return failRun(run.id, calendar.error ?? 'The Calendar Agent failed.', emptySummary(), turnId)
+    return failRun(run.id, calendar.error ?? `${AGENT_BY_ID.calendar.name} failed.`, emptySummary(), turnId)
   }
 
   const final = calendar.payload
@@ -898,7 +898,7 @@ export async function renderIdeaImage(
     },
   )
 
-  if (result.status === 'failed') throw new Error(result.error ?? 'The Image Agent failed.')
+  if (result.status === 'failed') throw new Error(result.error ?? `${AGENT_BY_ID.image.name} failed.`)
 
   const payload = result.payload
   const canvas = canvasFor(ctx.platform)
@@ -948,7 +948,10 @@ export async function renderIdeaImage(
 export interface InstructionResult {
   ideaId: string
   platform: Platform
-  draft: { body: string; revision: number }
+  /** Mirrors the client's Draft: dropping model/source rendered "Revision 4 · undefined · undefined". */
+  draft: { body: string; revision: number; model: string; source: 'live' | 'fixture' }
+  /** False when the instruction produced no change; the panel must not report an edit. */
+  applied: boolean
   note: string
   conflicts: string[]
   compliance: ReviewPayload['compliance']
@@ -958,7 +961,15 @@ export interface InstructionResult {
 }
 
 export async function applyInstruction(
-  ctx: OrchestratorContext & { ideaId: string; platform: Platform; instruction: string },
+  ctx: OrchestratorContext & {
+    ideaId: string
+    platform: Platform
+    instruction: string
+    /** The caption model the operator chose in the review panel. */
+    captionModel?: string
+    /** Files the operator attached for the model to work from. */
+    references?: Array<{ name: string; mimeType: string; text?: string; note?: string }>
+  },
 ): Promise<InstructionResult> {
   const { workspaceId, turnId = null } = ctx
   const idea = await getIdea(workspaceId, ctx.ideaId)
@@ -979,6 +990,10 @@ export async function applyInstruction(
       body: draft.body,
       instruction: ctx.instruction,
       hasImage: asset !== null,
+      ...(ctx.captionModel === undefined ? {} : { captionModel: ctx.captionModel }),
+      ...(ctx.references === undefined || ctx.references.length === 0
+        ? {}
+        : { references: ctx.references }),
       ...(asset?.alt_text ? { altText: asset.alt_text } : {}),
       ...(asset?.canvas ? { canvas: asset.canvas } : {}),
     },
@@ -997,38 +1012,54 @@ export async function applyInstruction(
 
   const payload = result.payload
   const body = payload.revisedBody ?? draft.body
+  // Nothing changed means nothing to version. Bumping the revision on a no-op
+  // makes the panel read "Revision 5" over the same text the operator just saw.
+  const changed = payload.revisionApplied !== false && body.trim() !== draft.body.trim()
 
-  const saved = await upsertDraft({
-    ideaId: idea.id,
-    platform: ctx.platform,
-    body,
-    generatedBy: 'review',
-    model: payload.revisionModel ?? 'ethara-template-writer',
-    source: payload.revisionSource ?? 'fixture',
-  })
+  const saved = changed
+    ? await upsertDraft({
+        ideaId: idea.id,
+        platform: ctx.platform,
+        body,
+        generatedBy: 'review',
+        model: payload.revisionModel ?? 'ethara-template-writer',
+        source: payload.revisionSource ?? 'fixture',
+      })
+    : null
 
+  // The ask is recorded either way — law 4, nothing is ever deleted, and an
+  // instruction that could not be carried out is part of the post's history.
   await appendIdeaFeedback(workspaceId, idea.id, {
     instruction: ctx.instruction,
     note: payload.appliedNote ?? '',
     platform: ctx.platform,
-    revision: saved?.revision ?? draft.revision + 1,
+    revision: saved?.revision ?? draft.revision,
   })
 
-  if (idea.status === 'suggested' || idea.status === 'drafted') {
+  if (changed && (idea.status === 'suggested' || idea.status === 'drafted')) {
     await updateIdea(workspaceId, idea.id, { status: 'in_review' })
   }
 
   await insertActivity({
     workspaceId,
     agentId: 'review',
-    message: `“${idea.title}” revised — ${payload.appliedNote ?? ctx.instruction}`,
-    status: (payload.conflictNotes?.length ?? 0) > 0 ? 'warn' : 'ok',
+    message: changed
+      ? `“${idea.title}” revised — ${payload.appliedNote ?? ctx.instruction}`
+      : `“${idea.title}” unchanged — ${payload.appliedNote ?? ctx.instruction}`,
+    status: !changed || (payload.conflictNotes?.length ?? 0) > 0 ? 'warn' : 'ok',
   })
 
   return {
     ideaId: idea.id,
     platform: ctx.platform,
-    draft: { body, revision: saved?.revision ?? draft.revision + 1 },
+    draft: {
+      body,
+      revision: saved?.revision ?? draft.revision,
+      // `model` is nullable on the row; the client's Draft is not.
+      model: saved?.model ?? draft.model ?? 'ethara-template-writer',
+      source: saved?.source ?? draft.source,
+    },
+    applied: changed,
     note: payload.appliedNote ?? '',
     conflicts: payload.conflictNotes ?? [],
     compliance: payload.compliance,
@@ -1160,6 +1191,32 @@ export async function publishIdea(
 
   const platform = ctx.platform ?? idea.platform
 
+  /*
+   * DEMO MODE DOES NOT PUBLISH.
+   *
+   * The simulator used to accept a publish and write a real `posts` row with a
+   * seeded receipt id. Everything downstream then treated that row as a
+   * publication: the idea moved to `published`, the Analytics Agent measured it,
+   * and the Learning Agent wrote lessons from an audience that never saw
+   * anything. The stamp said `demo`, but a stamp is not much defence when the
+   * status, the receipt and the metrics all read as real.
+   *
+   * So the refusal is here, at the one function every caller reaches — the REST
+   * route, the command plane's publish tool and the operator's button all arrive
+   * through it, so none of them can route around this.
+   *
+   * This is a refusal, not a silent no-op: nothing is marked published, and the
+   * reason names exactly what would make publishing possible.
+   */
+  if (config.core.publishMode !== 'live') {
+    throw new Error(
+      `Publishing is disabled in demo mode, so “${idea.title}” was not published and nothing was ` +
+        `recorded. A simulated receipt would be indistinguishable from a real one downstream. ` +
+        `To publish for real, set PUBLISH_MODE=live and supply the ${PLATFORM_LABEL[platform]} ` +
+        `access token; the two human approvals on this post remain valid and do not need repeating.`,
+    )
+  }
+
   // Both signatures, checked here rather than trusted from the caller.
   if (idea.marketing_approved_at === null) {
     throw new Error(
@@ -1170,6 +1227,20 @@ export async function publishIdea(
   if (!decision || decision.decision !== 'approved') {
     throw new Error(
       `“${idea.title}” has no Leadership approval. That checkpoint has no off switch.`,
+    )
+  }
+
+  /*
+   * Publishing is the one irreversible act, so it is also the one that must not
+   * happen twice. A retried request, a double-clicked button or two concurrent
+   * calls would otherwise each dispatch and each record a receipt — and in demo
+   * mode the receipt id is seeded, so the duplicates are indistinguishable.
+   * The status is the intent check; the unique index on (workspace_id,
+   * external_id) is the backstop underneath it.
+   */
+  if (idea.status === 'published') {
+    throw new Error(
+      `“${idea.title}” is already published. Publishing is irreversible, so it is never repeated automatically.`,
     )
   }
 
@@ -1200,7 +1271,7 @@ export async function publishIdea(
     },
   )
 
-  if (result.status === 'failed') throw new Error(result.error ?? 'The Publishing Agent failed.')
+  if (result.status === 'failed') throw new Error(result.error ?? `${AGENT_BY_ID.publishing.name} failed.`)
 
   const payload = result.payload
   const postId = payload.postId

@@ -24,7 +24,13 @@
  * platform lane it came from.
  */
 
-import { BRAND_TOPICS, GENERIC_HASHTAGS } from '../../../../shared/brand-voice'
+import {
+  BRAND_CORPUS_TAG,
+  BRAND_DOMAIN_TAG,
+  BRAND_RULE_TAG,
+  BRAND_TOPICS,
+  GENERIC_HASHTAGS,
+} from '../../../../shared/brand-voice'
 import { synonymsFor } from '../../../../shared/keywords'
 import { PLATFORMS, type Platform, type SkillContext } from '../../../../shared/agent-contract'
 import { config } from '../../config'
@@ -35,7 +41,7 @@ import {
   type RawPost,
 } from '../../integrations'
 import { prepareEvidence } from '../../../../packages/runtime/src/evidence'
-import { listKeywords, listKnowledge, listSources, recentExternalIds } from '../../db/repo'
+import { listKeywords, listKnowledge, listSources, recentCaptures } from '../../db/repo'
 import {
   clampChars,
   contentWords,
@@ -94,32 +100,73 @@ function sourceTypeFor(platform: Platform | null): string {
 
 /**
  * The vocabulary a captured page is judged against: the declared brand topics,
- * plus whatever the Knowledge Base has actually learned.
+ * the live Knowledge Base corpus, and the active keyword set.
  *
- * The Knowledge Base half is what keeps this current. Brand topics are a fixed
- * declaration written once; the KB moves every Sunday, so a term the company
- * has since started publishing about counts as aligned without anyone editing
- * a constant.
+ * THREE SOURCES, ONE JUDGEMENT.
+ *
+ *   topics    a fixed declaration of the rule 1 / rule 7 domain, written once.
+ *
+ *   knowledge what the company actually knows. This is the half that keeps the
+ *             judgement current: the corpus moves as the Knowledge Base grows,
+ *             so a subject the company has since started publishing about
+ *             counts as aligned without anyone editing a constant.
+ *
+ *   keywords  the terms the operator declared, plus their synonyms. A page that
+ *             is squarely about another active keyword is on-brand even when the
+ *             keyword that surfaced it barely appears.
+ *
+ * Brand RULE entries are excluded on purpose. They are compliance documents, so
+ * their vocabulary is "hashtag", "punctuation" and "emoji" — admitting them
+ * would let the style guide decide which articles are topically relevant.
  */
 interface AlignmentVocabulary {
   topics: string[]
   knowledgeTerms: Set<string>
+  keywordTerms: Set<string>
   knowledgeEntries: number
 }
 
 async function loadAlignmentVocabulary(workspaceId: string): Promise<AlignmentVocabulary> {
-  const entries = await listKnowledge(workspaceId, { activeOnly: true, limit: 400 })
+  const [entries, keywords] = await Promise.all([
+    listKnowledge(workspaceId, { activeOnly: true, limit: 400 }),
+    listKeywords(workspaceId, true),
+  ])
+
   const knowledgeTerms = new Set<string>()
+  let counted = 0
 
   for (const entry of entries) {
-    for (const tag of entry.tags) knowledgeTerms.add(tag.toLowerCase())
+    // The style guide does not get a vote on what is on-topic.
+    if (entry.tags.includes(BRAND_RULE_TAG)) continue
+
+    /*
+     * Nor does the brand's description of itself. A corpus entry covering voice,
+     * audience or visual identity is real knowledge and stays available as
+     * grounding, but its vocabulary is "typography" and "declarative" — facts
+     * about how we publish, not subjects we publish about. Admitting it would
+     * score an article about typography as on-topic for an AI research lab.
+     */
+    const isCorpus = entry.tags.includes(BRAND_CORPUS_TAG)
+    if (isCorpus && !entry.tags.includes(BRAND_DOMAIN_TAG)) continue
+    counted += 1
+
+    for (const tag of entry.tags) {
+      if (tag === 'brand' || tag === BRAND_CORPUS_TAG || tag === BRAND_DOMAIN_TAG) continue
+      knowledgeTerms.add(tag.toLowerCase())
+    }
     if (entry.hashtag_display) knowledgeTerms.add(entry.hashtag_display.toLowerCase())
     // Titles carry the claim's subject in the operator's own words; bodies are
     // long and would dilute the set into ordinary English.
     for (const word of contentWords(entry.title)) knowledgeTerms.add(word)
   }
 
-  return { topics: BRAND_TOPICS, knowledgeTerms, knowledgeEntries: entries.length }
+  const keywordTerms = new Set<string>()
+  for (const keyword of keywords) {
+    keywordTerms.add(keyword.term.toLowerCase())
+    for (const synonym of synonymsFor(keyword.term)) keywordTerms.add(synonym.toLowerCase())
+  }
+
+  return { topics: BRAND_TOPICS, knowledgeTerms, keywordTerms, knowledgeEntries: counted }
 }
 
 interface Alignment {
@@ -127,17 +174,18 @@ interface Alignment {
   matchedTopics: string[]
   knowledgeHits: number
   keywordInBody: boolean
+  keywordSetHits: number
 }
 
 /**
  * How well a captured body aligns with what this company talks about, 0–100.
  *
- * Three independent signals, deliberately additive: presence raises the score
+ * Four independent signals, deliberately additive: presence raises the score
  * and absence never subtracts, because a page can be squarely on-topic while
- * using none of the exact words in one of the three sets. The keyword that
- * surfaced the page is the weakest of the three on its own — a search engine
- * matched it, so its presence is close to guaranteed — which is why it is
- * capped well below the other two rather than dominating them.
+ * using none of the exact words in one of the sets. The keyword that surfaced
+ * the page is the weakest signal on its own — a search engine matched it, so
+ * its presence is close to guaranteed — which is why it is capped well below
+ * the topic and knowledge signals rather than dominating them.
  */
 function alignmentOf(
   text: string,
@@ -153,17 +201,28 @@ function alignmentOf(
     if (words.has(term) || (term.includes(' ') && haystack.includes(term))) knowledgeHits += 1
   }
 
-  const keywordInBody = haystack.includes(keyword.toLowerCase())
+  // Which OTHER declared keywords this page speaks to. Counted separately from
+  // the surfacing keyword so a page cannot score twice for the same match.
+  const surfacing = keyword.toLowerCase()
+  let keywordSetHits = 0
+  for (const term of vocabulary.keywordTerms) {
+    if (term === surfacing) continue
+    if (words.has(term) || (term.includes(' ') && haystack.includes(term))) keywordSetHits += 1
+  }
 
-  const topicScore = Math.min(55, topics.length * 14)
+  const keywordInBody = haystack.includes(surfacing)
+
+  const topicScore = Math.min(45, topics.length * 12)
   const knowledgeScore = Math.min(30, knowledgeHits * 6)
-  const keywordScore = keywordInBody ? 15 : 0
+  const keywordSetScore = Math.min(15, keywordSetHits * 5)
+  const keywordScore = keywordInBody ? 10 : 0
 
   return {
-    score: Math.min(100, topicScore + knowledgeScore + keywordScore),
+    score: Math.min(100, topicScore + knowledgeScore + keywordSetScore + keywordScore),
     matchedTopics: topics,
     knowledgeHits,
     keywordInBody,
+    keywordSetHits,
   }
 }
 
@@ -185,10 +244,8 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
       ? all.filter((k) => payload.keywordIds?.includes(k.id))
       : all
 
-  const eligible = scoped
-    .filter((k) => k.weight >= minWeight)
-    .sort((a, b) => b.weight - a.weight)
-    .slice(0, Math.max(1, maxKeywords))
+  const cleared = scoped.filter((k) => k.weight >= minWeight).sort((a, b) => b.weight - a.weight)
+  const eligible = cleared.slice(0, Math.max(1, maxKeywords))
 
   const keywords: ResolvedKeyword[] = eligible.map((k) => ({
     id: k.id,
@@ -198,10 +255,18 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
     synonyms: expand ? synonymsFor(k.term) : [],
   }))
 
-  const belowFloor = scoped.length - eligible.length
+  // The floor and the per-run cap are different reasons for a keyword to sit
+  // out, and rule 6 wants the reason to name its actual cause. Reporting the
+  // cap as a weight failure sends the operator to re-weight a term that was
+  // never under-weighted.
+  const belowFloor = scoped.length - cleared.length
+  const beyondCap = cleared.length - eligible.length
   ctx.log(
     `${keywords.length} keyword${keywords.length === 1 ? '' : 's'} resolved` +
-      (belowFloor > 0 ? `, ${belowFloor} below the ${minWeight}% weight floor` : ''),
+      (belowFloor > 0 ? `, ${belowFloor} below the ${minWeight}% weight floor` : '') +
+      (beyondCap > 0
+        ? `, ${beyondCap} cleared the floor but sat outside the ${maxKeywords}-keyword cap for this run`
+        : ''),
   )
 
   if (keywords.length === 0) {
@@ -364,9 +429,18 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
 
   const vocabulary = await loadAlignmentVocabulary(ctx.workspaceId)
   ctx.log(
-    `Aligning against ${vocabulary.topics.length} brand topics and ` +
-      `${vocabulary.knowledgeEntries} Knowledge Base entr${vocabulary.knowledgeEntries === 1 ? 'y' : 'ies'}`,
+    `Aligning against ${vocabulary.topics.length} brand topics, ` +
+      `${vocabulary.knowledgeEntries} Knowledge Base corpus entr${vocabulary.knowledgeEntries === 1 ? 'y' : 'ies'} ` +
+      `and ${vocabulary.keywordTerms.size} declared keyword term${vocabulary.keywordTerms.size === 1 ? '' : 's'}`,
   )
+  if (vocabulary.knowledgeEntries === 0) {
+    ctx.emit(
+      'activity',
+      'The Knowledge Base holds no corpus entries, so alignment is running on the brand topics and keywords alone. ' +
+        'Add corpus entries under Knowledge Base → Brand corpus to sharpen it.',
+      { status: 'warn' },
+    )
+  }
 
   const laneReasons: string[] = []
   /** Kept per lane so the run console can say WHERE the material came from. */
@@ -898,7 +972,8 @@ registerSkill<PipelinePayload>('scraping.dedupe.prefilter', async (payload, ctx)
   if (posts.length === 0) return {}
 
   const historyDays = ctx.num('historyDays', 14)
-  const seen = await recentExternalIds(ctx.workspaceId, historyDays)
+  const onRecord = await recentCaptures(ctx.workspaceId, historyDays)
+  const termById = new Map((payload.keywords ?? []).map((k) => [k.id, k.term]))
 
   // Within-batch identity as well as against history: the same page can arrive
   // twice from two keyword queries, or from two platform lanes.
@@ -908,8 +983,25 @@ registerSkill<PipelinePayload>('scraping.dedupe.prefilter', async (payload, ctx)
   let droppedBatch = 0
 
   for (const post of posts) {
-    if (seen.has(post.externalId) || (post.url && seen.has(post.url))) {
+    const prior = onRecord.get(post.externalId) ?? (post.url ? onRecord.get(post.url) : undefined)
+    if (prior) {
       droppedHistory += 1
+      // Held back, not judged — no verdict is assigned here. The event exists
+      // so the run can show WHICH pages were already on record and since when.
+      // A bare count leaves the validation stage looking idle when in fact it
+      // was handed nothing new.
+      ctx.emit('item.held', post.title, {
+        externalId: post.externalId,
+        keyword: (post.keywordId === null ? undefined : termById.get(post.keywordId)) ?? '',
+        platform: post.platform ?? 'open-web',
+        heldSince: prior.scrapedAt,
+        originalId: prior.id,
+        originalTitle: prior.title,
+        // The verdict the earlier run reached. Reported, not re-judged.
+        verdict: prior.validation,
+        reason: prior.verdictReason ?? '',
+        historyDays,
+      })
       continue
     }
     if (batch.has(post.externalId)) {

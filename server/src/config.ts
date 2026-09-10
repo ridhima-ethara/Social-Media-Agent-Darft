@@ -214,8 +214,9 @@ export const config = {
     get textModel(): string {
       return str('GCP_TEXT_MODEL', 'gemini-2.5-pro')
     },
+    /** Same rule as Ollama's: an unset fast model means the configured one. */
     get fastTextModel(): string {
-      return str('GCP_FAST_TEXT_MODEL', 'gemini-2.5-flash')
+      return str('GCP_FAST_TEXT_MODEL', this.textModel)
     },
     get imageModel(): string {
       return str('GCP_IMAGE_MODEL', 'imagen-4.0-generate-001')
@@ -253,9 +254,17 @@ export const config = {
     get textModel(): string {
       return str('OLLAMA_TEXT_MODEL', 'qwen3:14b')
     },
-    /** Short, cheap calls — narration and single rewrites. */
+    /**
+     * Short, cheap calls — narration and single rewrites.
+     *
+     * Falls back to the model the operator actually configured, never to a
+     * second hardcoded tag. A literal default here names a model the operator
+     * never chose and may not have pulled: every `fast` call then failed with
+     * "model not found", `withFallback` swallowed it, and caption edits
+     * silently ran on the built-in writer instead of the model.
+     */
     get fastTextModel(): string {
-      return str('OLLAMA_FAST_TEXT_MODEL', 'qwen3:14b')
+      return str('OLLAMA_FAST_TEXT_MODEL', this.textModel)
     },
     /** Background painting. Empty disables the Ollama image transport. */
     get imageModel(): string {

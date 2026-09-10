@@ -8,8 +8,10 @@
  * `GET /state` is the aggregate read that hydrates the whole UI in one call.
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { CORPUS_DIR, SUPPORTED_EXTENSIONS, ingestCorpusFiles, isSupportedCorpusFile } from './agents/knowledge/corpus-ingest'
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import express, { type Request, type Response, type Router } from 'express'
 import { z } from 'zod'
 
@@ -24,8 +26,19 @@ import {
   defaultSkillConfig,
 } from '../../shared/agent-registry'
 import { TOOLS, TOOL_SUMMARY, matchTools, TOOL_BY_ID } from '../../shared/tool-registry'
-import { BRAND, BRAND_RULES } from '../../shared/brand-voice'
+import {
+  BRAND,
+  BRAND_CORPUS,
+  BRAND_CORPUS_TAG,
+  BRAND_DOMAIN_TAG,
+  BRAND_RULES,
+  BRAND_RULE_TAG,
+  BRAND_TOPICS,
+  brandCorpusAsKnowledge,
+} from '../../shared/brand-voice'
+import { synonymsFor } from '../../shared/keywords'
 import { IMAGE_MODELS, IMAGE_MODEL_IDS } from '../../shared/image-models'
+import { TEXT_MODELS } from '../../shared/text-models'
 import { config, integrationStatuses } from './config'
 import { databaseReachable } from './db/pool'
 import {
@@ -47,6 +60,7 @@ import {
   listHashtags,
   listIdeas,
   listKeywords,
+  countKnowledge,
   listKnowledge,
   listKnowledgeBuilds,
   listMediaForIdeas,
@@ -102,6 +116,7 @@ import {
 } from './orchestrator'
 import { bus, publish, recentEvents, subscribe, toSseFrame, REPLAY_SIZE } from './events'
 import { PLATFORM_LABEL } from './agents/corpus'
+import { persistAgentRun } from './agents/persist-run'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE WRAPPER
@@ -134,6 +149,68 @@ function parseBody<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T>
 }
 
 const platformSchema = z.enum(PLATFORMS)
+
+/** The caption models the review panel may choose between. */
+const TEXT_MODEL_IDS = TEXT_MODELS.map((model) => model.id) as [string, ...string[]]
+
+/**
+ * One file the operator attached in the review panel for a model to work from.
+ *
+ * Bounded on every field: an unbounded `dataUri` is an unbounded request body,
+ * and the client already truncates text to the same ceiling.
+ */
+const referenceSchema = z.object({
+  name: z.string().min(1).max(200),
+  mimeType: z.string().max(120).default('application/octet-stream'),
+  size: z.number().int().nonnegative().optional(),
+  text: z.string().max(8_000).optional(),
+  dataUri: z.string().max(6_000_000).optional(),
+  unreadableReason: z.string().max(300).optional(),
+})
+
+type ReferenceInput = z.infer<typeof referenceSchema>
+
+/** Narrows a validated reference to what the skill payload carries. */
+function toReference(reference: ReferenceInput): {
+  name: string
+  mimeType: string
+  text?: string
+  note?: string
+} {
+  return {
+    name: reference.name,
+    mimeType: reference.mimeType,
+    ...(reference.text === undefined ? {} : { text: reference.text }),
+    ...(reference.unreadableReason === undefined
+      ? reference.text === undefined && reference.dataUri !== undefined
+        ? { note: 'an image was attached; the caption writer reads text only' }
+        : {}
+      : { note: reference.unreadableReason }),
+  }
+}
+
+/**
+ * Folds attachments into an image instruction.
+ *
+ * The painters accept a prompt rather than an image, so an attached picture is
+ * named and reported as not sent. A caller who believes their moodboard was
+ * passed to the model would read the result as a response to it.
+ */
+function describeReferencesForPrompt(references?: ReferenceInput[]): string {
+  if (!references || references.length === 0) return ''
+
+  const lines = references.map((reference) => {
+    if (reference.text && reference.text.trim().length > 0) {
+      return `· ${reference.name}: ${reference.text.slice(0, 1_200)}`
+    }
+    if (reference.dataUri) {
+      return `· ${reference.name}: an image was attached, but this painter takes a text prompt, so its contents were not sent.`
+    }
+    return `· ${reference.name}: contents unavailable — ${reference.unreadableReason ?? 'unreadable'}.`
+  })
+
+  return `\n\nOperator reference material:\n${lines.join('\n')}`
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE ROUTER
@@ -313,6 +390,18 @@ export function createApiRouter(): Router {
           conversationId: z.string().uuid().optional(),
           actor: z.string().optional(),
           role: z.enum(['marketing', 'leadership']).optional(),
+          /**
+           * What the operator is looking at. A screen-embedded assistant states
+           * the post in focus so "make this shorter" needs no follow-up question.
+           */
+          focus: z
+            .object({
+              type: z.string().max(40),
+              id: z.string().max(80),
+              title: z.string().max(300).optional(),
+              platform: platformSchema.optional(),
+            })
+            .optional(),
         }),
         req.body,
       )
@@ -330,6 +419,7 @@ export function createApiRouter(): Router {
         ...(body.conversationId ? { conversationId: body.conversationId } : {}),
         actor: body.actor ?? 'Ridhima',
         role: body.role ?? 'marketing',
+        ...(body.focus === undefined ? {} : { focus: body.focus }),
         emit: send,
       })
 
@@ -656,6 +746,7 @@ export function createApiRouter(): Router {
           category: z.string().min(2).default('User Feedback'),
           content: z.string().min(3),
           confidence: z.enum(['High', 'Medium', 'Low']).default('Medium'),
+          tags: z.array(z.string().min(2).max(40)).max(12).optional(),
         }),
         req.body,
       )
@@ -670,9 +761,230 @@ export function createApiRouter(): Router {
         confidence: body.confidence,
         origin: 'manual',
         buildId: null,
-        tags: [],
+        tags: body.tags ?? [],
       })
       return { entry: inserted }
+    }),
+  )
+
+  /* ── THE BRAND CORPUS ─────────────────────────────────────────────────────
+     The corpus is the half of the Knowledge Base that says what this company
+     talks about, as opposed to the rules that say how to write. It gets its own
+     routes because it is the vocabulary the Scraping Agent scores every captured
+     page against: adding a corpus entry changes what the next run admits, and
+     that is a different operator intention from filing a research finding.
+     ──────────────────────────────────────────────────────────────────────── */
+
+  api.get(
+    '/knowledge/corpus',
+    route(async (_req, _res, workspaceId) => {
+      const [entries, rules, keywords] = await Promise.all([
+        listKnowledge(workspaceId, { tag: BRAND_CORPUS_TAG, limit: 200 }),
+        listKnowledge(workspaceId, { tag: BRAND_RULE_TAG, limit: 200 }),
+        listKeywords(workspaceId, true),
+      ])
+
+      // Exactly what alignment will read: corpus tags, minus the two bookkeeping
+      // tags, plus the declared keyword terms and their synonyms.
+      const vocabulary = new Set<string>()
+      for (const entry of entries) {
+        if (!entry.active) continue
+        // Identity entries (voice, audience, visual) are corpus but not subject
+        // matter, so they never reach alignment. See BRAND_DOMAIN_TAG.
+        if (!entry.tags.includes(BRAND_DOMAIN_TAG)) continue
+        for (const tag of entry.tags) {
+          if (tag === 'brand' || tag === BRAND_CORPUS_TAG || tag === BRAND_DOMAIN_TAG) continue
+          vocabulary.add(tag.toLowerCase())
+        }
+      }
+      const keywordTerms = new Set<string>()
+      for (const keyword of keywords) {
+        keywordTerms.add(keyword.term.toLowerCase())
+        for (const synonym of synonymsFor(keyword.term)) keywordTerms.add(synonym.toLowerCase())
+      }
+
+      return {
+        entries,
+        stats: {
+          total: entries.length,
+          active: entries.filter((e) => e.active).length,
+          /** Subject-matter entries — the only ones that reach alignment. */
+          domain: entries.filter((e) => e.tags.includes(BRAND_DOMAIN_TAG)).length,
+          rules: rules.length,
+          brandTopics: BRAND_TOPICS.length,
+          corpusTerms: vocabulary.size,
+          keywordTerms: keywordTerms.size,
+          /** What the Scraping Agent will actually judge against on the next run. */
+          alignmentTerms: BRAND_TOPICS.length + vocabulary.size + keywordTerms.size,
+        },
+        /** The declared defaults, so the UI can show what a reseed would restore. */
+        available: BRAND_CORPUS.map((entry) => ({
+          title: entry.title,
+          category: entry.category,
+          tags: entry.tags,
+          keyPoints: entry.keyPoints,
+          domain: entry.domain,
+        })),
+      }
+    }),
+  )
+
+  api.post(
+    '/knowledge/corpus',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(
+        z.object({
+          title: z.string().min(3),
+          category: z.string().min(2).default('Brand Corpus'),
+          content: z.string().min(3),
+          confidence: z.enum(['High', 'Medium', 'Low']).default('High'),
+          /** Domain vocabulary. This is the part that reaches the Scraping Agent. */
+          tags: z.array(z.string().min(2).max(40)).min(1).max(20),
+          keyPoints: z.array(z.string().min(3)).max(12).optional(),
+          /**
+           * Whether this entry is subject matter. True by default: an operator
+           * adding domain terms is the common case, and it is the only case that
+           * changes what discovery admits.
+           */
+          domain: z.boolean().default(true),
+        }),
+        req.body,
+      )
+
+      const keyPoints = (body.keyPoints ?? []).filter((p) => p.trim().length > 0)
+      const content =
+        keyPoints.length > 0
+          ? `${body.content}\n\nKey points:\n${keyPoints.map((p) => `- ${p}`).join('\n')}`
+          : body.content
+
+      const inserted = await insertKnowledgeEntry({
+        workspaceId,
+        title: body.title,
+        category: body.category,
+        content,
+        source: 'Brand corpus',
+        sources: [],
+        hashtagId: null,
+        confidence: body.confidence,
+        // `brand` rather than `manual`: retrieval already prioritises brand
+        // origin, and this entry is a statement of what the company is about.
+        origin: 'brand',
+        buildId: null,
+        tags: [
+          'brand',
+          BRAND_CORPUS_TAG,
+          ...(body.domain ? [BRAND_DOMAIN_TAG] : []),
+          ...body.tags.map((t) => t.trim().toLowerCase()),
+        ],
+      })
+
+      return {
+        entry: inserted,
+        appliesTo: body.domain
+          ? 'The next discovery run scores captured pages against it.'
+          : 'Stored as brand knowledge. It grounds generation but does not decide which pages are on topic.',
+      }
+    }),
+  )
+
+  /**
+   * The upload door into the corpus. Files are written under `corpus/uploads/`
+   * — the same folder the ingest script walks — and ingested on the spot, so an
+   * upload and a `git add corpus/` are indistinguishable in the store.
+   */
+  api.post(
+    '/knowledge/corpus/upload',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(
+        z.object({
+          files: z
+            .array(
+              z.object({
+                name: z.string().min(1).max(200),
+                /** Base64 of the raw bytes. JSON keeps the route inside the one body parser the API has. */
+                content: z.string().min(1),
+              }),
+            )
+            .min(1)
+            .max(20),
+        }),
+        req.body,
+      )
+
+      const uploadDir = join(CORPUS_DIR, 'uploads')
+      mkdirSync(uploadDir, { recursive: true })
+
+      const written: string[] = []
+      const refused: Array<{ file: string; detail: string }> = []
+      for (const file of body.files) {
+        // Just the leaf name, sanitised: a path in the name never walks the tree.
+        const safe = basename(file.name).replace(/[^\w.\- ()]+/g, '_').trim()
+        if (safe.length === 0 || !isSupportedCorpusFile(safe)) {
+          refused.push({ file: file.name, detail: `not a supported type (${SUPPORTED_EXTENSIONS.join(', ')})` })
+          continue
+        }
+        const target = join(uploadDir, safe)
+        writeFileSync(target, Buffer.from(file.content, 'base64'))
+        written.push(target)
+      }
+
+      const report = written.length > 0 ? await ingestCorpusFiles(workspaceId, written) : { inserted: 0, skipped: 0, deactivated: 0, files: [] }
+
+      const unreadable = report.files.filter((f) => f.outcome === 'unreadable').length + refused.length
+      const summary =
+        `${report.inserted > 0 ? `Stored ${report.inserted} section${report.inserted === 1 ? '' : 's'}` : 'Nothing new stored'}` +
+        `${report.skipped > 0 ? `, ${report.skipped} already known` : ''}` +
+        `${report.deactivated > 0 ? `, ${report.deactivated} superseded switched off` : ''}` +
+        `${unreadable > 0 ? `; ${unreadable} file${unreadable === 1 ? '' : 's'} could not be read` : ''}.`
+
+      return {
+        ...report,
+        files: [...report.files, ...refused.map((r) => ({ file: r.file, sections: 0, outcome: 'unreadable' as const, detail: r.detail }))],
+        summary,
+      }
+    }),
+  )
+
+  /**
+   * Restores any declared corpus entry that is missing.
+   *
+   * Additive by design: an entry the operator edited or switched off is left
+   * exactly as it is, because silently reinstating a decision someone made on
+   * purpose is the kind of behaviour that makes a system untrustworthy.
+   */
+  api.post(
+    '/knowledge/corpus/restore',
+    route(async (_req, _res, workspaceId) => {
+      const existing = await listKnowledge(workspaceId, { tag: BRAND_CORPUS_TAG, limit: 200 })
+      const have = new Set(existing.map((e) => e.title))
+
+      const restored: string[] = []
+      for (const seed of brandCorpusAsKnowledge()) {
+        if (have.has(seed.title)) continue
+        await insertKnowledgeEntry({
+          workspaceId,
+          title: seed.title,
+          category: seed.category,
+          content: seed.content,
+          source: 'Brand corpus',
+          sources: [],
+          hashtagId: null,
+          confidence: seed.confidence,
+          origin: 'brand',
+          buildId: null,
+          tags: seed.tags,
+        })
+        restored.push(seed.title)
+      }
+
+      return {
+        restored,
+        skipped: existing.length,
+        reason:
+          restored.length === 0
+            ? `All ${existing.length} declared corpus entries are already present. Nothing was changed.`
+            : `Restored ${restored.length} missing corpus entr${restored.length === 1 ? 'y' : 'ies'}. ${existing.length} existing entr${existing.length === 1 ? 'y was' : 'ies were'} left untouched.`,
+      }
     }),
   )
 
@@ -728,9 +1040,20 @@ export function createApiRouter(): Router {
           model: z.enum(IMAGE_MODEL_IDS).optional(),
           prompt: z.string().optional(),
           instruction: z.string().optional(),
+          references: z.array(referenceSchema).max(8).optional(),
         }),
         req.body,
       )
+
+      // The painters take a prompt, not an image, so a textual reference folds
+      // into the instruction and an attached picture is named rather than sent.
+      // Saying which happened beats silently discarding the file.
+      const referenceNote = describeReferencesForPrompt(body.references)
+      const instruction =
+        body.instruction === undefined && referenceNote === ''
+          ? undefined
+          : `${body.instruction ?? ''}${referenceNote}`.trim()
+
       const media = await renderIdeaImage({
         workspaceId,
         trigger: 'api',
@@ -738,7 +1061,7 @@ export function createApiRouter(): Router {
         platform: body.platform,
         ...(body.model === undefined ? {} : { model: body.model }),
         ...(body.prompt === undefined ? {} : { prompt: body.prompt }),
-        ...(body.instruction === undefined ? {} : { instruction: body.instruction }),
+        ...(instruction === undefined ? {} : { instruction }),
       })
       return { media }
     }),
@@ -748,7 +1071,12 @@ export function createApiRouter(): Router {
     '/ideas/:id/instruct',
     route(async (req, _res, workspaceId) => {
       const body = parseBody(
-        z.object({ platform: platformSchema, instruction: z.string().min(2) }),
+        z.object({
+          platform: platformSchema,
+          instruction: z.string().min(2),
+          model: z.enum(TEXT_MODEL_IDS).optional(),
+          references: z.array(referenceSchema).max(8).optional(),
+        }),
         req.body,
       )
       const result = await applyInstruction({
@@ -757,9 +1085,12 @@ export function createApiRouter(): Router {
         ideaId: String(req.params.id),
         platform: body.platform,
         instruction: body.instruction,
+        ...(body.model === undefined ? {} : { captionModel: body.model }),
+        ...(body.references === undefined ? {} : { references: body.references.map(toReference) }),
       })
       return {
         draft: result.draft,
+        applied: result.applied,
         note: result.note,
         compliance: result.compliance,
         preference: result.preference,
@@ -1158,6 +1489,11 @@ export function createApiRouter(): Router {
     let buffer = ''
     let finished = false
 
+    // The run's own writes to Postgres. `close` waits on this, so `end` is only
+    // sent once what the agents produced is durable — an operator who sees the
+    // run finish and refetches state gets the run, not the state before it.
+    let persisting: Promise<unknown> = Promise.resolve()
+
     const forward = (frame: Record<string, unknown>): void => {
       res.write(`event: ${String(frame.event)}\ndata: ${JSON.stringify(frame)}\n\n`)
       const event = String(frame.event)
@@ -1167,6 +1503,33 @@ export function createApiRouter(): Router {
           agentId: String(frame.agent_id ?? ''),
           message: String(frame.summary ?? frame.name ?? ''),
         })
+      }
+      if (event === 'workflow.output') {
+        persisting = persistAgentRun(frame)
+          .then((written) => {
+            res.write(`event: agents.persisted\ndata: ${JSON.stringify(written)}\n\n`)
+            // Law 8. The client reconciles by refetching `/state`; this only
+            // tells it that there is now something new to refetch.
+            publish({
+              type: 'pipeline.finished',
+              runId: written.runId,
+              message:
+                `${written.ideasCreated} idea(s) written, ${written.ideasUpdated} updated, ` +
+                `${written.hashtags} hashtag(s) and ${written.signals} keyword signal(s) recorded.`,
+              data: { ...written },
+            })
+          })
+          .catch((error: unknown) => {
+            // Reported, never swallowed. A run whose output did not land is a
+            // run the operator must know about, because the screen will look
+            // exactly like a run that never happened.
+            const message = error instanceof Error ? error.message : String(error)
+            res.write(
+              `event: agents.persist_failed\ndata: ${JSON.stringify({
+                message: `The agents finished but their output could not be written: ${message}`,
+              })}\n\n`,
+            )
+          })
       }
     }
 
@@ -1195,8 +1558,10 @@ export function createApiRouter(): Router {
 
     child.on('close', (code) => {
       finished = true
-      res.write(`event: end\ndata: ${JSON.stringify({ code })}\n\n`)
-      res.end()
+      void persisting.finally(() => {
+        res.write(`event: end\ndata: ${JSON.stringify({ code })}\n\n`)
+        res.end()
+      })
     })
 
     // The kill guard belongs on the RESPONSE, not the request: `req` closes as
@@ -1272,6 +1637,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     ideas,
     published,
     knowledge,
+    knowledgeCounts,
     knowledgeBuild,
     agents,
     activity,
@@ -1292,6 +1658,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     listIdeas(workspaceId, { limit: 200 }),
     listPosts(workspaceId, { limit: 80 }),
     listKnowledge(workspaceId, { activeOnly: false, limit: 400 }),
+    countKnowledge(workspaceId),
     latestKnowledgeBuild(workspaceId),
     listAgentState(workspaceId),
     listActivity(workspaceId, 60),
@@ -1362,6 +1729,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     media: mediaMap,
     published,
     knowledge,
+    knowledgeCounts,
     knowledgeBuild,
     agents,
     activity,

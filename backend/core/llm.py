@@ -46,6 +46,11 @@ OLLAMA_CONTEXT_TOKENS = int(os.environ.get("OLLAMA_CONTEXT_TOKENS", "16384"))
 #: `deterministic` disables both.
 PROVIDER = os.environ.get("AGENT_MODEL_PROVIDER", "auto").strip().lower()
 
+#: What the loop says when it runs out of turns. Named because `run` has to be
+#: able to tell it apart from a real answer: it is a fact about the loop, not a
+#: report on the work, and it must never stand in for one.
+TURN_CAP_TEXT = "Reached the turn cap before finishing."
+
 
 @dataclass
 class ToolSpec:
@@ -289,7 +294,7 @@ def _run_ollama(system: str, task: str, tools: list[ToolSpec], max_turns: int) -
                 })
 
         return Reasoning(
-            text="Reached the turn cap before finishing.",
+            text=TURN_CAP_TEXT,
             turns=turns,
             payload=payload,
             used_model=True,
