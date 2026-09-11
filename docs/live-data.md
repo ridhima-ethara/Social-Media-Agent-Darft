@@ -11,7 +11,7 @@ Check what is live right now: `GET /api/health` → `integrations`, or **Setting
 
 | Agent | What it needs live | Connector / key | Cost | Status today |
 |---|---|---|---|---|
-| **Scraping** | Posts across LinkedIn, Instagram, X, Facebook and the open web | crawl4ai · `CRAWL4AI_PYTHON` (keyless, local) | free — a headless browser on this machine | **Live already** — and the only scraping path |
+| **Scraping** | Posts across LinkedIn, Instagram, X, Facebook and the open web | Apify · `APIFY_API_TOKEN` for the four platform lanes; crawl4ai · `CRAWL4AI_PYTHON` for the open web and as the platform fallback | Apify bills per result, capped by `APIFY_MAX_ITEMS_PER_KEYWORD`; crawl4ai is free — a headless browser on this machine | **Live already** — Apify states real engagement, crawl4ai states none and says so |
 | **Validation** | Nothing external. Scores what Scraping captured | — | — | Live already |
 | **Analysis** | Nothing external | — | — | Live already |
 | **Knowledge** | Deep research on the top 25 hashtags | Parallel · `PARALLEL_API_KEY`; crawl4ai reads the open web when it is absent | Parallel paid; crawl4ai free | **Live already** on crawl4ai; Parallel adds synthesis |
@@ -34,7 +34,7 @@ Analytics — are where real integration work remains.
    the source of everything downstream, and it costs nothing.
 2. **Gemini next.** One key turns on Caption, Image backgrounds and the command plane's model
    parser. `GCP_API_KEY` from AI Studio; free tier is enough.
-3. **Research** already probes live (arXiv returned real results in `npm run connectors`). Add
+3. **Research** reads the open web with crawl4ai already. Add
    `PARALLEL_API_KEY` only if you want the deep-research synthesis on top.
 4. **Platform tokens last** — they are the irreversible side, and they need the two pieces of work
    below before a token does anything.
@@ -50,9 +50,12 @@ Both adapters throw honestly rather than pretending. To wire them:
 | Instagram | `POST /{ig-user-id}/media` → `/media_publish` (Graph API, `instagram_content_publish`) | `GET /{media-id}/insights` | Business account linked to a Page; image must be a public URL |
 | X | `POST /2/tweets` (`tweet.write`) | `GET /2/tweets/:id?tweet.fields=public_metrics` | Basic tier is paid; free tier is write-only, 1,500/mo |
 
-Where it plugs in: `packages/mcp/publisher/index.ts` → `liveAdapter().publish()` per platform, and a
-new `packages/mcp/analytics/` connector feeding `analytics.metrics.ingest`. The approval gate, the
-receipt, the append-only history and the demo/live stamp are already in place around them.
+Where it plugs in: `liveAdapter` in `server/src/agents/publishing/handlers.ts` — it already
+implements the `PlatformAdapter` interface and throws with a specific reason, so a real
+implementation replaces its `dispatch()` and `uploadMedia()` without touching a caller. Reading
+metrics needs a new adapter in `server/src/integrations/` feeding `analytics.metrics.ingest`. The
+approval gate, the receipt, the append-only history and the demo/live stamp are already in place
+around them.
 
 One structural note: Instagram and X want a **public image URL**, not a data URI. The creative
 renderer produces data URIs today, so live publishing to those two also needs an asset upload step
@@ -63,8 +66,8 @@ renderer produces data URIs today, so live publishing to those two also needs an
 | Skill / server | What it does here |
 |---|---|
 | `packages/skills/*/SKILL.md` | The behavioural spec each agent runs under — built into `packages/runtime/.claude/skills/` by `npm run build-skills` |
-| `packages/mcp/*` | Typed connectors: similarity (local), research-sources (keyless), kb, render, publisher |
-| `npm run connectors` | Proves reachability instead of asserting it |
+| `server/src/integrations/*` | The typed connectors: `capture` (lane routing), `apify` (platform lanes), `crawl4ai` (open web and platform fallback), `parallel`, `gcp-llm`, `ollama` |
+| `GET /api/health` | Proves reachability instead of asserting it — every adapter's `configured` and the reason it is not |
 
 ## What "live" changes in the UI
 

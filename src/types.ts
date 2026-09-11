@@ -625,7 +625,19 @@ export interface ApiHealth {
   publishMode: string
   registry: { agents: number; skills: number; stages: number; knobs: number }
   tools: { total: number; safe: number; mutating: number; irreversible: number }
-  integrations: Record<string, { configured: boolean; reason: string }>
+  /**
+   * One entry per external service, keyed as the server reports it.
+   *
+   * `apify` carries an extra `platformLanes` field naming which implementation
+   * the four platform lanes will actually bind — `apify` when a token is set,
+   * `crawl4ai` when it is not. It is reported rather than inferred because "why
+   * does this post have no reaction count" should be answerable from the health
+   * payload instead of from the zeros on a card.
+   */
+  integrations: Record<
+    string,
+    { configured: boolean; reason: string; platformLanes?: 'apify' | 'crawl4ai' }
+  >
   assistant?: { provider: string; configured: boolean; reason: string }
 }
 

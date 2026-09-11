@@ -1550,7 +1550,7 @@ export const useStore = create<Store>((set, get) => ({
     await get().regenerateImage(ideaId, platform)
   },
 
-  /** The top-10 rule, with the demotion always announced. */
+  /** The per-platform cap, with the demotion always announced. */
   promoteIdea: async (ideaId) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea || idea.calendar_slot === 'primary') return
@@ -1878,7 +1878,16 @@ export const useStore = create<Store>((set, get) => ({
       title: event.message ?? 'Untitled page',
       keyword: typeof d.keyword === 'string' ? d.keyword : '',
       platform: typeof d.platform === 'string' ? d.platform : 'open-web',
-      source: typeof d.source === 'string' ? d.source : 'crawl4ai',
+      // Whichever source the run named. Two sources answer now — an Apify actor
+      // on a platform lane, crawl4ai on the open web — so naming one of them by
+      // default would attribute a row to an implementation that may not have
+      // produced it.
+      source:
+        typeof d.source === 'string'
+          ? d.source
+          : typeof d.via === 'string'
+            ? d.via
+            : 'Source not named',
       relevance,
       held: null,
     }
@@ -1948,7 +1957,10 @@ export const useStore = create<Store>((set, get) => ({
             title: event.message ?? 'Untitled page',
             keyword: typeof d.keyword === 'string' ? d.keyword : '',
             platform: typeof d.platform === 'string' ? d.platform : 'open-web',
-            source: 'crawl4ai',
+            // A held item arrives from the validation event, which does not
+            // restate which source captured it. Saying so is honest; naming a
+            // source would be a guess.
+            source: typeof d.source === 'string' ? d.source : 'Source not named',
             relevance: null,
             held,
           },

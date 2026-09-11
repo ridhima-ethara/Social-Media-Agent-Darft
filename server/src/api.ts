@@ -102,7 +102,10 @@ import {
 } from './db/assistant-repo'
 import { capabilities, registeredToolIds } from './assistant/tools/index'
 import { availableImageModels } from './agents/image/image-models/index'
-import { integrationReport } from './integrations'
+import { integrationReport,
+  describeGcpAuth,
+  gcpAuthAvailable,
+} from './integrations'
 import {
   applyInstruction,
   approveMarketing,
@@ -232,9 +235,26 @@ export function createApiRouter(): Router {
       registry: REGISTRY_SUMMARY,
       tools: TOOL_SUMMARY,
       integrations: {
+        // WHICH source the four platform lanes will bind, for the same reason
+        // `text.resolved` is reported below: "why does this post carry no
+        // reaction count" should be answerable here rather than inferred from
+        // the zeros on the card.
+        apify: {
+          configured: statuses.apify.configured,
+          reason: statuses.apify.reason,
+          platformLanes: statuses.apify.platformLanes,
+        },
         crawl4ai: { configured: statuses.crawl4ai.configured, reason: statuses.crawl4ai.reason },
         parallel: { configured: statuses.parallel.configured, reason: statuses.parallel.reason },
-        gcp: { configured: statuses.gcp.configured, reason: statuses.gcp.reason },
+        gcp: {
+          // The ADAPTER's own answer, not the config's. `config.gcp.configured`
+          // is true as soon as either credential key is non-empty; only the
+          // adapter knows whether the service-account JSON it points at is
+          // actually readable and signable. Reporting the config's optimism
+          // here is how a 401 at caption time gets to look like a working setup.
+          configured: gcpAuthAvailable(),
+          reason: describeGcpAuth(),
+        },
         ollama: {
           configured: statuses.ollama.configured,
           reason: statuses.ollama.reason,
@@ -1133,10 +1153,10 @@ export function createApiRouter(): Router {
 
       let demoted: { id: string; title: string } | null = null
 
-      // The top-10 rule, enforced server-side: promoting past the cap demotes the
+      // The per-platform cap, enforced server-side: promoting past it demotes the
       // weakest primary and says so.
       if (body.calendarSlot === 'primary' && idea.calendar_slot !== 'primary') {
-        const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 10)
+        const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
         const primaries = await primaryIdeasForPlatform(workspaceId, body.platform ?? idea.platform)
         if (primaries.length >= cap) {
           const weakest = primaries[primaries.length - 1]

@@ -4,8 +4,9 @@
  * The seven fields every agent conforms to, plus the skill that specifies its
  * behaviour, the tools it may hold, and the runtime skills it executes.
  *
- * Stage: Discover · Crawl LinkedIn, Instagram, X, Facebook and the open web
- *                    for movement across the keyword set.
+ * Stage: Discover · Read LinkedIn, Instagram, X and Facebook through Apify
+ *                    actors, and the open web through crawl4ai, for movement
+ *                    across the keyword set.
  *
  * Related files:
  *   spec      packages/skills/content-scraper/SKILL.md          — the behavioural specification
@@ -20,9 +21,9 @@ export const spec: AgentSpec = {
   id: 'scraping',
   name: 'Sherlock',
   stage: 'discover',
-  role: 'Scraping Agent · Captures public activity for the keyword set across four platforms and the open web, via crawl4ai.',
+  role: 'Scraping Agent · Captures public activity for the keyword set across four platforms via Apify actors, and the open web via crawl4ai.',
   description:
-    'Gathers. Does not judge. Admits only what aligns with the brand topic set and the Knowledge Base, wraps every captured body as untrusted evidence before it reaches a model, and counts every exclusion rather than silently dropping it. A lane that returns nothing returns nothing — there is no corpus behind it.',
+    'Gathers. Does not judge. Reads each platform lane through its Apify actor, which states real engagement figures, and falls back to a crawl4ai search when no token is configured — the same lane, read through a search engine, stamped as carrying no figures rather than as carrying zeros. Admits only what aligns with the brand topic set and the Knowledge Base, wraps every captured body as untrusted evidence before it reaches a model, and counts every exclusion rather than silently dropping it. A lane that returns nothing returns nothing — there is no corpus behind it.',
   consumes: [
     'keyword set',
     'knowledge base',

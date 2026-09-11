@@ -188,7 +188,33 @@ export function CalendarPage() {
   const moveIdea = useStore((s) => s.moveIdea)
   const openReview = useStore((s) => s.openReview)
 
-  const [weekOffset, setWeekOffset] = useState(0)
+  /*
+   * OPEN ON THE WEEK THAT ACTUALLY HOLDS THE CONTENT.
+   *
+   * This opened on the current week, always. The Calendar Agent plans forward
+   * from today and skips weekends, so a run on a Friday afternoon has one weekday
+   * left in this week and places the rest of the platform's slots in the next
+   * one. The operator then opened the calendar, saw a nearly empty grid, and
+   * concluded the agent had produced nothing — while five primaries sat one click
+   * to the right.
+   *
+   * So the initial week follows the work: the week containing the earliest
+   * primary that has not already passed. Ideas dated in the past do not pull the
+   * view backwards, and with nothing scheduled at all it stays on this week,
+   * where the empty state explains itself. Only the INITIAL value is derived —
+   * once the operator pages, that is their choice and it is left alone.
+   */
+  const [weekOffset, setWeekOffset] = useState(() => {
+    const today = startOfWeek(new Date()).getTime()
+    const upcoming = ideas
+      .filter((idea) => idea.calendar_slot === 'primary' && typeof idea.scheduled_date === 'string')
+      .map((idea) => startOfWeek(new Date(`${String(idea.scheduled_date).slice(0, 10)}T12:00:00`)).getTime())
+      .filter((week) => week >= today)
+      .sort((a, b) => a - b)
+    const earliest = upcoming[0]
+    if (earliest === undefined) return 0
+    return Math.round((earliest - today) / (7 * 24 * 60 * 60 * 1000))
+  })
   const [dragging, setDragging] = useState<string | null>(null)
   /**
    * ONE height for every suggestion column.

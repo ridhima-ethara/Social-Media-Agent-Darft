@@ -40,20 +40,45 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
   const priors = await priorKeywordAverages(ctx.workspaceId, trendWindowRuns, payload.runId)
 
   // Per-keyword aggregates from this run's corpus.
+  //
+  // VOLUME COUNTS EVERY POST; ENGAGEMENT COUNTS ONLY THE MEASURED ONES.
+  //
+  // A run mixes two kinds of row. An Apify lane read the platform and states
+  // real reaction counts; a crawl4ai lane read a search-indexed page and states
+  // none, carrying `metricsAvailable: false` and three zeros that mean "not
+  // applicable". Averaging those zeros in would let an open-web page that
+  // nobody could measure drag down an engagement figure that WAS measured on
+  // LinkedIn — turning a missing number into a bad one, which is exactly what
+  // the `N/A is never 0` rule exists to prevent.
+  //
+  // So volume runs over every post, because being findable is itself the
+  // signal; engagement, velocity and growth run over the metric-bearing subset,
+  // and the excluded count travels on the row so the reason is legible.
   const aggregates = keywords.map((keyword) => {
     const own = posts.filter((p) => p.keyword === keyword.term)
-    const totalEngagement = own.reduce((t, p) => t + p.engagement, 0)
-    const velocity = own.length === 0 ? 0 : round(mean(own.map((p) => p.velocity)), 2)
-    const topPost = [...own].sort((a, b) => b.engagement - a.engagement)[0] ?? null
+    const measured = own.filter((p) => p.metricsAvailable)
+    const totalEngagement = measured.reduce((t, p) => t + p.engagement, 0)
+    const velocity = measured.length === 0 ? 0 : round(mean(measured.map((p) => p.velocity)), 2)
+    // The strongest post is only meaningfully "strongest" among those with a
+    // stated figure; with none stated, the freshest stands in as the exemplar.
+    const ranked = measured.length > 0 ? measured : own
+    const topPost =
+      [...ranked].sort((a, b) => b.engagement - a.engagement || b.postedAt.localeCompare(a.postedAt))[0] ??
+      null
     return {
       keyword,
       topPost,
       postCount: own.length,
+      measuredCount: measured.length,
+      unmeasuredCount: own.length - measured.length,
       totalEngagement,
-      avgEngagement: own.length === 0 ? 0 : round(totalEngagement / own.length, 2),
+      avgEngagement: measured.length === 0 ? 0 : round(totalEngagement / measured.length, 2),
       velocity,
     }
   })
+
+  /** Whether ANY keyword this run carries engagement — see the scoring note below. */
+  const anyKeywordMeasured = aggregates.some((a) => a.measuredCount > 0)
 
   const maxPosts = aggregates.reduce((m, a) => Math.max(m, a.postCount), 0)
   const maxEngagement = aggregates.reduce((m, a) => Math.max(m, a.totalEngagement), 0)
@@ -69,12 +94,37 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
     const velocityScore = normalise(agg.velocity, maxVelocity)
     const growthScore = prior && prior.runs > 0 ? rescaleGrowth(growthPct) : 50
 
-    const weighted =
-      (volumeScore * volumeWeight +
-        engagementScore * engagementWeight +
-        velocityScore * velocityWeight +
-        growthScore * growthWeight) /
-      divisor
+    // WHAT TO DO WITH A KEYWORD NOTHING COULD BE MEASURED ON.
+    //
+    // It has no engagement, velocity or growth — not a zero for each. But the
+    // fix depends on whether that absence is a property of the RUN or of the
+    // KEYWORD, and the two want opposite treatment:
+    //
+    //   Uniform absence — no keyword in the run has a single measured post,
+    //   because there is no Apify token and every lane read search-indexed
+    //   pages. Nothing is comparable on engagement, so the three weights are
+    //   dropped from the divisor for everyone. Every keyword is scored on the
+    //   same basis and the ranking still means something.
+    //
+    //   Selective absence — some keywords WERE measured and this one was not.
+    //   Renormalising here would let a keyword nobody could measure win an axis
+    //   its rivals are judged on, and outrank them on thinner evidence. So the
+    //   full divisor stands and the missing components contribute nothing: the
+    //   keyword scores low because little is known about it, which is the true
+    //   statement. The reason says so rather than leaving it to be inferred.
+    const measurable = agg.measuredCount > 0
+    const renormalise = !measurable && !anyKeywordMeasured
+    const effectiveDivisor = renormalise
+      ? Math.max(1, divisor - engagementWeight - velocityWeight - growthWeight)
+      : divisor
+
+    const weighted = measurable
+      ? (volumeScore * volumeWeight +
+          engagementScore * engagementWeight +
+          velocityScore * velocityWeight +
+          growthScore * growthWeight) /
+        effectiveDivisor
+      : (volumeScore * volumeWeight) / effectiveDivisor
 
     // Below the floor a keyword has not produced enough evidence to be ranked
     // at all — it keeps its components but cannot claim a trend.
@@ -105,11 +155,28 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
 
   trends.sort((a, b) => b.trendScore - a.trendScore || b.totalEngagement - a.totalEngagement)
 
+  const measurementByKeyword = new Map(
+    aggregates.map((a) => [a.keyword.id, { measured: a.measuredCount, unmeasured: a.unmeasuredCount }]),
+  )
+
   const take = clamp(topKeywords, 1, trends.length)
   trends.forEach((trend, index) => {
     trend.rank = index + 1
     trend.isTrending = index < take && trend.trendScore > 0
-    trend.trendReason = describeTrend(trend, trends, minPostsToRank)
+    // Rule 6: every automated decision names its evidence — including the
+    // evidence it did not have. A score built on volume alone must say so, or
+    // an operator comparing two keywords is comparing different things without
+    // being told.
+    const m = measurementByKeyword.get(trend.keywordId)
+    const caveat =
+      m === undefined || m.unmeasured === 0
+        ? ''
+        : m.measured > 0
+          ? ` Engagement figures come from ${m.measured} of ${m.measured + m.unmeasured} page(s); the other ${m.unmeasured} state none and are excluded from those components.`
+          : anyKeywordMeasured
+            ? ` Scored on volume alone and therefore ranked below keywords that could be measured: none of its ${m.unmeasured} page(s) came from a source that states engagement, so the engagement, velocity and growth components are empty rather than zero.`
+            : ` Scored on volume alone, as was every keyword this run: no lane returned a source that states engagement, so those three weights were set aside rather than counted as zero.`
+    trend.trendReason = describeTrend(trend, trends, minPostsToRank) + caveat
   })
 
   const trendingKeywords = trends.filter((t) => t.isTrending)

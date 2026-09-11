@@ -59,7 +59,7 @@ function validate(name: string, body: string): Problem[] {
     if (match) {
       problems.push({
         skill: name,
-        message: `line ${i + 1}: literal value "${match[2]}" near "${match[1]}" — every number must come from packages/config and be referenced by key`,
+        message: `line ${i + 1}: literal value "${match[2]}" near "${match[1]}" — every number must be a declared ConfigField in shared/agent-registry.ts and referenced by key`,
       })
     }
   }

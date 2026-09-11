@@ -117,7 +117,7 @@ export function PipelineTheater() {
         kind: 'capture',
         id: `cap-${item.id}`,
         keyword: item.keyword_term ?? '—',
-        source: item.source_name ?? 'crawl4ai',
+        source: item.source_name ?? 'Source not named',
         title: item.title,
         platform: item.platform,
         engagement: item.metrics_available ? item.engagement : null,

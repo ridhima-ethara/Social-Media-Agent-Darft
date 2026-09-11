@@ -118,8 +118,9 @@ Copy `server/.env.example` to `server/.env`. Every key may be left blank.
 
 | Blank key | What happens |
 |---|---|
-| `CRAWL4AI_PYTHON` | **Nothing is captured at all.** This is the only scraping path; there is no corpus behind it |
-| `FACEBOOK_ACCESS_TOKEN` (and the other platform tokens) | Publishing runs in demo mode; every receipt says so |
+| `APIFY_API_TOKEN` | The four platform lanes fall back to crawl4ai — the same lanes, read through a search engine, which states no engagement figures. The trend score then runs on volume alone and says so on every keyword |
+| `CRAWL4AI_PYTHON` | The open-web lane cannot run at all, and a platform lane has nothing to fall back to. With both keys blank, nothing is captured — there is no corpus behind either |
+| Platform publishing credentials | None exist yet. `PUBLISH_MODE=live` refuses with a specific message; demo mode simulates every call and stamps `demo` permanently on the receipt |
 | `PARALLEL_API_KEY` | Research reads the open web with crawl4ai instead, with the reason on every entry |
 | `OLLAMA_BASE_URL` (with `AGENT_MODEL_PROVIDER=ollama`) | Captions, calendar copy and analytics prose come from the deterministic template writer instead of `qwen3.5:latest` |
 | `MFLUX_PYTHON` | Ollama refuses image generation over HTTP, so nothing tries mflux; creatives render locally with the brand SVG renderer instead of FLUX.2 Klein |
@@ -134,27 +135,39 @@ Every fallback is **labelled in the UI**, on the card it affected. The mode is a
 health endpoint reports the database, the publish mode and the command plane provider, and the header, the
 telemetry ticker and Settings all surface it.
 
-### crawl4ai — the only scraping path
+### Scraping — Apify for the platforms, crawl4ai for the open web
 
-Every post the pipeline sees comes from a local, keyless crawl. `CRAWL4AI_PYTHON` points at the
-interpreter of `backend/.venv`, and the Scraping Agent spawns `backend/tools/crawl.py` as a sidecar
-— crawl4ai drives a headless browser, which is a local process rather than an endpoint.
+Two sources, one shape. Both answer the same `RawPost` contract in
+`server/src/integrations/capture.ts`, and `captureFor(platform)` decides which one serves a lane, so
+the source is a property of the configuration rather than of the code.
+
+**Apify reads the platforms themselves.** One actor per lane, each slug env-overridable, because an
+actor is a third-party artefact that can be deprecated or repriced without notice. Actors return real
+reaction, comment and repost counts — which matters more than convenience: three of the four
+components of `trend_score` are engagement maths, and they are inert without figures.
+
+**crawl4ai reads the open web.** `CRAWL4AI_PYTHON` points at the interpreter of `backend/.venv`, and
+the Scraping Agent spawns `backend/tools/crawl.py` as a sidecar — a headless browser is a local
+process, not an endpoint. It is also the fallback for a platform lane when no Apify token is set.
 
 Each keyword is captured once **per lane**:
 
-| Lane | Query | What it actually reads |
+| Lane | With `APIFY_API_TOKEN` | Without it |
 |---|---|---|
-| LinkedIn | `<keyword> site:linkedin.com` | public posts, Pulse articles and company pages the engine indexed |
-| Instagram | `<keyword> site:instagram.com` | very little — Instagram is login-walled to a logged-out crawl |
-| X | `<keyword> (site:x.com OR site:twitter.com)` | indexed public posts |
-| Facebook | `<keyword> site:facebook.com` | public pages; likewise thin |
-| Open web | unscoped, platform domains excluded | where the substantive material usually is |
+| LinkedIn | actor post search — real engagement | `<keyword> site:linkedin.com`, no figures |
+| Instagram | actor hashtag search — real engagement | `<keyword> site:instagram.com` — very little; Instagram is login-walled to a logged-out crawl |
+| X | actor post search — real engagement | `<keyword> (site:x.com OR site:twitter.com)` |
+| Facebook | actor post search — real engagement | `<keyword> site:facebook.com`; likewise thin |
+| Open web | no actor — always crawl4ai | unscoped, platform domains excluded |
 
-Two things this deliberately does **not** do. It does not invent engagement figures: a
+Three things this deliberately does **not** do. It does not invent engagement figures: a
 search-indexed page states no reaction count, so `metricsAvailable` is false and the count fields
-stay at zero meaning *not applicable*, never *performed badly*. And it does not fill an empty lane:
-Instagram returning nothing for a keyword is a real finding about Instagram, and it is reported as
-one.
+stay at zero meaning *not applicable*, never *performed badly*. It does not average those zeros into
+a measured average either — the Validation Agent computes engagement, velocity and growth over the
+metric-bearing rows only, drops the three weights from the divisor when a keyword has none, and
+appends the caveat to `trendReason` so a volume-only score is never mistaken for a measured one. And
+it does not fill an empty lane: Instagram returning nothing for a keyword is a real finding about
+Instagram, and it is reported as one.
 
 Every captured page is scored at capture against the brand topic set **and** the live Knowledge
 Base, and anything aligning with neither is dropped with the count recorded. That score travels on
@@ -162,11 +175,16 @@ the record as `brandRelevance`, so the Validation Agent inherits the evidence ra
 re-deriving it.
 
 ```bash
+# The open-web lane and the platform fallback:
 backend/.venv/bin/pip install -r backend/requirements.txt
 backend/.venv/bin/python -m playwright install chromium
 # One lane, by hand:
 backend/.venv/bin/python -m tools.crawl --keywords "RLHF" --platform linkedin --max-pages 3
 ```
+
+Posts per keyword, the recency window and the ranking order are knobs on Sherlock's capture skill in
+Agent Studio. `APIFY_MAX_ITEMS_PER_KEYWORD` caps them at the deployment level, because actors bill
+per result and a slider must not be able to run up a bill.
 
 Every trending keyword and hashtag carries the URLs to open it, and the strongest page that carried
 it. They show on Content Intelligence, come back from `GET /api/trends`, and export as CSV from
@@ -185,7 +203,7 @@ The Python tier is where the local models live:
 
 | Stage | Agent | What it does |
 |---|---|---|
-| Scrape | Sherlock | crawl4ai, headless Chromium, keyless |
+| Scrape | Sherlock | crawl4ai, headless Chromium, keyless — the Python tier has no Apify path |
 | Validate | Dexter | keyword/hashtag scoring, four verdicts |
 | Plan | Dora | weekly calendar slots |
 | Create | SpongeBob, Minnie | captions (`qwen3.5:latest`) and images (`x/flux2-klein:latest` via mflux, brand layer always local SVG) |

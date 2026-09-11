@@ -222,13 +222,40 @@ export function trimDanglingTail(text: string): string {
   return words.join(' ').replace(/[,;:]+$/, '')
 }
 
+/**
+ * A headline from the body of a post.
+ *
+ * WHY IT WALKS THE LINES. Hashtags are stripped, because a headline made of tags
+ * is not a headline. That used to be applied to the FIRST non-empty line only, so
+ * a post opening with a tag line — `#UITStudentNote` above a real paragraph, which
+ * is an ordinary way to write on LinkedIn — cleaned down to the empty string and
+ * produced an idea with a zero-length title. One reached the calendar.
+ *
+ * So each line is tried in turn, and the whole body is the last resort. An empty
+ * return now means something real: there is no prose here at all, only tags and
+ * emoji. The caller must refuse to build an idea from that rather than storing a
+ * blank one — `calendar.idea.form` does.
+ */
 export function headlineFrom(text: string, maxWords: number): string {
-  const firstLine = text.split(/\n+/).find((l) => l.trim().length > 0) ?? text
-  const sentence = firstLine.split(/(?<=[.!?])\s/)[0] ?? firstLine
-  const cleaned = sentence.replace(/#[\p{L}\p{N}_]+/gu, '').replace(/\s+/g, ' ').trim()
-  const words = cleaned.split(' ').filter(Boolean)
-  if (words.length <= maxWords) return cleaned.replace(/[,;:]+$/, '')
-  return trimDanglingTail(words.slice(0, maxWords).join(' '))
+  const strip = (value: string): string =>
+    value
+      .replace(/#[\p{L}\p{N}_]+/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+  const candidates = [...text.split(/\n+/).filter((l) => l.trim().length > 0), text]
+
+  for (const candidate of candidates) {
+    const sentence = candidate.split(/(?<=[.!?])\s/)[0] ?? candidate
+    const cleaned = strip(sentence)
+    // A fragment of punctuation or a lone emoji is not prose either.
+    if (!/\p{L}/u.test(cleaned)) continue
+    const words = cleaned.split(' ').filter(Boolean)
+    if (words.length <= maxWords) return cleaned.replace(/[,;:]+$/, '')
+    return trimDanglingTail(words.slice(0, maxWords).join(' '))
+  }
+
+  return ''
 }
 
 export function clampWords(text: string, maxWords: number): string {
@@ -582,4 +609,60 @@ export const AUDIENCES: readonly string[] = [
 export function audienceFor(seedName: string): string {
   const rand = seededFor(seedName, 337)
   return AUDIENCES[Math.floor(rand() * AUDIENCES.length)] as string
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   IS THIS PROSE THE BRAND CAN ACTUALLY USE?
+
+   Brand alignment answers "is this about our subject". It does not answer "can we
+   read it", and with real platform capture those came apart immediately: the
+   Facebook and LinkedIn lanes returned Vietnamese workshop and recruitment posts
+   that scored 46–66 on alignment — legitimately, because "Agentic AI", "AI" and
+   "data" appear in them verbatim — and they became calendar ideas for an
+   English-language brand.
+
+   Measured, not judged. The share of tokens that are English function words is a
+   property of the text: English prose sits around 25–40%, and a language that
+   does not share those words sits near zero. No model is asked, so the same body
+   scores the same every time and the number can be put on the record.
+
+   Function words only. Topic nouns are deliberately excluded — they are exactly
+   the loanwords that appear in every language's technology writing, and counting
+   them would let the filter pass the posts it exists to catch.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const ENGLISH_FUNCTION_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'than', 'that', 'this', 'these', 'those',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'to', 'of', 'in', 'on', 'for', 'with', 'without', 'from', 'into', 'onto', 'about', 'as', 'at',
+  'by', 'over', 'under', 'between', 'through', 'during', 'before', 'after',
+  'it', 'its', 'we', 'our', 'you', 'your', 'they', 'their', 'them', 'he', 'she', 'his', 'her',
+  'not', 'no', 'nor', 'so', 'because', 'while', 'when', 'where', 'why', 'how', 'what', 'which',
+  'who', 'whom', 'can', 'could', 'will', 'would', 'should', 'may', 'might', 'must', 'do', 'does',
+  'did', 'have', 'has', 'had', 'there', 'here', 'more', 'most', 'much', 'many', 'some', 'any',
+  'all', 'both', 'each', 'every', 'other', 'another', 'such', 'only', 'just', 'also', 'very',
+  'too', 'own', 'same', 'up', 'down', 'out', 'off', 'again', 'once', 'now', 'still', 'yet',
+])
+
+/** Below this many words there is not enough text to judge, and the caller exempts it. */
+export const ENGLISH_RATIO_MIN_WORDS = 12
+
+/**
+ * The percentage of word tokens that are English function words, 0–100.
+ * Returns -1 when the text is too short to judge, so "unknown" is distinguishable
+ * from "zero" — the same rule the metrics obey.
+ */
+export function englishRatio(text: string): number {
+  const words = text
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+
+  if (words.length < ENGLISH_RATIO_MIN_WORDS) return -1
+
+  let hits = 0
+  for (const word of words) if (ENGLISH_FUNCTION_WORDS.has(word)) hits += 1
+  return Math.round((hits / words.length) * 100)
 }

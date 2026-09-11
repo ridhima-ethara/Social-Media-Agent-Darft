@@ -34,6 +34,31 @@ const PAINTERS: Partial<Record<ImageModelId, BackgroundPainter>> = {
   'flux2-klein': flux2KleinPainter,
 }
 
+/**
+ * THE PAINTER TO USE WHEN THE OPERATOR HAS NOT NAMED ONE.
+ *
+ * The knob used to default to `brand-svg`, the local vector renderer — which
+ * never fails and never paints. So a workspace with Imagen and FLUX both
+ * configured still produced flat vector cards on every automated run, and only a
+ * hand-picked model in the UI ever reached a real painter. The agent looked like
+ * it was working and was quietly doing the least it could.
+ *
+ * Preference order is capability, not cost: a hosted painter first because it is
+ * fastest and highest fidelity, the local MLX painter next because it needs no
+ * egress, and the brand renderer last because it is the floor rather than a
+ * choice. `brand-svg` is still what a caller GETS when nothing is configured —
+ * it just is not what a caller ASKS for by default.
+ */
+const PAINTER_PREFERENCE: ImageModelId[] = ['gcp-imagen', 'flux2-klein', 'z-image-turbo']
+
+export function preferredImageModel(): ImageModelId {
+  for (const id of PAINTER_PREFERENCE) {
+    const painter = PAINTERS[id]
+    if (painter?.isConfigured() === true) return id
+  }
+  return DEFAULT_IMAGE_MODEL
+}
+
 /** Which models are reachable right now — what the model menu renders. */
 export function availableImageModels(): Array<{
   id: ImageModelId

@@ -893,7 +893,7 @@ tool('idea.promote', async (args, ctx) => {
   const idea = await getIdea(ctx.workspaceId, target.id)
   if (!idea) throw new Error('No such idea.')
 
-  const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 10)
+  const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
   const primaries = await primaryIdeasForPlatform(ctx.workspaceId, idea.platform)
 
   let demoted: { id: string; title: string } | null = null

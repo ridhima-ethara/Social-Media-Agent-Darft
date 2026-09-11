@@ -7,19 +7,72 @@
  * to notice that a key was filled in.
  */
 
-import { config as loadDotenv } from 'dotenv'
-import { existsSync } from 'node:fs'
+import { config as loadDotenv, parse as dotenvParse } from 'dotenv'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SERVER_ROOT = join(HERE, '..')
 
-// Load server/.env if present. Absent is a supported, first-class state.
-const envPath = join(SERVER_ROOT, '.env')
-if (existsSync(envPath)) {
-  loadDotenv({ path: envPath, quiet: true })
-} else {
+/**
+ * THE ENV FILES, IN PRECEDENCE ORDER.
+ *
+ * `.env` is the primary and holds SETTINGS — ports, model names, timeouts, cron
+ * expressions. `secrets.env` holds CREDENTIALS. They are separate so that a
+ * configuration can be read, diffed and shared without also handing over the
+ * keys, which is the whole reason for the split.
+ *
+ * `dotenv` does not overwrite a variable that is already set, so loading in this
+ * order means a key present in both files resolves to `.env` — stated here and
+ * at the top of `secrets.env`, because "which of two files is live" must never
+ * be a question an operator has to answer by experiment.
+ *
+ * Every file is optional. Absent is a supported, first-class state: the product
+ * runs with a completely empty environment and labels every degraded path.
+ */
+const ENV_FILES = ['.env', 'secrets.env'] as const
+
+/** Which files were actually found, reported at boot so the source is visible. */
+export const loadedEnvFiles: string[] = []
+
+/*
+ * BLANK COUNTS AS ABSENT WHEN AN OVERLAY FILLS IT IN.
+ *
+ * `dotenv` skips any variable already present in `process.env`, and a key
+ * written as `PARALLEL_API_KEY=` IS present — as the empty string. So a blank
+ * line in `.env` silently shadowed the real value in `secrets.env`, and the
+ * product reported the key as missing while the operator was looking straight at
+ * it in the file they had just edited. That is the worst possible failure mode
+ * for a credential: correct configuration, confident denial.
+ *
+ * Every reader in this file already treats an empty string as absent — that is
+ * what `str()` does, and it is why a key left blank in `.env.example` behaves
+ * identically to a key that is not there. Loading follows the same rule: a later
+ * file may fill a variable that is unset OR empty, and may never overwrite one
+ * that actually holds a value. `.env` still wins on any key where it states
+ * something.
+ */
+for (const [index, name] of ENV_FILES.entries()) {
+  const path = join(SERVER_ROOT, name)
+  if (!existsSync(path)) continue
+
+  if (index === 0) {
+    loadDotenv({ path, quiet: true })
+  } else {
+    const parsed = dotenvParse(readFileSync(path))
+    for (const [key, value] of Object.entries(parsed)) {
+      const current = process.env[key]
+      if (current === undefined || current.trim() === '') process.env[key] = value
+    }
+  }
+  loadedEnvFiles.push(name)
+}
+
+// Nothing found where we looked — fall back to dotenv's own resolution so a
+// process started from another directory, or one whose variables come from the
+// shell or a container, still behaves.
+if (loadedEnvFiles.length === 0) {
   loadDotenv({ quiet: true })
 }
 
@@ -318,6 +371,60 @@ export const config = {
     },
   },
 
+  /* ── Scraping · Apify ───────────────────────────────────────────────────── */
+  apify: {
+    /**
+     * Hosted capture for the four platform lanes. Unlike crawl4ai — which reads
+     * whatever a search engine indexed and therefore cannot state a reaction
+     * count — an actor reads the platform itself and returns real engagement.
+     * That is the whole reason this adapter exists: three of the four trend
+     * components are engagement maths, and they are inert without it.
+     *
+     * The open web has no actor and stays on crawl4ai. See `capture.ts`.
+     */
+    get token(): string {
+      return str('APIFY_API_TOKEN')
+    },
+    get baseUrl(): string {
+      return str('APIFY_BASE_URL', 'https://api.apify.com/v2')
+    },
+    /**
+     * One actor per lane, each env-overridable, because an actor is a
+     * third-party artefact that can be deprecated or repriced without notice.
+     * Swapping one must be a config change, never a code change — which is why
+     * the request bodies are built per actor family in `apify.ts`.
+     */
+    get postsActor(): string {
+      return str('APIFY_LINKEDIN_POSTS_ACTOR', 'harvestapi~linkedin-post-search')
+    },
+    get instagramActor(): string {
+      return str('APIFY_INSTAGRAM_ACTOR', 'apify~instagram-hashtag-scraper')
+    },
+    get xActor(): string {
+      return str('APIFY_X_ACTOR', 'apidojo~tweet-scraper')
+    },
+    get facebookActor(): string {
+      return str('APIFY_FACEBOOK_ACTOR', 'scraper_one~facebook-posts-search')
+    },
+    get runTimeoutMs(): number {
+      return int('APIFY_RUN_TIMEOUT_MS', 180000)
+    },
+    /**
+     * The ceiling the operator's knob cannot exceed. Actors bill per result, so
+     * a slider in Agent Studio must not be able to run up a bill beyond what the
+     * deployment allows — the knob asks, this decides.
+     */
+    get maxItemsPerKeyword(): number {
+      return int('APIFY_MAX_ITEMS_PER_KEYWORD', 50)
+    },
+    get memoryMbytes(): number {
+      return int('APIFY_MEMORY_MBYTES', 1024)
+    },
+    get configured(): boolean {
+      return has('APIFY_API_TOKEN')
+    },
+  },
+
   /* ── Scraping · crawl4ai ────────────────────────────────────────────────── */
   crawl4ai: {
     /**
@@ -399,6 +506,7 @@ export function integrationStatuses(): {
   ollama: IntegrationStatus & { textModel: string; imageModel: string }
   mflux: IntegrationStatus & { model: string }
   crawl4ai: IntegrationStatus
+  apify: IntegrationStatus & { platformLanes: 'apify' | 'crawl4ai' }
   zImage: IntegrationStatus
   text: IntegrationStatus & { provider: TextProvider; resolved: 'ollama' | 'gcp' | 'template' }
   assistant: IntegrationStatus & { provider: AssistantProvider }
@@ -442,6 +550,14 @@ export function integrationStatuses(): {
       model: config.mflux.model,
     },
     crawl4ai: statusFor(config.crawl4ai.configured, 'CRAWL4AI_PYTHON'),
+    apify: {
+      ...statusFor(config.apify.configured, 'APIFY_API_TOKEN'),
+      // Which implementation the four platform lanes will actually bind, for
+      // the same reason `text.resolved` is reported: an operator should not
+      // have to work out the precedence, and "why does this post have no
+      // reaction count" is answered here rather than on the card.
+      platformLanes: config.apify.configured ? 'apify' : 'crawl4ai',
+    },
     zImage: statusFor(config.zImage.configured, 'Z_IMAGE_ENDPOINT'),
     text: {
       provider: config.textProvider,
@@ -480,6 +596,10 @@ export function maskSecret(value: string): string {
 export function describeConfiguration(): string[] {
   const s = integrationStatuses()
   return [
+    // Which files the values below came from. A token that was added to a file
+    // nothing reads is the single most confusing failure in this area, so the
+    // answer is printed rather than assumed.
+    `env files   ${loadedEnvFiles.length === 0 ? 'none found — reading the shell environment' : loadedEnvFiles.join(' → ')}`,
     `database    ${redactUrl(config.core.databaseUrl)}`,
     `workspace   ${config.core.workspaceSlug}`,
     `publish     ${config.core.publishMode}`,
@@ -488,7 +608,8 @@ export function describeConfiguration(): string[] {
     `text        ${s.text.resolved}${s.text.resolved === 'template' ? '' : ` · ${s.text.resolved === 'ollama' ? config.ollama.textModel : config.gcp.textModel}`}`,
     `ollama      ${s.ollama.configured ? `live · ${config.ollama.baseUrl}` : 'not configured'}`,
     `mflux       ${s.mflux.configured ? `live · ${s.mflux.model}` : 'not configured'}`,
-    `crawl4ai    ${s.crawl4ai.configured ? 'live' : 'NOT CONFIGURED — nothing can be scraped'}`,
+    `crawl4ai    ${s.crawl4ai.configured ? 'live' : 'NOT CONFIGURED — the open-web lane cannot be scraped'}`,
+    `apify       ${s.apify.configured ? 'live · platform lanes carry engagement' : 'not configured — platform lanes fall back to crawl4ai, without engagement figures'}`,
     `parallel    ${s.parallel.configured ? 'live' : 'not configured'}`,
     `gcp         ${s.gcp.configured ? 'live' : 'template writer'}`,
     `z-image     ${s.zImage.configured ? 'live' : 'not configured'}`,

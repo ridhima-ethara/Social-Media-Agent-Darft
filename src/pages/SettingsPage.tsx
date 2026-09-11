@@ -16,19 +16,34 @@ import { listVoices, setVoiceEnabled, speak, voiceSupport } from '../lib/voice'
 import { Badge, Btn, FacebookGlyph, InstagramGlyph, LinkedinGlyph, XGlyph } from '../components/ui'
 
 /** The lanes the Scraping Agent captures, in the order it runs them. */
+/**
+ * How each lane is read, under each of the two capture sources.
+ *
+ * The four platform lanes are read by an Apify actor when a token is present
+ * and by a `site:` search when it is not, and the difference is not cosmetic:
+ * an actor states reaction counts and a search-indexed page does not. The open
+ * web has no actor at all, so it is crawl4ai either way.
+ */
 const CAPTURE_LANES = [
-  { label: 'LinkedIn', value: 'site:linkedin.com' },
-  { label: 'Instagram', value: 'site:instagram.com' },
-  { label: 'X', value: 'site:x.com OR site:twitter.com' },
-  { label: 'Facebook', value: 'site:facebook.com' },
-  { label: 'Open web', value: 'unscoped — platform domains excluded' },
+  { label: 'LinkedIn', apify: 'Apify actor · post search', crawler: 'site:linkedin.com' },
+  { label: 'Instagram', apify: 'Apify actor · hashtag search', crawler: 'site:instagram.com' },
+  { label: 'X', apify: 'Apify actor · post search', crawler: 'site:x.com OR site:twitter.com' },
+  { label: 'Facebook', apify: 'Apify actor · post search', crawler: 'site:facebook.com' },
+  { label: 'Open web', apify: null, crawler: 'unscoped — platform domains excluded' },
 ]
 
+/**
+ * The adapters the server sweeps in `integrationReport()`, in the order it
+ * reports them. Image renderers are deliberately absent: they are reported
+ * separately under `health.integrations.images` and chosen in the model menu, so
+ * listing one here would leave a row that can only ever say "not reported".
+ */
 const SERVICES = [
-  { id: 'crawl4ai', label: 'crawl4ai · all scraping', env: 'CRAWL4AI_PYTHON' },
+  { id: 'apify', label: 'Apify · platform capture (LinkedIn, Instagram, X, Facebook)', env: 'APIFY_API_TOKEN' },
+  { id: 'crawl4ai', label: 'crawl4ai · open-web capture and platform fallback', env: 'CRAWL4AI_PYTHON' },
   { id: 'parallel', label: 'Parallel Web Systems · deep research', env: 'PARALLEL_API_KEY' },
   { id: 'gcp', label: 'Google Cloud · Gemini and Imagen', env: 'GCP_API_KEY' },
-  { id: 'z-image', label: 'Z-Image Turbo', env: 'Z_IMAGE_ENDPOINT' },
+  { id: 'ollama', label: 'Ollama · local Qwen3 and FLUX.2 Klein', env: 'OLLAMA_BASE_URL' },
 ]
 
 export function SettingsPage() {
@@ -42,9 +57,24 @@ export function SettingsPage() {
 
   const [selectedVoice, setSelectedVoice] = useState('')
 
+  /**
+   * Resolves a service to the running server's own report.
+   *
+   * Adapters are named `<service>.<capability>` — `apify.search`,
+   * `crawl4ai.search`, `gcp.text` — so an exact-id lookup silently missed every
+   * one of them and every badge on this screen read "not configured" no matter
+   * what was in the environment. Matching the segment before the dot as well
+   * means the screen shows what the server actually reported, which is the only
+   * thing it claims to do.
+   */
   const statusOf = (id: string): { configured: boolean; reason: string } => {
-    const found = integrations.find((i) => i.id === id)
-    return { configured: found?.configured ?? false, reason: found?.reason ?? 'Not configured' }
+    const found =
+      integrations.find((i) => i.id === id) ??
+      integrations.find((i) => i.id.split('.')[0] === id)
+    return {
+      configured: found?.configured ?? false,
+      reason: found?.reason ?? 'The server did not report this service',
+    }
   }
 
   return (
@@ -179,17 +209,27 @@ export function SettingsPage() {
           <div className="card mt-3 p-4">
             <h3 className="display text-sm">Sources</h3>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <span className="text-[11.5px] text-ink-3">crawl4ai</span>
+              <span className="text-[11.5px] text-ink-3">Apify</span>
+              <Badge tone={statusOf('apify').configured ? 'good' : 'warn'}>
+                {statusOf('apify').configured
+                  ? 'Configured · platform lanes carry engagement'
+                  : `Not configured — ${statusOf('apify').reason}`}
+              </Badge>
+              <span className="ml-1 text-[11.5px] text-ink-3">crawl4ai</span>
               <Badge tone={statusOf('crawl4ai').configured ? 'good' : 'warn'}>
                 {statusOf('crawl4ai').configured
-                  ? 'Configured'
+                  ? 'Configured · open web'
                   : `Not configured — ${statusOf('crawl4ai').reason}`}
               </Badge>
             </div>
 
             <p className="mt-1.5 text-[11px] leading-relaxed text-ink-3">
-              Every keyword is captured once per lane. Instagram and Facebook index little to a
-              logged-out crawl, so those lanes are often thin — that is reported, never filled in.
+              Every keyword is captured once per lane. The four platform lanes prefer an Apify actor,
+              which reads the platform itself and states real reaction counts; without a token they
+              fall back to a <code className="mono">site:</code> search, which states none — so those
+              posts are excluded from the engagement, velocity and growth parts of the trend score
+              rather than counted as zero. The open web has no actor and is always crawl4ai. A lane
+              that returns nothing is reported, never filled in.
             </p>
 
             <div className="mt-2 space-y-1.5">
@@ -197,7 +237,9 @@ export function SettingsPage() {
                 <label key={lane.label} className="block">
                   <span className="text-[10px] uppercase tracking-[0.08em] text-ink-3">{lane.label}</span>
                   <input
-                    value={lane.value}
+                    value={
+                      lane.apify !== null && statusOf('apify').configured ? lane.apify : lane.crawler
+                    }
                     readOnly
                     className="mono mt-0.5 w-full cursor-default rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[11px] text-ink-3 outline-none"
                   />
@@ -205,18 +247,13 @@ export function SettingsPage() {
               ))}
             </div>
 
-            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-              {[
-                { label: 'Pages per keyword, per lane', value: 8 },
-                { label: 'Run timeout', value: '300s' },
-                { label: 'Search engines', value: 'DuckDuckGo, Bing' },
-              ].map((limit) => (
-                <div key={limit.label} className="rounded-lg border border-line bg-surface-2 px-2.5 py-2">
-                  <p className="text-[10px] uppercase tracking-[0.08em] text-ink-3">{limit.label}</p>
-                  <p className="tabular mt-0.5 text-[12px] text-ink-2">{limit.value}</p>
-                </div>
-              ))}
-            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-ink-3">
+              Posts per keyword, the recency window and the ranking order are knobs on{' '}
+              <span className="text-ink-2">Sherlock · Capture pages per keyword and platform</span> in
+              Agent Studio, and the deployment caps them with{' '}
+              <code className="mono">APIFY_MAX_ITEMS_PER_KEYWORD</code> so a slider cannot run up a
+              bill.
+            </p>
           </div>
         </section>
 

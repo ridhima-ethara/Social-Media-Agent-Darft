@@ -39,6 +39,18 @@ registerSkill<PipelinePayload>('analysis.trend.cluster', (payload, ctx) => {
 
   const opportunities: Opportunity[] = clusters
     .filter((c) => c.members.length >= Math.max(1, minClusterSize))
+    /*
+     * A CLUSTER WHOSE SEED HAS NO PROSE IS NOT AN OPPORTUNITY.
+     *
+     * `headlineFrom` returns empty when a body carries nothing but hashtags and
+     * emoji, which real platform capture does produce. Forming an opportunity
+     * from one stored an idea with a zero-length title — it reached the calendar,
+     * where it rendered as a blank card that could still be scheduled and
+     * published. Dropped here, at the point the title is derived, rather than
+     * patched with a placeholder further down: a made-up title would be
+     * fabricated evidence about what the source said.
+     */
+    .filter((c) => headlineFrom(c.seed.text, 12) !== '')
     .slice(0, Math.max(1, maxClusters))
     .map((cluster, index) => {
       const seed = cluster.seed

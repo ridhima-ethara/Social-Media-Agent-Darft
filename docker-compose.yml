@@ -1,24 +1,161 @@
+# ETHARA SOCIALAI — on-prem stack.
+#
+#   cp .env.docker.example .env
+#   docker compose up -d --build
+#   open http://localhost:8080
+#
+# Four services. Only `web` publishes a port: the API, the database and the
+# model server talk to each other on the compose network and are not reachable
+# from outside the host. That is the point of putting nginx in front — one door,
+# same-origin, and no CORS to configure.
+#
+# WHAT DOES NOT RUN HERE. mflux (FLUX.2 Klein on MLX) needs Apple Silicon and
+# Metal, which no Linux container has. MFLUX_PYTHON is left blank and creatives
+# render through the local brand SVG renderer with the reason stamped on the
+# card — the product's documented degradation, visible in the UI and on
+# /api/health, not a silent loss.
+
+name: ethara-socialai
+
 services:
+  # ── Postgres ──────────────────────────────────────────────────────────
   db:
     image: postgres:17-alpine
-    container_name: ethara-sma-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ethara
-      POSTGRES_PASSWORD: ethara
-      POSTGRES_DB: ethara_sma
-      TZ: Asia/Kolkata
-    ports:
-      - '5432:5432'
+      POSTGRES_USER: ${POSTGRES_USER:-ethara}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ethara}
+      POSTGRES_DB: ${POSTGRES_DB:-ethara_socialai}
+      TZ: ${TZ:-Asia/Kolkata}
     volumes:
-      - ethara-sma-pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
+    # Deliberately NOT published. Uncomment only to attach a client from the
+    # host, and prefer `docker compose exec db psql` to leaving 5432 open.
+    # ports:
+    #   - '5432:5432'
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ethara -d ethara_sma']
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-ethara} -d ${POSTGRES_DB:-ethara_socialai}']
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 10s
 
+  # ── API · agent runtime · Python tier ─────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: ethara-socialai-api:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # The server spawns Python, which spawns Chromium. Without an init the
+    # container accumulates zombie browser processes over a long-running
+    # deployment until it cannot fork.
+    init: true
+    # Chromium writes to /dev/shm and Docker's 64 MB default is the classic
+    # cause of "Target closed" mid-crawl.
+    shm_size: 1gb
+    environment:
+      # ── Core ──
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ethara}:${POSTGRES_PASSWORD:-ethara}@db:5432/${POSTGRES_DB:-ethara_socialai}
+      PORT: '4001'
+      WORKSPACE_SLUG: ${WORKSPACE_SLUG:-ethara}
+      TZ: ${TZ:-Asia/Kolkata}
+      PUBLISH_MODE: ${PUBLISH_MODE:-demo}
+      # Same-origin through nginx, so no browser ever sends a cross-origin
+      # request. Kept narrow rather than '*' because the API has no auth.
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+
+      # ── Scraping · the four platform lanes ──
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
+      APIFY_LINKEDIN_POSTS_ACTOR: ${APIFY_LINKEDIN_POSTS_ACTOR:-harvestapi~linkedin-post-search}
+      APIFY_INSTAGRAM_ACTOR: ${APIFY_INSTAGRAM_ACTOR:-apify~instagram-hashtag-scraper}
+      APIFY_X_ACTOR: ${APIFY_X_ACTOR:-apidojo~tweet-scraper}
+      APIFY_FACEBOOK_ACTOR: ${APIFY_FACEBOOK_ACTOR:-scraper_one~facebook-posts-search}
+      APIFY_MAX_ITEMS_PER_KEYWORD: ${APIFY_MAX_ITEMS_PER_KEYWORD:-50}
+      APIFY_RUN_TIMEOUT_MS: ${APIFY_RUN_TIMEOUT_MS:-180000}
+
+      # ── Scraping · the open-web lane ──
+      # Baked into the image, not the host path — this is the venv the
+      # Dockerfile built.
+      CRAWL4AI_PYTHON: /app/backend/.venv/bin/python
+      CRAWL4AI_SEARCH_ENGINES: ${CRAWL4AI_SEARCH_ENGINES:-duckduckgo,bing}
+      CRAWL4AI_MAX_PAGES_PER_KEYWORD: ${CRAWL4AI_MAX_PAGES_PER_KEYWORD:-6}
+      CRAWL4AI_TIMEOUT_MS: ${CRAWL4AI_TIMEOUT_MS:-300000}
+      CRAWL4AI_HEADLESS: 'true'
+
+      # ── Text ──
+      TEXT_MODEL_PROVIDER: ${TEXT_MODEL_PROVIDER:-ollama}
+      ASSISTANT_MODEL_PROVIDER: ${ASSISTANT_MODEL_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_TEXT_MODEL: ${OLLAMA_TEXT_MODEL:-qwen3:14b}
+      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-300000}
+
+      # ── Images ──
+      # Intentionally blank: MLX cannot run on Linux. The brand SVG renderer
+      # takes over and says so on every asset it produces.
+      MFLUX_PYTHON: ''
+
+      # ── First-boot behaviour ──
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      RUN_SEED: ${RUN_SEED:-true}
+    volumes:
+      # Operator-supplied documents for `npm run corpus:ingest`. Bind-mounted so
+      # a PDF dropped on the host is ingestable without rebuilding.
+      - ./corpus:/app/corpus
+      # The Python tier's own store, which is where the Calendar, Content and
+      # Image agents recall from. On a named volume so a rebuild does not
+      # discard what the Learning Agent has written.
+      - brain:/app/backend/data
+    # Published only if you want to reach the API directly, bypassing nginx.
+    # ports:
+    #   - '4001:4001'
+
+  # ── Web ───────────────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    image: ethara-socialai-web:local
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '${WEB_PORT:-8080}:80'
+
+  # ── Local text model ──────────────────────────────────────────────────
+  # The model is NOT pulled at build time — it is ~9 GB and would make the
+  # first `up` look hung. Pull it once, after the stack is running:
+  #
+  #   docker compose exec ollama ollama pull qwen3:14b
+  #
+  # Until then captions, calendar copy and the command plane run on the
+  # deterministic template writer and parser, labelled as such in the UI.
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    # NVIDIA on-prem: uncomment to give the model a GPU. Without it Ollama runs
+    # on CPU, where qwen3:14b answers in minutes rather than seconds — usable
+    # for a smoke test, too slow for real use.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
 volumes:
-  ethara-sma-pgdata:
-    name: ethara-sma-pgdata
+  pgdata:
+    name: ethara-socialai-pgdata
+  ollama:
+    name: ethara-socialai-ollama
+  brain:
+    name: ethara-socialai-brain

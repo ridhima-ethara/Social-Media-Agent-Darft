@@ -24,7 +24,9 @@ import {
 import { listMediaForIdeas, listIdeas } from '../../db/repo'
 import { clampChars, clampWords, headlineFrom, PLATFORM_LABEL, similarity } from '../corpus'
 import { registerSkill } from '../runtime'
-import { availableImageModels, renderCreative } from './image-models/index'
+import { availableImageModels, renderCreative,
+  preferredImageModel,
+} from './image-models/index'
 import type { ImagePayload } from '../skills/index'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -158,7 +160,16 @@ registerSkill<ImagePayload>('generation.image.tokens', (_payload, ctx) => {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<ImagePayload>('generation.image.render', async (payload, ctx) => {
-  const requestedModel = ctx.str('model', 'brand-svg') as ImageModelId
+  /*
+   * `auto` means "whichever painter this deployment actually has", resolved at
+   * run time rather than frozen into a stored knob value. A named model is still
+   * honoured exactly — an operator who chose Imagen is told when Imagen was
+   * unreachable rather than quietly served something else.
+   */
+  const configuredModel = ctx.str('model', 'auto')
+  const requestedModel = (
+    configuredModel === 'auto' ? preferredImageModel() : configuredModel
+  ) as ImageModelId
   const timeoutMs = ctx.num('timeoutMs', 60000)
   const retries = ctx.num('retries', 1)
   const compositeBrandLayer = ctx.bool('compositeBrandLayer', true)

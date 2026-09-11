@@ -2,19 +2,22 @@
  * THE CALENDAR & IDEAS AGENT — stage `plan`
  *
  * Turns ranked opportunities into dated, timed, platform-assigned ideas, then
- * applies the top-10 rule: per platform independently, the ten strongest ideas
- * take a calendar slot and everything else sits in More suggestions with its
- * rank intact.
+ * applies the per-platform cap: independently for each platform, the strongest
+ * ideas up to `topPerPlatform` take a calendar slot and everything else sits in
+ * More suggestions with its rank intact. The cap belongs to the calendar, so a
+ * platform found over it is repaired rather than left as earlier runs left it.
  *
  * Nothing here is random. Slot choice is a lookup in an hour-weight table
  * filtered by the window knobs, spread deterministically, and every choice
  * carries up to four evidence-bearing reasons.
  */
 
-import type { Platform } from '../../../../shared/agent-contract'
+import type { IdeaStatus, Platform } from '../../../../shared/agent-contract'
 import { PLATFORMS } from '../../../../shared/agent-contract'
 import { similarity } from '../../../../shared/brand-voice'
-import { listIdeas, listPosts } from '../../db/repo'
+// Aliased: `IdeaRow` below is the shape a model returns for a batch of ideas,
+// which is a different thing from a stored row and must not shadow it.
+import { listIdeas, listPosts, updateIdea, type IdeaRow as StoredIdea } from '../../db/repo'
 import { textAdapter, textModelId } from '../../integrations'
 import {
   addDays,
@@ -697,7 +700,7 @@ registerSkill<PipelinePayload>('calendar.crossplatform.adapt', (payload, ctx) =>
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   8 · calendar.rank.select — THE TOP-10 RULE
+   8 · calendar.rank.select — THE PER-PLATFORM CAP
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
@@ -710,8 +713,17 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
   const balance = ctx.bool('balanceAcrossPlatforms', true)
 
   const ideas = payload.ideas ?? []
-  if (ideas.length === 0) return {}
 
+  /*
+   * NOTE THE ABSENCE OF AN EARLY RETURN HERE.
+   *
+   * This used to be `if (ideas.length === 0) return {}`, which meant the cap
+   * repair below never ran on the one occasion it matters most: a run that
+   * captured nothing produces no ideas, so a calendar left over cap by an
+   * earlier run stayed over cap for as long as the crawler kept coming back
+   * empty. The cap belongs to the calendar, so it is checked whenever this
+   * skill runs, whether or not this run brought anything with it.
+   */
   for (const idea of ideas) {
     idea.priorityScore = clamp(
       Math.round(
@@ -725,54 +737,198 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
   }
 
   /*
-   * THE CAP IS A PROPERTY OF THE CALENDAR, NOT OF A RUN.
+   * THE CALENDAR HOLDS THE STRONGEST IDEAS — NOT THE EARLIEST-ARRIVING ONES.
    *
-   * This ranked `payload.ideas` alone, so every run promoted its own top
-   * `topPerPlatform` with no knowledge of what was already scheduled. Fifteen
-   * runs therefore produced nineteen LinkedIn primaries against a declared cap
-   * of five — each run individually correct, the calendar collectively wrong.
+   * This used to count existing primaries and fill only the headroom left over.
+   * That kept the cap honest and made the calendar useless: once five slots were
+   * taken, every later run — however much better its material — could only queue.
+   * With real engagement data arriving from Apify the effect became stark. A run
+   * produced sixteen ideas scoring up to 85, the calendar held five scoring 59–71
+   * from an earlier volume-only run, and `primaryIdeas: 0` was the honest report
+   * of a calendar that could no longer improve.
    *
-   * Existing primaries are counted first and the run fills only the headroom
-   * that is left. Ideas this run already owns are excluded from that count, so
-   * re-running discovery re-ranks its own work instead of counting it twice.
+   * So the cap is applied to the WHOLE calendar, per platform, every time:
+   * everything already stored and everything this run produced are ranked
+   * together, and the top `topPerPlatform` take the slots.
+   *
+   * TWO RULES BOUND IT.
+   *
+   *   Nothing a human has touched is moved. From `in_review` onward a person has
+   *   acted on the idea, so it keeps its slot and consumes a slot. Only
+   *   `suggested` and `drafted` ideas are promoted or demoted by an agent.
+   *
+   *   Nothing is deleted. A demoted idea keeps its title, rank, reasons and
+   *   lineage and sits in More suggestions, where it can be promoted again.
    */
-  const onCalendar = await listIdeas(ctx.workspaceId, { limit: 400 })
+  const reconcile = ctx.bool('reconcileOverCap', true)
+  const DEMOTABLE: readonly IdeaStatus[] = ['suggested', 'drafted']
+
+  const onCalendar = await listIdeas(ctx.workspaceId, { limit: 600 })
   // Title plus platform is how a stored idea is recognised — `persistIdeas`
   // upserts on it, so it is the same identity the write path uses.
   const own = new Set(ideas.map((i) => `${i.title.toLowerCase()}|${i.platform}`))
-  const heldByPlatform = new Map<Platform, number>()
-  for (const row of onCalendar) {
-    if (row.calendar_slot !== 'primary') continue
-    if (row.status === 'rejected') continue
-    // Skip what this run is re-scoring, or it would be counted twice.
-    if (own.has(`${row.title.toLowerCase()}|${row.platform}`)) continue
-    heldByPlatform.set(row.platform, (heldByPlatform.get(row.platform) ?? 0) + 1)
+
+  /** One candidate for a slot, from either source, with a common score. */
+  interface Candidate {
+    key: string
+    score: number
+    platform: Platform
+    /** Set for a stored row; absent for an idea this run produced. */
+    row?: StoredIdea
+    /** Set for an idea this run produced. */
+    idea?: PlannedIdea
+    slot: 'primary' | 'suggestion'
+    movable: boolean
   }
 
-  // Per platform INDEPENDENTLY. A strong LinkedIn week must not consume the
-  // Instagram slots.
-  const primaries: string[] = []
-  for (const platform of PLATFORMS) {
-    const held = heldByPlatform.get(platform) ?? 0
-    const headroom = Math.max(0, topPerPlatform - held)
+  const candidates: Candidate[] = []
 
-    const forPlatform = ideas
-      .filter((i) => i.platform === platform)
-      .sort((a, b) => b.priorityScore - a.priorityScore || a.title.localeCompare(b.title))
-
-    forPlatform.forEach((idea, index) => {
-      idea.platformRank = held + index + 1
-      idea.calendarSlot = index < headroom ? 'primary' : 'suggestion'
-      if (idea.calendarSlot === 'primary') primaries.push(idea.key)
+  for (const row of onCalendar) {
+    if (row.status === 'rejected') continue
+    // Whatever this run re-scored is represented by the run's own object, which
+    // carries the fresher score. Counting the stored copy too would let one idea
+    // occupy two slots.
+    if (own.has(`${row.title.toLowerCase()}|${row.platform}`)) continue
+    candidates.push({
+      key: `row:${row.id}`,
+      score: Number(row.priority_score ?? 0),
+      platform: row.platform,
+      row,
+      slot: row.calendar_slot === 'primary' ? 'primary' : 'suggestion',
+      movable: DEMOTABLE.includes(row.status),
     })
+  }
 
-    const placed = Math.min(forPlatform.length, headroom)
+  for (const idea of ideas) {
+    candidates.push({
+      key: `idea:${idea.key}`,
+      score: idea.priorityScore,
+      platform: idea.platform,
+      idea,
+      slot: 'suggestion',
+      movable: true,
+    })
+  }
+
+  const primaries: string[] = []
+  /** Dates already carrying a primary for a platform, so a promotion lands free. */
+  const bookedByPlatform = new Map<Platform, Set<string>>()
+  for (const c of candidates) {
+    if (c.slot !== 'primary') continue
+    const date = c.row?.scheduled_date ?? c.idea?.scheduledDate ?? ''
+    if (date === '') continue
+    const set = bookedByPlatform.get(c.platform) ?? new Set<string>()
+    set.add(String(date).slice(0, 10))
+    bookedByPlatform.set(c.platform, set)
+  }
+
+  /**
+   * The first weekday from today that this platform has no primary on.
+   *
+   * A promoted idea keeps whatever date the cadence balancer gave it, and that
+   * balancer pushes one post per platform per day — so the sixteenth LinkedIn
+   * idea is dated sixteen days out. Promoting it without re-dating it puts a
+   * primary outside the week the calendar renders, which looks exactly like the
+   * agent having produced nothing at all.
+   */
+  function nextFreeDate(platform: Platform): string {
+    const booked = bookedByPlatform.get(platform) ?? new Set<string>()
+    const from = planningStart()
+    for (let offset = 0; offset < 21; offset += 1) {
+      const date = isoDate(addDays(from, offset))
+      if (isWeekend(date)) continue
+      if (booked.has(date)) continue
+      booked.add(date)
+      bookedByPlatform.set(platform, booked)
+      return date
+    }
+    return isoDate(from)
+  }
+
+  for (const platform of PLATFORMS) {
+    const forPlatform = candidates
+      .filter((c) => c.platform === platform)
+      .sort((a, b) => b.score - a.score || a.key.localeCompare(b.key))
+
+    if (forPlatform.length === 0) continue
+
+    // Slots a person already owns. Counted first and never touched.
+    const locked = forPlatform.filter((c) => c.slot === 'primary' && !c.movable)
+    const headroom = Math.max(0, topPerPlatform - locked.length)
+
+    const contestable = forPlatform.filter((c) => !(c.slot === 'primary' && !c.movable))
+    const winners = reconcile ? contestable.slice(0, headroom) : contestable.filter((c) => c.slot === 'primary').slice(0, headroom)
+    const winnerKeys = new Set(winners.map((c) => c.key))
+
+    let promoted = 0
+    let demoted = 0
+    let rank = locked.length
+
+    for (const c of contestable) {
+      const shouldBePrimary = winnerKeys.has(c.key)
+      rank += 1
+
+      if (c.idea) {
+        c.idea.platformRank = rank
+        c.idea.calendarSlot = shouldBePrimary ? 'primary' : 'suggestion'
+        if (shouldBePrimary) {
+          primaries.push(c.idea.key)
+          promoted += 1
+          const current = String(c.idea.scheduledDate ?? '').slice(0, 10)
+          const booked = bookedByPlatform.get(platform) ?? new Set<string>()
+          const withinWindow =
+            current !== '' &&
+            new Date(`${current}T12:00:00Z`) >= planningStart() &&
+            new Date(`${current}T12:00:00Z`) < addDays(planningStart(), 14)
+          if (!withinWindow || booked.has(current)) {
+            c.idea.scheduledDate = nextFreeDate(platform)
+            c.idea.slotReasons = [
+              ...c.idea.slotReasons,
+              `Moved to ${weekdayName(c.idea.scheduledDate)} on promotion to the calendar — its queued date sat outside the planning window, where a primary would not have been visible.`,
+            ]
+          } else {
+            booked.add(current)
+            bookedByPlatform.set(platform, booked)
+          }
+        }
+        continue
+      }
+
+      const row = c.row
+      if (!row) continue
+      if (shouldBePrimary && c.slot !== 'primary') {
+        const date = nextFreeDate(platform)
+        await updateIdea(ctx.workspaceId, row.id, {
+          calendarSlot: 'primary',
+          platformRank: rank,
+          scheduledDate: date,
+        })
+        promoted += 1
+      } else if (!shouldBePrimary && c.slot === 'primary') {
+        await updateIdea(ctx.workspaceId, row.id, { calendarSlot: 'suggestion', platformRank: rank })
+        demoted += 1
+      } else if (row.platform_rank !== rank) {
+        await updateIdea(ctx.workspaceId, row.id, { platformRank: rank })
+      }
+    }
+
+    const held = locked.length
     ctx.emit(
       'idea.ranked',
-      `${PLATFORM_LABEL[platform]}: ${placed} placed, ${Math.max(0, forPlatform.length - headroom)} to suggestions` +
-        (held > 0 ? ` · ${held} already on the calendar of ${topPerPlatform}` : ''),
-      { platform, primary: placed, suggestions: Math.max(0, forPlatform.length - headroom), held },
+      `${PLATFORM_LABEL[platform]}: ${Math.min(topPerPlatform, held + winners.length)} on the calendar of ${topPerPlatform}` +
+        (promoted > 0 ? ` · ${promoted} promoted` : '') +
+        (demoted > 0 ? ` · ${demoted} moved to suggestions` : '') +
+        (held > 0 ? ` · ${held} held by a human review` : ''),
+      { platform, promoted, demoted, locked: held, cap: topPerPlatform },
     )
+
+    if (demoted > 0 || promoted > 0) {
+      ctx.log(
+        `${PLATFORM_LABEL[platform]} reconciled against ${forPlatform.length} candidate(s): ` +
+          `${promoted} promoted, ${demoted} demoted, ${held} untouchable (past planning). ` +
+          `Cut-off score ${winners[winners.length - 1]?.score ?? 0}.`,
+      )
+    }
   }
 
   const counts = PLATFORMS.map((p) => ({

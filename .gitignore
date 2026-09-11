@@ -8,6 +8,18 @@ build/
 .env.local
 .env.*.local
 server/.env
+# Every server-side env overlay — server/.env.apify holds a paid API token.
+# Ignored by pattern rather than by name so a future overlay cannot be committed
+# by someone who forgets to add it here. The tracked example stays visible.
+server/.env.*
+!server/.env.example
+# CREDENTIALS. server/secrets.env holds every API token the server reads.
+# Ignored by prefix so secrets.env.bak, secrets.env.old and any copy someone
+# makes while rotating a key are covered too — the example is the one exception.
+server/secrets.env*
+!server/secrets.env.example
+# Key material — service-account JSON and anything else dropped beside it.
+server/secrets/
 
 # logs
 *.log

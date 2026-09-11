@@ -17,6 +17,7 @@
 import type { ServiceAdapter } from '../../../shared/agent-contract'
 import { config } from '../config'
 import { AdapterError, fetchJson } from './adapter'
+import { describeGcpAuth, gcpAuthAvailable, gcpAuthHeader } from './gcp-auth'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    TEXT
@@ -56,16 +57,55 @@ function textEndpoint(model: string): string {
 
 /**
  * Auth differs between the two endpoints: the public API takes a key in a
- * header, Vertex expects a bearer token. A service-account JSON would need a
- * signed JWT exchange, which is out of scope here — so when a project is named
- * but no usable token is present, the adapter reports itself unconfigured
- * rather than failing at call time.
+ * header, Vertex expects a bearer token minted from a service account. Both live
+ * in `gcp-auth.ts`, which is async because the service-account path exchanges a
+ * signed JWT for a short-lived token (cached for its lifetime, so this is one
+ * round trip per hour rather than per call).
  */
-function textHeaders(): Record<string, string> {
-  if (config.gcp.useVertex) {
-    return { authorization: `Bearer ${config.gcp.apiKey}` }
+async function textHeaders(): Promise<Record<string, string>> {
+  return gcpAuthHeader()
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THINKING TOKENS
+
+   `maxOutputTokens` on a 2.5 model caps THINKING PLUS OUTPUT, not output. That
+   is measured, not assumed: `gemini-2.5-pro` asked for one sentence under a
+   120-token cap spent 111 tokens thinking, returned 5 tokens of text and
+   finished `MAX_TOKENS` — "Reinforcement Learning from Human", cut mid-phrase.
+   A caption agent would have shipped that.
+
+   Two different fixes, because the models differ:
+
+     flash  thinking can be switched OFF (`thinkingBudget: 0`), so the whole
+            budget becomes output. Same prompt, same cap: a complete sentence.
+
+     pro    thinking cannot be disabled, so the caller's budget is TOPPED UP by
+            a reserve instead. The caller asked for N tokens of prose and still
+            gets room for N; the reserve absorbs the reasoning.
+
+   Either way the caller states what it wants the OUTPUT to be and does not have
+   to know that a vendor counts hidden tokens against it.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Room set aside for a thinking model's reasoning, on top of the asked-for output. */
+const THINKING_RESERVE_TOKENS = 2048
+
+function budgetFor(
+  model: string,
+  requested: number,
+): { maxOutputTokens: number; thinkingConfig?: { thinkingBudget: number } } {
+  const name = model.toLowerCase()
+  // Flash can be told not to think at all, which is what a caption wants.
+  if (name.includes('flash')) {
+    return { maxOutputTokens: requested, thinkingConfig: { thinkingBudget: 0 } }
   }
-  return { 'x-goog-api-key': config.gcp.apiKey }
+  // Pro always thinks. Give the reasoning its own room rather than the caller's.
+  if (name.includes('2.5') || name.includes('pro')) {
+    return { maxOutputTokens: requested + THINKING_RESERVE_TOKENS }
+  }
+  return { maxOutputTokens: requested }
 }
 
 export const gcpText: ServiceAdapter<GcpTextInput, string> = {
@@ -73,16 +113,13 @@ export const gcpText: ServiceAdapter<GcpTextInput, string> = {
   label: 'Google Cloud · Gemini',
 
   isConfigured(): boolean {
-    // Vertex needs a project AND a token we can actually present.
-    if (config.gcp.useVertex) return config.gcp.apiKey !== ''
-    return config.gcp.apiKey !== ''
+    // Either credential is enough: an API key for the public endpoint, or a
+    // service account that `gcp-auth` can exchange for a Vertex bearer token.
+    return gcpAuthAvailable()
   },
 
   unavailableReason(): string {
-    if (config.gcp.useVertex && config.gcp.apiKey === '') {
-      return 'GCP_PROJECT_ID is set but GCP_API_KEY is empty, so Vertex cannot be authenticated'
-    }
-    return 'GCP_API_KEY is not set'
+    return `no usable Google credential — ${describeGcpAuth()}`
   },
 
   async run(input: GcpTextInput): Promise<string> {
@@ -94,13 +131,13 @@ export const gcpText: ServiceAdapter<GcpTextInput, string> = {
       method: 'POST',
       timeoutMs: config.gcp.timeoutMs,
       adapterId: 'gcp.text',
-      headers: textHeaders(),
+      headers: await textHeaders(),
       body: {
         systemInstruction: { parts: [{ text: input.systemInstruction }] },
         contents: [{ role: 'user', parts: [{ text: input.prompt }] }],
         generationConfig: {
           temperature: input.temperature,
-          maxOutputTokens: input.maxOutputTokens,
+          ...budgetFor(model, input.maxOutputTokens),
         },
       },
     })
@@ -118,11 +155,29 @@ export const gcpText: ServiceAdapter<GcpTextInput, string> = {
       .join('')
       .trim()
 
+    const finish = payload.candidates?.[0]?.finishReason
+
     if (text === '') {
-      const finish = payload.candidates?.[0]?.finishReason
       throw new AdapterError(
         this.id,
         finish ? `model returned no text (finishReason: ${finish})` : 'model returned no text',
+      )
+    }
+
+    /*
+     * A body cut off at the token ceiling is not an answer. Returning it would
+     * put half a sentence through the brand check and onto a card, where it
+     * reads as a badly written caption rather than a truncated one — so it is
+     * refused, and `withFallback` degrades to the template writer with the
+     * reason stamped on the artefact. Raising the caller's budget, or moving the
+     * skill to a flash model, is the fix the message names.
+     */
+    if (finish === 'MAX_TOKENS') {
+      throw new AdapterError(
+        this.id,
+        `${model} hit its token ceiling and returned an incomplete answer ` +
+          `(${text.length} characters). Raise the skill's output-length knob, or point it at a ` +
+          'flash model, where reasoning is switched off and the whole budget becomes output.',
       )
     }
 
@@ -164,15 +219,37 @@ interface ImagenResponse {
   predictions?: ImagenPrediction[]
 }
 
+/**
+ * WHICH FAMILY THE CONFIGURED IMAGE MODEL BELONGS TO.
+ *
+ * Google serves image generation through two incompatible shapes, and the model
+ * name is the only thing that says which:
+ *
+ *   imagen-*   `:predict`         · instances[].prompt + parameters
+ *                                 · returns predictions[].bytesBase64Encoded
+ *   gemini-*   `:generateContent` · contents[].parts + responseModalities
+ *                                 · returns candidates[].content.parts[].inlineData
+ *
+ * Sending one shape to the other's endpoint answers 404 or 400. This used to
+ * hard-code `:predict`, so setting GCP_IMAGE_MODEL to a Gemini image model — the
+ * obvious thing to do when told "use Gemini for images" — failed at call time
+ * and silently fell through to the local brand renderer.
+ */
+function isGeminiImageModel(model: string): boolean {
+  return model.toLowerCase().startsWith('gemini')
+}
+
 function imageEndpoint(): string {
+  const model = config.gcp.imageModel
+  const action = isGeminiImageModel(model) ? 'generateContent' : 'predict'
   if (config.gcp.useVertex) {
     return (
       `https://${config.gcp.location}-aiplatform.googleapis.com/v1/projects/` +
       `${config.gcp.projectId}/locations/${config.gcp.location}/publishers/google/models/` +
-      `${config.gcp.imageModel}:predict`
+      `${model}:${action}`
     )
   }
-  return `https://generativelanguage.googleapis.com/v1beta/models/${config.gcp.imageModel}:predict`
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:${action}`
 }
 
 /** Imagen takes a named aspect ratio rather than pixel dimensions. */
@@ -187,49 +264,101 @@ function aspectRatioFor(width: number, height: number): string {
 
 export const gcpImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
   id: 'gcp.image',
-  label: 'Google Cloud · Imagen',
+  label: 'Google Cloud · Gemini and Imagen',
 
   isConfigured(): boolean {
-    return config.gcp.apiKey !== ''
+    return gcpAuthAvailable()
   },
 
   unavailableReason(): string {
-    return 'GCP_API_KEY is not set'
+    return `no usable Google credential — ${describeGcpAuth()}`
   },
 
   async run(input: GcpImageInput): Promise<PaintedBackground> {
     if (!this.isConfigured()) throw new AdapterError(this.id, this.unavailableReason())
 
-    const payload = await fetchJson<ImagenResponse>(imageEndpoint(), {
+    const headers = await gcpAuthHeader()
+    const gemini = isGeminiImageModel(config.gcp.imageModel)
+
+    /*
+     * Invariant 21: the model paints a BACKGROUND and is never asked for text,
+     * because the brand layer is drawn locally as vectors over the result.
+     *
+     * HOW that is asked for differs by family, and it is not cosmetic. Imagen
+     * takes a list of prohibitions and honours it. A Gemini image model handed
+     * the same list — "no text, no words, no letters, no logos, no watermarks" —
+     * answers HTTP 200 with an EMPTY candidate: no image, no text, not even a
+     * finishReason, which the caller can only report as "returned no image
+     * data". Measured across five phrasings, one prohibition is tolerated and
+     * the full list is not, while describing the wordless result positively
+     * works every time and returns a richer image.
+     *
+     * So the intent is identical and the wording is per family: state what the
+     * frame contains rather than listing what it must not.
+     */
+    const prompt = gemini
+      ? `${input.prompt}. A purely abstract technical background: only gradients, ` +
+        'geometry and texture, an entirely wordless composition.'
+      : `${input.prompt}. Abstract technical background artwork, ` +
+        'no text, no words, no letters, no logos, no watermarks.'
+
+    const body = gemini
+      ? {
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: {
+            // Gemini image models must be told to return an image; text-only is
+            // the default and would come back with no inlineData at all.
+            responseModalities: ['TEXT', 'IMAGE'],
+          },
+        }
+      : {
+          instances: [{ prompt }],
+          parameters: {
+            sampleCount: 1,
+            aspectRatio: aspectRatioFor(input.width, input.height),
+            personGeneration: 'dont_allow',
+          },
+        }
+
+    const payload = await fetchJson<ImagenResponse & GeminiResponse>(imageEndpoint(), {
       method: 'POST',
       timeoutMs: input.timeoutMs,
       adapterId: 'gcp.image',
-      headers: textHeaders(),
-      body: {
-        instances: [
-          {
-            // The prompt is explicitly background-only. Any request for text in
-            // the image would violate invariant 21.
-            prompt: `${input.prompt}. Abstract technical background artwork, no text, no words, no letters, no logos, no watermarks.`,
-          },
-        ],
-        parameters: {
-          sampleCount: 1,
-          aspectRatio: aspectRatioFor(input.width, input.height),
-          personGeneration: 'dont_allow',
-        },
-      },
+      headers,
+      body,
     })
+
+    if (gemini) {
+      const inline = (payload.candidates ?? [])
+        .flatMap((c) => c.content?.parts ?? [])
+        .map((part) => (part as { inlineData?: { data?: string; mimeType?: string } }).inlineData)
+        .find((data) => typeof data?.data === 'string' && data.data !== '')
+
+      if (!inline?.data) {
+        // A Gemini image model that returns only text has refused, and the text
+        // is the refusal. Surfacing it beats reporting "no image data".
+        const said = (payload.candidates ?? [])
+          .flatMap((c) => c.content?.parts ?? [])
+          .map((p) => p.text ?? '')
+          .join(' ')
+          .trim()
+        throw new AdapterError(
+          this.id,
+          said === ''
+            ? `${config.gcp.imageModel} returned no image data`
+            : `${config.gcp.imageModel} returned no image, only text: ${said.slice(0, 200)}`,
+        )
+      }
+
+      return { base64: inline.data, mimeType: inline.mimeType ?? 'image/png' }
+    }
 
     const first = payload.predictions?.[0]
     if (!first?.bytesBase64Encoded) {
-      throw new AdapterError(this.id, 'Imagen returned no image data')
+      throw new AdapterError(this.id, `${config.gcp.imageModel} returned no image data`)
     }
 
-    return {
-      base64: first.bytesBase64Encoded,
-      mimeType: first.mimeType ?? 'image/png',
-    }
+    return { base64: first.bytesBase64Encoded, mimeType: first.mimeType ?? 'image/png' }
   },
 }
 

@@ -44,35 +44,17 @@ import type { Platform, ServiceAdapter } from '../../../shared/agent-contract'
 import { config } from '../config'
 import { AdapterError } from './adapter'
 
-/** What the rest of the pipeline consumes, regardless of platform. */
-export interface RawPost {
-  externalId: string
-  text: string
-  authorName: string
-  authorHeadline: string
-  authorFollowers: number
-  url: string
-  postedAt: string
-  reactions: number
-  comments: number
-  reposts: number
-  hashtags: string[]
-  /** The keyword whose query surfaced this post. */
-  keyword: string
-  sourceName: string
-  /**
-   * The platform this row was captured FOR — `null` for the open-web tier.
-   * Recorded rather than re-derived from the URL, so a consumer never has to
-   * parse a host to know which platform lane an item belongs to.
-   */
-  platform: Platform | null
-  /**
-   * Whether the source could state engagement figures. Always false today,
-   * because a search-indexed page carries none. Present so that the zeros in
-   * the three count fields are readable as "not applicable" rather than "zero".
-   */
-  metricsAvailable: boolean
-}
+/**
+ * What the rest of the pipeline consumes. The contract now belongs to the
+ * capture layer rather than to this implementation of it, because Apify answers
+ * the same shape for the platform lanes — with `metricsAvailable` true, which
+ * is the one field this source can never set.
+ *
+ * The import is type-only, so the cycle with `capture.ts` is erased at compile
+ * time and there is no runtime cycle.
+ */
+export type { RawPost } from './capture'
+import type { RawPost } from './capture'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** `server/src/integrations` → repo root → `backend`. */

@@ -114,29 +114,132 @@ registerSkill<CaptionPayload>('generation.caption.voice', async (payload, ctx) =
    CAPTION 3 · generation.caption.hook
    ═══════════════════════════════════════════════════════════════════════════ */
 
+
+/**
+ * THE INSTRUCTION THAT MAKES IT READ LIKE A PERSON WROTE IT.
+ *
+ * Shared by the hook, the problem and the close so all three sound like one
+ * writer rather than three templates. It restates nothing from the brand rules —
+ * `voiceInstruction` already carries those — and adds only what rule 2's "plain
+ * natural English" means in practice, which is the part a template cannot do.
+ *
+ * The banned openers are not style preferences. Every caption the template writer
+ * produced began "Most teams treat X as a tuning exercise. It is a measurement
+ * problem first", verbatim, on every topic and every platform, because that
+ * sentence was hard-coded. A reader seeing two of our posts saw the same post.
+ */
+const HUMAN_VOICE = [
+  'Write as one practitioner talking to another. Short sentences. Concrete nouns.',
+  'Vary the opening: never begin with "Most teams", "In today\u2019s", "As AI evolves", "Let\u2019s dive in", or any sentence that could open a post on a different subject.',
+  'Use "we" for things we have done and "you" for the reader\u2019s situation. Contractions are fine.',
+  'No em-dash chains, no rhetorical triplets, no summary sentence that repeats what you just said.',
+  'Say the specific thing. If you cannot be specific because the evidence is thin, say less.',
+].join(' ')
+
 const CLICKBAIT = /\b(you won'?t believe|this changes everything|secret|hack|shocking|nobody talks about|the truth about)\b/i
 
-registerSkill<CaptionPayload>('generation.caption.hook', (payload, ctx) => {
+registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) => {
   const maxWords = ctx.num('maxWords', 18)
   const style = ctx.str('style', 'Declarative')
   const banClickbait = ctx.bool('banClickbait', true)
+  const temperature = ctx.num('temperature', 55)
 
   const subject = payload.title
   const topic = payload.sourceTopic
+  const grounding = payload.grounding ?? []
+
+  /*
+   * THE HOOK IS WRITTEN, NOT COPIED.
+   *
+   * `Declarative` used to be `subject.replace(/\.$/, '')` — the idea's title,
+   * which `analysis.trend.cluster` had itself lifted from the first line of the
+   * scraped post that surfaced the topic. So the first line of an Ethara post was
+   * a verbatim copy of somebody else's opening line, and the calendar card showed
+   * their headline as our subject. Real platform capture made that unmistakable:
+   * cards read "NPCI is stepping up its AI and digital banking push at GFF 2026".
+   *
+   * Now the model writes a first line that makes OUR claim about the subject, and
+   * the templates below remain as the labelled fallback.
+   */
+  const styleBrief: Record<string, string> = {
+    Declarative: 'State the claim flatly, as a fact you are prepared to defend.',
+    Question: 'Ask the one question the post answers. It must end with a question mark.',
+    Contrarian: 'Name the common belief and say plainly that it is wrong.',
+    Observation: 'Report the specific change you have observed, with its subject named.',
+  }
+
+  const systemInstruction = [
+    payload.voiceInstruction ?? '',
+    HUMAN_VOICE,
+    grounding.length > 0
+      ? `Evidence available:\n${grounding.map((g) => `\u00b7 ${g.title}: ${g.content}`).join('\n').slice(0, 2400)}`
+      : 'You have no retrieved evidence. Make no numeric claims.',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  const prompt = [
+    `Write ONLY the first line of a ${PLATFORM_LABEL[payload.platform]} post about ${topic}.`,
+    `The post's subject, for your reference only — do not reuse its wording: "${subject}"`,
+    `Angle: ${payload.angle}`,
+    styleBrief[style] ?? styleBrief.Declarative,
+    `At most ${maxWords} words. One line. No hashtags, no emoji, no quotation marks around it.`,
+    'It must make a claim rather than tease one. Do not end with a colon.',
+  ].join('\n')
 
   const patterns: Record<string, () => string> = {
     Declarative: () => subject.replace(/\.$/, ''),
     Question: () => `What actually changes when ${topic.toLowerCase()} stops being a research problem?`,
-    Contrarian: () => `${subject.replace(/\.$/, '')} — and the usual explanation for it is wrong.`,
+    Contrarian: () => `${subject.replace(/\.$/, '')} \u2014 and the usual explanation for it is wrong.`,
     Observation: () => `Something shifted in ${topic.toLowerCase()} this month, and the benchmarks show it.`,
   }
 
-  let hook = clampWords((patterns[style] ?? patterns.Declarative)!(), maxWords)
+  const outcome = await withFallback(
+    textAdapter(),
+    {
+      systemInstruction,
+      prompt,
+      temperature: temperatureFromPercent(temperature),
+      maxOutputTokens: 256,
+    },
+    () => (patterns[style] ?? patterns.Declarative)!(),
+    (reason) => {
+      ctx.emit('activity', `Hook written by the template writer \u2014 ${reason}`, { status: 'warn', reason })
+    },
+  )
+
+  // A model asked for one line occasionally supplies a heading and a line, or
+  // wraps it in quotes. Take the first real line and unwrap it.
+  let hook = clampWords(
+    (outcome.value.split(/\n+/).find((l) => l.trim().length > 0) ?? '')
+      .trim()
+      .replace(/^["'\u201c\u2018]|["'\u201d\u2019]$/g, '')
+      .replace(/^#+\s*/, '')
+      .replace(/:$/, ''),
+    maxWords,
+  )
+
+  if (hook === '') {
+    hook = clampWords((patterns[style] ?? patterns.Declarative)!(), maxWords)
+    ctx.log('The model returned no usable first line, so the declarative template stood in')
+  }
 
   if (banClickbait && CLICKBAIT.test(hook)) {
     hook = clampWords(subject.replace(/\.$/, ''), maxWords)
     ctx.log(`The ${style} hook read as clickbait, so it fell back to the declarative form`)
   }
+
+  // Rule 5: zero emoji. Stripped here rather than left for the enforcer, because
+  // the hook is also what the calendar card is titled from.
+  const withoutEmoji = hook.replace(/\p{Extended_Pictographic}/gu, '').replace(/\s{2,}/g, ' ').trim()
+  if (withoutEmoji !== hook) {
+    ctx.log('Emoji removed from the hook \u2014 rule 5 sets the budget at zero')
+    hook = withoutEmoji
+  }
+
+  ctx.log(
+    `${style} hook, ${hook.split(/\s+/).length} word(s), by ${outcome.source === 'live' ? textModelId() : 'the template writer'}`,
+  )
 
   return { hook }
 })
@@ -145,26 +248,84 @@ registerSkill<CaptionPayload>('generation.caption.hook', (payload, ctx) => {
    CAPTION 4 · generation.caption.problem
    ═══════════════════════════════════════════════════════════════════════════ */
 
-registerSkill<CaptionPayload>('generation.caption.problem', (payload, ctx) => {
+registerSkill<CaptionPayload>('generation.caption.problem', async (payload, ctx) => {
   const maxSentences = ctx.num('maxSentences', 3)
   const quantify = ctx.bool('quantify', true)
+  const temperature = ctx.num('temperature', 55)
 
   const grounding = payload.grounding ?? []
   const figure = quantify ? firstFigure(grounding) : null
 
-  const sentences: string[] = [
-    `Most teams treat ${topicInProse(payload.sourceTopic)} as a tuning exercise.`,
-    'It is a measurement problem first: what you reward is what you get, and the reward is usually a proxy for the thing you actually wanted.',
+  /*
+   * THIS SECTION USED TO BE THE SAME THREE SENTENCES EVERY TIME.
+   *
+   * "Most teams treat X as a tuning exercise. It is a measurement problem first:
+   * what you reward is what you get…" was hard-coded, so every post on every
+   * topic and every platform carried it verbatim with only the topic swapped. It
+   * is the single clearest tell that a template wrote the post, and it is why the
+   * calendar read as machine output.
+   *
+   * The template is kept as the fallback, so an unreachable model still produces
+   * a complete post — labelled, as every degraded path is.
+   */
+  const systemInstruction = [
+    payload.voiceInstruction ?? '',
+    HUMAN_VOICE,
+    grounding.length > 0
+      ? `Evidence available:\n${grounding.map((g) => `\u00b7 ${g.title}: ${g.content}`).join('\n').slice(0, 2400)}`
+      : 'You have no retrieved evidence. Make no numeric claims.',
   ]
+    .filter(Boolean)
+    .join('\n\n')
 
-  if (figure) {
-    sentences.push(`The gap shows up in the numbers — ${figure}.`)
-  } else {
-    sentences.push('The gap only shows up once the model is in front of real traffic.')
+  const prompt = [
+    `Write the problem section of a ${PLATFORM_LABEL[payload.platform]} post about ${payload.sourceTopic}.`,
+    `The hook already written is: "${payload.hook ?? ''}" \u2014 do not repeat it.`,
+    `Angle: ${payload.angle}`,
+    `Audience: ${payload.audience}`,
+    `At most ${maxSentences} sentences. Name the specific difficulty this audience actually hits.`,
+    figure
+      ? `You may cite this measured figure, exactly as given: ${figure}`
+      : 'No figure is available, so make no numeric claim.',
+    'No hook, no close, no hashtags, no heading.',
+  ].join('\n')
+
+  const template = (): string => {
+    const sentences: string[] = [
+      `Most teams treat ${topicInProse(payload.sourceTopic)} as a tuning exercise.`,
+      'It is a measurement problem first: what you reward is what you get, and the reward is usually a proxy for the thing you actually wanted.',
+    ]
+    sentences.push(
+      figure
+        ? `The gap shows up in the numbers \u2014 ${figure}.`
+        : 'The gap only shows up once the model is in front of real traffic.',
+    )
+    return sentences.slice(0, Math.max(1, maxSentences)).join(' ')
   }
 
-  const problem = sentences.slice(0, Math.max(1, maxSentences)).join(' ')
-  ctx.log(quantify && figure ? 'Problem statement carries a figure from the grounding' : 'Problem statement written without a figure')
+  const outcome = await withFallback(
+    textAdapter(),
+    {
+      systemInstruction,
+      prompt,
+      temperature: temperatureFromPercent(temperature),
+      maxOutputTokens: 512,
+    },
+    template,
+    (reason) => {
+      ctx.emit('activity', `Problem section written by the template writer \u2014 ${reason}`, {
+        status: 'warn',
+        reason,
+      })
+    },
+  )
+
+  const problem = outcome.value.trim().replace(/^#+\s*/gm, '')
+
+  ctx.log(
+    `Problem section by ${outcome.source === 'live' ? textModelId() : 'the template writer'}` +
+      (quantify && figure ? ', carrying a figure from the grounding' : ', with no numeric claim'),
+  )
 
   return { problem }
 })
@@ -323,23 +484,105 @@ function extractLayers(caption: string, layers: number): string {
    CAPTION 6 · generation.caption.close
    ═══════════════════════════════════════════════════════════════════════════ */
 
-registerSkill<CaptionPayload>('generation.caption.close', (payload, ctx) => {
-  const closeStyle = ctx.str('closeStyle', 'Implication')
+registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) => {
+  const closeStyle = ctx.str('closeStyle', 'Open question')
   const bannedCta = ctx.bool('bannedCta', true)
+  const temperature = ctx.num('temperature', 55)
 
-  const closes: Record<string, string> = {
+  /*
+   * THE POST ENDS BY ASKING SOMETHING.
+   *
+   * Rule 8 already specifies the final stage as "closing line or question", and
+   * the default was `Implication` — a statement. Every post therefore ended by
+   * telling the reader what to conclude, which reads as a lecture and gives an
+   * audience nothing to answer.
+   *
+   * `Open question` is now the default, and when it is selected the result is
+   * VALIDATED to be a question: if the model returns a statement it is asked
+   * once more, and failing that the topic-specific template stands in. A section
+   * that is supposed to be a question and silently is not would make the
+   * structure a claim the product does not keep.
+   *
+   * Rule 5's CTA ban still applies. "What are you seeing in your evaluations?" is
+   * a question; "comment below" is a call to action, and the difference is
+   * enforced rather than trusted.
+   */
+  const templates: Record<string, string> = {
     Implication: `The implication for anyone shipping ${topicInProse(payload.sourceTopic)}: measure the behaviour you actually want, then reward it. Everything else is downstream of that.`,
-    'Open question': `The open question is which of these results survive contact with production traffic. We are running that experiment now.`,
+    'Open question': `Where does this break first in your own ${topicInProse(payload.sourceTopic)} work \u2014 the reward, or the evaluation?`,
     'Forward look': `The next twelve months of ${topicInProse(payload.sourceTopic)} will be decided by evaluation, not by model size.`,
     None: '',
   }
 
-  let close = closes[closeStyle] ?? closes.Implication ?? ''
+  if (closeStyle === 'None') return { close: '' }
 
-  if (bannedCta && /\b(comment below|dm me|link in bio|sign up|book a demo|follow for more)\b/i.test(close)) {
-    close = closes.Implication ?? ''
-    ctx.log('The close contained a call to action, which rule 5 forbids — replaced with the implication form')
+  const wantsQuestion = closeStyle === 'Open question'
+
+  const systemInstruction = [payload.voiceInstruction ?? '', HUMAN_VOICE].filter(Boolean).join('\n\n')
+
+  const prompt = [
+    `Write ONLY the closing line of a ${PLATFORM_LABEL[payload.platform]} post about ${payload.sourceTopic}.`,
+    `The post's hook was: "${payload.hook ?? ''}"`,
+    `Its problem section said: "${(payload.problem ?? '').slice(0, 400)}"`,
+    wantsQuestion
+      ? 'It must be a single question that a practitioner in this field can actually answer from their own experience. End with a question mark. Do not ask for likes, comments, follows or shares.'
+      : closeStyle === 'Forward look'
+        ? 'State what changes next, in one or two sentences.'
+        : 'State the implication for someone shipping this, in one or two sentences.',
+    'No hashtags, no emoji, no heading, no quotation marks around it.',
+  ].join('\n')
+
+  const outcome = await withFallback(
+    textAdapter(),
+    {
+      systemInstruction,
+      prompt,
+      temperature: temperatureFromPercent(temperature),
+      maxOutputTokens: 256,
+    },
+    () => templates[closeStyle] ?? templates.Implication ?? '',
+    (reason) => {
+      ctx.emit('activity', `Closing line written by the template writer \u2014 ${reason}`, {
+        status: 'warn',
+        reason,
+      })
+    },
+  )
+
+  let close = outcome.value
+    .trim()
+    .replace(/^["'\u201c\u2018]|["'\u201d\u2019]$/g, '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+
+  if (close === '') close = templates[closeStyle] ?? ''
+
+  // The structural promise, kept rather than assumed.
+  if (wantsQuestion && !close.trimEnd().endsWith('?')) {
+    const salvaged = close
+      .split(/(?<=\?)\s/)
+      .find((part) => part.trimEnd().endsWith('?'))
+      ?.trim()
+    if (salvaged) {
+      close = salvaged
+      ctx.log('The closing line carried extra prose after the question; the question alone was kept')
+    } else {
+      close = templates['Open question'] ?? ''
+      ctx.log('The model did not return a question, so the topic-specific closing question stood in')
+    }
   }
+
+  if (bannedCta && /\b(comment below|dm me|link in bio|sign up|book a demo|follow for more|like and share|tag someone)\b/i.test(close)) {
+    close = templates[wantsQuestion ? 'Open question' : 'Implication'] ?? ''
+    ctx.log('The close contained a call to action, which rule 5 forbids \u2014 replaced with the compliant form')
+  }
+
+  ctx.log(
+    `${closeStyle} close by ${outcome.source === 'live' ? textModelId() : 'the template writer'}` +
+      (wantsQuestion ? `, ending in a question` : ''),
+  )
 
   return { close }
 })
@@ -399,13 +642,40 @@ registerSkill<CaptionPayload>('generation.caption.adapt', (payload, ctx) => {
   const limit = limits[payload.platform]
 
   if (payload.platform === 'x') {
-    // X is a different medium, not a truncated LinkedIn post: the hook plus one
-    // load-bearing sentence, and the hashtag block has to fit inside the limit.
+    /*
+     * X is a different medium, not a truncated LinkedIn post — but it is still
+     * the same post, and rule 8 ends a post on a closing line or question.
+     *
+     * This used to assemble the hook plus one sentence of the explanation and
+     * stop, which dropped the close on the floor. On a 280-character limit that
+     * produced a card whose first line and last line were the same sentence and
+     * which asked the reader nothing, while every other platform ended on a
+     * question. The structure has to survive the medium or it is not a structure.
+     *
+     * So the hook and the close are the fixed points and the middle is what
+     * compresses, exactly as on the long-form platforms below. If even the hook
+     * and close will not fit together, the close wins the remaining room: a post
+     * that asks something is worth more than one that trails off.
+     */
     const tags = payload.hashtagBlock ?? ''
     const room = Math.max(60, limit - tags.length - 2)
-    const lead = [payload.hook, firstSentence(payload.explanation ?? payload.problem ?? '')]
-      .filter(Boolean)
-      .join(' ')
+    const hook = (payload.hook ?? '').trim()
+    const close = (payload.close ?? '').trim()
+
+    const withMiddle = (middle: string): string =>
+      [hook, middle, close].filter((part) => part.length > 0).join(' ')
+
+    let lead = withMiddle(firstSentence(payload.explanation ?? payload.problem ?? ''))
+    if (lead.length > room) {
+      lead = withMiddle('')
+      ctx.log(`Dropped the middle sentence to keep the hook and the closing question inside X's ${limit} characters`)
+    }
+    if (lead.length > room && close !== '') {
+      lead = clampChars(hook, Math.max(0, room - close.length - 1)).trim()
+      lead = [lead, close].filter((part) => part.length > 0).join(' ')
+      ctx.log('Hook shortened so the closing question survives whole')
+    }
+
     body = `${clampChars(lead, room).trim()}${tags ? `\n${tags}` : ''}`
   } else {
     const tags = payload.hashtagBlock ?? ''

@@ -713,6 +713,13 @@ export async function updateIdea(
     calendarSlot?: CalendarSlot
     platformRank?: number
     analysis?: Record<string, unknown>
+    /**
+     * The card's own line. Set by the Caption Agent once the post has been
+     * written, replacing the headline that `analysis.trend.cluster` lifted from
+     * the source post. `upsertIdea` matches on title + platform, so this is a
+     * rename of an existing row rather than a route to a second copy.
+     */
+    title?: string
   },
 ): Promise<IdeaRow | null> {
   return queryOne<IdeaRow>(
@@ -724,6 +731,7 @@ export async function updateIdea(
        calendar_slot  = COALESCE($7, calendar_slot),
        platform_rank  = COALESCE($8, platform_rank),
        analysis       = COALESCE($9::jsonb, analysis),
+       title          = COALESCE($10, title),
        updated_at     = now()
      WHERE workspace_id = $1 AND id = $2
      RETURNING *, NULL::text AS hashtag_display`,
@@ -737,6 +745,7 @@ export async function updateIdea(
       patch.calendarSlot ?? null,
       patch.platformRank ?? null,
       patch.analysis ? JSON.stringify(patch.analysis) : null,
+      patch.title ?? null,
     ],
   )
 }
@@ -2120,16 +2129,38 @@ export async function linkDuplicateHashtag(id: string, duplicateOfId: string): P
 /**
  * Marks the consolidated top set. The previous set is cleared first so exactly
  * one generation of `in_top_set` is live at a time — the rows themselves remain.
+ *
+ * AN EMPTY SET IS NOT A REPLACEMENT. The clear used to run before the empty
+ * check, so a run that captured nothing — a keyword the crawler could not reach,
+ * a lane that returned no usable pages — cleared the whole top set and put
+ * nothing back. The consolidated top 25 is measured work that the Knowledge
+ * Agent researches from and the UI shows as the hashtag set; wiping it because
+ * one run came back empty deletes a real result on the strength of no evidence
+ * at all, which is the opposite of what an empty run means.
+ *
+ * So an empty `ids` leaves the previous generation in place and reports that it
+ * did. The caller says so; nothing is silently kept OR silently dropped. The
+ * return value is what was actually done, because "the set is unchanged" is a
+ * different outcome from "the set was replaced" and the run summary must be able
+ * to tell an operator which happened.
  */
 export async function replaceTopHashtagSet(
   workspaceId: string,
   ids: string[],
-): Promise<void> {
+): Promise<{ replaced: boolean; size: number }> {
+  if (ids.length === 0) {
+    const kept = await queryOne<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM hashtags WHERE workspace_id = $1 AND in_top_set`,
+      [workspaceId],
+    )
+    return { replaced: false, size: Number(kept?.count ?? 0) }
+  }
+
   await query(`UPDATE hashtags SET in_top_set = false WHERE workspace_id = $1 AND in_top_set`, [
     workspaceId,
   ])
-  if (ids.length === 0) return
   await query(`UPDATE hashtags SET in_top_set = true WHERE id = ANY($1::uuid[])`, [ids])
+  return { replaced: true, size: ids.length }
 }
 
 export interface IdeaInsert {

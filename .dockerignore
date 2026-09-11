@@ -1,0 +1,57 @@
+# What never belongs in a build context.
+#
+# Two entries here are load-bearing rather than merely tidy:
+#
+#   node_modules  — the host's tree is macOS/arm64 and carries native binaries
+#                   (esbuild, fsevents) that will not run on the image's Linux.
+#                   The image installs its own from the lockfiles.
+#   backend/.venv — likewise: a venv records absolute paths and platform wheels.
+#                   mflux lives in the host venv and cannot run on Linux at all.
+#
+# Everything else is either regenerable, secret, or irrelevant to a build.
+
+.git
+.gitignore
+
+node_modules
+**/node_modules
+server/node_modules
+
+backend/.venv
+.mflux-venv
+**/__pycache__
+**/*.pyc
+backend/data
+
+# Build output — the image builds its own.
+dist
+server/dist
+packages/runtime/.claude
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Secrets. The container is configured through compose environment, never by
+# baking a host .env into a layer — an image layer is readable by anyone who
+# can pull the image.
+.env
+.env.*
+!.env.docker.example
+server/.env
+server/.env.bak-*
+
+# Editor, OS and agent scaffolding.
+.DS_Store
+**/.DS_Store
+.vscode
+.idea
+.claude
+.codex
+.kiro
+.mcp.json
+
+# Docs and scratch — nothing the runtime reads.
+docs
+archive
+*.md
+!packages/skills/**/*.md
+!backend/**/*.md

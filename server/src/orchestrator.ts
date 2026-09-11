@@ -15,7 +15,7 @@ import type {
   IdeaStatus,
   Platform,
 } from '../../shared/agent-contract'
-import { AGENT_BY_ID } from '../../shared/agent-registry'
+import { AGENT_BY_ID, SKILL_BY_ID } from '../../shared/agent-registry'
 import { canvasFor, canvasKey, type ImageModelId } from '../../shared/image-models'
 import { config } from './config'
 import { publish, publishActivity } from './events'
@@ -38,6 +38,7 @@ import {
   listIdeas,
   listKeywords,
   listPosts,
+  listSkillOverrides,
   insertKeywordSignal,
   persistHashtagCandidates,
   persistIdeas,
@@ -53,7 +54,7 @@ import {
   upsertMediaAsset,
   type IdeaRow,
 } from './db/repo'
-import { runAgent } from './agents/runtime'
+import { resolveConfig, runAgent } from './agents/runtime'
 import type {
   AnalyticsPayload,
   CaptionPayload,
@@ -101,6 +102,9 @@ export interface PipelineSummary {
   suggestionIdeas: number
   source: 'live' | 'fixture'
   fallbackReasons: string[]
+  /** Posts handed to the Content and Image Agents because they took a slot. */
+  written: number
+  writeFailed: number
 }
 
 export interface PipelineResult {
@@ -111,6 +115,27 @@ export interface PipelineResult {
   topHashtags: Array<{ tag: string; rank: number; score: number }>
   ideas: Array<{ id: string; title: string; platform: Platform; slot: CalendarSlot; rank: number | null }>
   error?: string
+}
+
+/**
+ * A skill's effective configuration, resolved OUTSIDE a skill run.
+ *
+ * The orchestrator needs two of `calendar.rank.select`'s knobs to decide whether
+ * to walk the graph into the write stage, and it is not inside a `ctx`. Resolved
+ * through the same precedence the runtime uses — registry default < workspace
+ * override — so the operator's setting in Agent Studio governs the hand-off
+ * exactly as it governs the skill, rather than the orchestrator carrying a second
+ * copy of the default.
+ */
+async function resolveSkillConfig(
+  workspaceId: string,
+  skillId: string,
+): Promise<Record<string, string | number | boolean>> {
+  const skill = SKILL_BY_ID[skillId]
+  if (!skill) return {}
+  // A Map keyed by skill id, so this is a lookup rather than a scan.
+  const overrides = await listSkillOverrides(workspaceId)
+  return resolveConfig(skill, overrides.get(skillId)?.config, undefined)
 }
 
 export async function runDiscoveryPipeline(
@@ -192,12 +217,28 @@ export async function runDiscoveryPipeline(
   }
 
   const afterAnalysis = analysis.payload
-  await replaceTopHashtagSet(
+  const topSet = await replaceTopHashtagSet(
     workspaceId,
     (afterAnalysis.topHashtags ?? [])
       .map((h) => hashtagIdByTag.get(h.tag))
       .filter((id): id is string => typeof id === 'string'),
   )
+
+  if (!topSet.replaced) {
+    // The run consolidated nothing, so the previous generation still stands.
+    // Said out loud, because an operator looking at an unchanged hashtag set
+    // after a run needs to know it is the old one rather than a new one that
+    // happens to match.
+    await insertActivity({
+      workspaceId,
+      agentId: 'analysis',
+      message:
+        topSet.size === 0
+          ? 'No hashtags could be consolidated this run, and there was no previous top set to keep.'
+          : `No hashtags could be consolidated this run — the previous top set of ${topSet.size} is unchanged, not cleared.`,
+      status: 'warn',
+    })
+  }
 
   /* ── ④ Calendar ─────────────────────────────────────────────────────────── */
   const calendar = await runAgent<PipelinePayload>('calendar', afterAnalysis, {
@@ -219,6 +260,99 @@ export async function runDiscoveryPipeline(
     turnId,
   )
 
+  /* ── ⑤ Write what took a slot ────────────────────────────────────────────
+   *
+   * THE STAGE THAT MAKES THE CALENDAR APPEAR.
+   *
+   * The grid deliberately renders only posts that have actually been written —
+   * `calendar_slot === 'primary' && status !== 'suggested'` — because a placed
+   * but unwritten idea sitting beside a finished post looks equally ready to
+   * publish, and once twenty-one of twenty-nine cards were in that state.
+   *
+   * Nothing, however, closed the gap. Planning ended at `calendar`, and drafting
+   * was a per-card action an operator had to find, so a complete and correct run
+   * left a calendar that rendered empty. Three agents looked broken — calendar,
+   * caption, image — for one missing hand-off.
+   *
+   * So the pipeline now walks the graph one stage further and hands each newly
+   * placed post to the Content and Image Agents. Bounded by a declared knob,
+   * because each post is two model calls; a failure is reported per post and
+   * never fails the run, because a written calendar with four of five posts is
+   * worth more than a failed pipeline.
+   */
+  const rankConfig = await resolveSkillConfig(workspaceId, 'calendar.rank.select')
+  const autoWrite = rankConfig.autoWriteCalendar !== false
+  const maxWrites = Math.max(0, Number(rankConfig.maxAutoWrites ?? 5))
+
+  let written = 0
+  let writeFailed = 0
+
+  if (autoWrite && maxWrites > 0) {
+    const onCalendar = await listIdeas(workspaceId, { limit: 400 })
+    const pending = onCalendar
+      .filter((row) => row.calendar_slot === 'primary')
+      .filter((row) => row.status === 'suggested')
+      .sort((a, b) => Number(b.priority_score ?? 0) - Number(a.priority_score ?? 0))
+
+    const queue: IdeaRow[] = []
+    for (const row of pending) {
+      if (queue.length >= maxWrites) break
+      // Already written by an earlier run or by hand — nothing to redo.
+      const existing = await getDraft(row.id, row.platform as Platform)
+      if (existing) continue
+      queue.push(row)
+    }
+
+    if (queue.length > 0) {
+      await insertActivity({
+        workspaceId,
+        agentId: 'caption',
+        message: `Writing ${queue.length} post(s) that took a calendar slot`,
+        status: 'running',
+      })
+    }
+
+    for (const row of queue) {
+      try {
+        await generateDraft({
+          workspaceId,
+          trigger,
+          turnId,
+          paceMs,
+          configOverrides,
+          ideaId: row.id,
+          platform: row.platform as Platform,
+          // One call covers both agents, so a card never appears written but
+          // unillustrated.
+          withImage: true,
+        })
+        written += 1
+      } catch (error) {
+        writeFailed += 1
+        const message = error instanceof Error ? error.message : String(error)
+        // Named per post. A caption that could not be written is a fact about
+        // that post, not about the run.
+        await insertActivity({
+          workspaceId,
+          agentId: 'caption',
+          message: `Could not write “${row.title.slice(0, 60)}” — ${message}`,
+          status: 'error',
+        })
+      }
+    }
+
+    if (written > 0 || writeFailed > 0) {
+      await insertActivity({
+        workspaceId,
+        agentId: 'image',
+        message:
+          `${written} post(s) written and illustrated, now on the calendar` +
+          (writeFailed > 0 ? ` · ${writeFailed} could not be written and keep their slot unwritten` : ''),
+        status: writeFailed > 0 ? 'warn' : 'ok',
+      })
+    }
+  }
+
   /* ── Finish ─────────────────────────────────────────────────────────────── */
   const buckets = final.buckets ?? { validated: 0, needs_review: 0, duplicate: 0, rejected: 0 }
   const ideas = final.ideas ?? []
@@ -239,6 +373,8 @@ export async function runDiscoveryPipeline(
     suggestionIdeas: ideas.filter((i) => i.calendarSlot === 'suggestion').length,
     source: final.captureSource ?? 'fixture',
     fallbackReasons: final.captureFallbackReasons ?? [],
+    written,
+    writeFailed,
   }
 
   await finishPipelineRun(run.id, 'completed', summary as unknown as Record<string, unknown>)
@@ -292,6 +428,8 @@ function emptySummary(): PipelineSummary {
     suggestionIdeas: 0,
     source: 'fixture',
     fallbackReasons: [],
+    written: 0,
+    writeFailed: 0,
   }
 }
 
@@ -768,6 +906,34 @@ export async function generateDraft(
 
   const payload = caption.payload
   const body = payload.caption ?? payload.captionBody ?? idea.description ?? idea.title
+
+  /*
+   * THE CARD TAKES OUR OWN LINE, NOT THE SOURCE'S.
+   *
+   * `analysis.trend.cluster` titles an opportunity with `headlineFrom(seed.text)`
+   * — the first line of the scraped post that surfaced the topic. That is the
+   * right thing for a piece of evidence and the wrong thing for a card: the
+   * calendar showed other people's headlines as our subjects, including news
+   * copy like "NPCI is stepping up its AI and digital banking push at GFF 2026".
+   *
+   * The hook is the first line of the post we actually wrote, brand-enforced and
+   * ours. Once it exists it is the honest title for the card.
+   *
+   * Only while the idea is still in planning. From `in_review` onward a person
+   * has read the title that was in front of them, and changing it underneath them
+   * would misrepresent what they reviewed.
+   */
+  const hook = (payload.hook ?? '').trim()
+  const retitleable = idea.status === 'suggested' || idea.status === 'drafted'
+  if (hook !== '' && retitleable && hook !== idea.title) {
+    await updateIdea(workspaceId, idea.id, { title: hook })
+    await insertActivity({
+      workspaceId,
+      agentId: 'caption',
+      message: `Card retitled to the post's own first line: “${hook.slice(0, 70)}”`,
+      status: 'ok',
+    })
+  }
 
   const draft = await upsertDraft({
     ideaId: idea.id,

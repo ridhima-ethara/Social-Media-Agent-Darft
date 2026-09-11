@@ -25,7 +25,6 @@
     "brand:check:db": "tsx server/scripts/check-alignment-vocabulary.ts",
     "agent:new": "node scripts/new-agent.mjs",
     "build-skills": "tsx scripts/build-skills.ts",
-    "connectors": "tsx scripts/check-connectors.ts",
     "corpus:ingest": "tsx server/scripts/ingest-corpus.ts",
     "agents": "backend/.venv/bin/python backend/api.py agents",
     "agents:run": "backend/.venv/bin/python backend/workflows/social_media_workflow.py",

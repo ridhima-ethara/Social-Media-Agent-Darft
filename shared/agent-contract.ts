@@ -294,7 +294,7 @@ export const IDEA_STATUSES = [
 ] as const
 export type IdeaStatus = (typeof IDEA_STATUSES)[number]
 
-/** Top-10-per-platform rule: only `primary` ideas take a calendar slot. */
+/** The per-platform cap (`topPerPlatform`, 5 by default): only `primary` ideas take a calendar slot. */
 export type CalendarSlot = 'primary' | 'suggestion'
 
 export type Confidence = 'High' | 'Medium' | 'Low'

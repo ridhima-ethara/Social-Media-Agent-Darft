@@ -1,16 +1,26 @@
 /**
  * THE SCRAPING AGENT — stage `discover`
  *
- * Reads the keyword set and asks crawl4ai what the web has been saying about
- * each term — once per platform lane (LinkedIn, Instagram, X, Facebook) and
- * once against the open web — then harvests the hashtags out of the bodies that
+ * Reads the keyword set and asks what each platform has been saying about every
+ * term — once per platform lane (LinkedIn, Instagram, X, Facebook) and once
+ * against the open web — then harvests the hashtags out of the bodies that
  * carry them and takes an independent reading of the strongest tags.
  *
- * ONE SOURCE, NO CORPUS. crawl4ai is the only capture path. There is no paid
- * connector and no bundled fixture corpus behind it, which means an empty
- * result is reported as an empty result: a keyword that returned nothing on
- * Instagram says so, and the run continues on the lanes that answered. What the
- * pipeline shows is what was actually on the web at capture time, or nothing.
+ * TWO SOURCES, NO CORPUS. The four platform lanes are captured by Apify actors,
+ * which read the platforms themselves and return real engagement counts. The
+ * open web has no actor and is captured by crawl4ai, which reads what a search
+ * engine indexed and therefore states no engagement at all. Every row carries
+ * `metricsAvailable` so the difference is legible downstream rather than
+ * inferred from zeros.
+ *
+ * There is no bundled fixture corpus behind either, which means an empty result
+ * is reported as an empty result: a keyword that returned nothing on Instagram
+ * says so, and the run continues on the lanes that answered. What the pipeline
+ * shows is what was actually published at capture time, or nothing.
+ *
+ * WITHOUT AN APIFY TOKEN the platform lanes degrade to crawl4ai rather than
+ * disappearing — the same lane, read through a search engine, stamped
+ * `metricsAvailable: false` and reported as downgraded at capture time.
  *
  * BRAND AND KNOWLEDGE ALIGNMENT AT CAPTURE. A `site:` search returns whatever
  * the engine indexed, which is wider than what this company publishes about.
@@ -36,12 +46,17 @@ import { PLATFORMS, type Platform, type SkillContext } from '../../../../shared/
 import { config } from '../../config'
 import {
   AdapterError,
+  apifySearch,
+  captureChainFor,
+  captureFor,
   crawl4aiSearch,
   mapWithConcurrency,
+  platformLaneDowngradeReason,
+  type CaptureAttempt,
   type RawPost,
 } from '../../integrations'
 import { prepareEvidence } from '../../../../packages/runtime/src/evidence'
-import { listKeywords, listKnowledge, listSources, recentCaptures } from '../../db/repo'
+import { insertActivity, listKeywords, listKnowledge, listSources, recentCaptures } from '../../db/repo'
 import {
   clampChars,
   contentWords,
@@ -49,6 +64,7 @@ import {
   credibilityLabel,
   engagementOf,
   extractHashtagsFromText,
+  englishRatio,
   headlineFrom,
   hoursSince,
   matchedTopics,
@@ -287,45 +303,86 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
 registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) => {
   const failIfNoSource = ctx.bool('failIfNoSource', false)
 
-  const configured = crawl4aiSearch.isConfigured()
+  const apifyReady = apifySearch.isConfigured()
+  const crawlerReady = crawl4aiSearch.isConfigured()
+  // Either source alone can carry a run: Apify covers the four platform lanes,
+  // crawl4ai covers the open web and stands in for a platform lane without a
+  // token. Only losing both leaves nothing to capture.
+  const configured = apifyReady || crawlerReady
   const mode: 'live' | 'fixture' = configured ? 'live' : 'fixture'
   const rows = await listSources(ctx.workspaceId)
 
-  // Every source in the registry is reached the same way now: crawl4ai either
-  // runs or it does not. Reporting per-source reachability would imply a
-  // per-source credential that no longer exists.
+  // A source's reachability now depends on which lane it belongs to, because
+  // the two implementations have different credentials. A platform source is
+  // reachable if EITHER can serve it — Apify properly, crawl4ai downgraded.
   const sources: SourceConnection[] = rows
     .filter((s) => s.enabled)
-    .map((s) => ({
-      name: s.name,
-      kind: s.kind,
-      sourceType: s.source_type,
-      reachable: configured,
-      reason: configured ? `Reachable via ${crawl4aiSearch.label}` : crawl4aiSearch.unavailableReason(),
-    }))
+    .map((s) => {
+      const isOpenWeb = s.kind === 'web'
+      const reachable = isOpenWeb ? crawlerReady : configured
+      const via = isOpenWeb || !apifyReady ? crawl4aiSearch.label : apifySearch.label
+      const reason = reachable
+        ? `Reachable via ${via}`
+        : isOpenWeb
+          ? crawl4aiSearch.unavailableReason()
+          : `${apifySearch.unavailableReason()}, and ${crawl4aiSearch.unavailableReason()}`
+      return { name: s.name, kind: s.kind, sourceType: s.source_type, reachable, reason }
+    })
 
-  const unreachable = configured ? [] : [crawl4aiSearch.label]
+  const unreachable = [
+    ...(apifyReady ? [] : [apifySearch.label]),
+    ...(crawlerReady ? [] : [crawl4aiSearch.label]),
+  ]
+
+  /**
+   * A mode notice is BOTH published and stored.
+   *
+   * `ctx.emit` reaches the in-process event bus only, so a notice sent that way
+   * lives exactly as long as an open SSE connection. That is right for the
+   * hundreds of per-item capture events, and wrong for these three: "the
+   * platform lanes are not reading the platforms" explains the data quality of
+   * every row the run produced, and an operator who was not watching at the time
+   * must still be able to find out. So these go through `insertActivity` as
+   * well, which is what `/state` returns and what the activity feed renders
+   * after a refresh.
+   */
+  const notify = async (message: string): Promise<void> => {
+    ctx.emit('activity', message, { status: 'warn', mode })
+    await insertActivity({ workspaceId: ctx.workspaceId, agentId: 'scraping', message, status: 'warn' })
+  }
 
   if (!configured) {
-    const reason = crawl4aiSearch.unavailableReason()
-    ctx.emit(
-      'activity',
-      `crawl4ai is not configured — ${reason}. Nothing can be captured this run.`,
-      { status: 'warn', mode, reason },
+    await notify(
+      'Neither capture source is configured — nothing can be captured this run. ' +
+        'Set APIFY_API_TOKEN for the platform lanes, CRAWL4AI_PYTHON for the open web.',
     )
-    // With no corpus to fall back to, an unconfigured crawler means an empty
-    // run whatever this knob says. It is still honoured, because failing at the
-    // source is a clearer report than four empty lanes downstream.
+    // With no corpus to fall back to, an unconfigured pair means an empty run
+    // whatever this knob says. It is still honoured, because failing at the
+    // source is a clearer report than five empty lanes downstream.
     if (failIfNoSource) {
       throw new Error(
-        `No capture source available — ${reason}. Set CRAWL4AI_PYTHON to the interpreter of the backend venv.`,
+        'No capture source available — set APIFY_API_TOKEN (platform lanes) or ' +
+          'CRAWL4AI_PYTHON (open web, pointing at the interpreter of the backend venv).',
       )
     }
   } else {
-    ctx.log(
-      `crawl4ai reachable · ${config.crawl4ai.searchEngines.join(', ')} · ` +
-        `up to ${config.crawl4ai.maxPagesPerKeyword} pages per keyword per lane`,
-    )
+    if (apifyReady) {
+      ctx.log(
+        `Apify reachable · up to ${config.apify.maxItemsPerKeyword} posts per keyword per platform lane, ` +
+          'with engagement figures',
+      )
+    } else {
+      // Named at connect time rather than discovered later from missing counts.
+      await notify(platformLaneDowngradeReason())
+    }
+    if (crawlerReady) {
+      ctx.log(
+        `crawl4ai reachable · ${config.crawl4ai.searchEngines.join(', ')} · ` +
+          `up to ${config.crawl4ai.maxPagesPerKeyword} pages per keyword on the open web`,
+      )
+    } else {
+      await notify(`The open-web lane cannot run — ${crawl4aiSearch.unavailableReason()}.`)
+    }
   }
 
   return { mode, sources, unreachable }
@@ -402,17 +459,22 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   const keywords = payload.keywords ?? []
   if (keywords.length === 0) throw new Error('No keywords resolved — nothing to fetch.')
 
-  if (!crawl4aiSearch.isConfigured()) {
+  if (!apifySearch.isConfigured() && !crawl4aiSearch.isConfigured()) {
     throw new Error(
-      `Cannot capture — ${crawl4aiSearch.unavailableReason()}. crawl4ai is the only source; there is no corpus to fall back to.`,
+      'Cannot capture — neither source is configured. Set APIFY_API_TOKEN for the ' +
+        'platform lanes or CRAWL4AI_PYTHON for the open web. There is no corpus to fall back to.',
     )
   }
 
-  const maxItems = ctx.num('maxItemsPerKeyword', 8)
+  const maxItems = ctx.num('maxItemsPerKeyword', 25)
   const retries = ctx.num('retries', 1)
   const minBrandRelevance = ctx.num('minBrandRelevance', 20)
   const maxParallel = Math.max(1, ctx.num('maxParallel', 2))
   const includeOpenWeb = ctx.bool('includeOpenWeb', true)
+  const minAuthorFollowers = ctx.num('minAuthorFollowers', 0)
+  const minEnglishRatio = ctx.num('minEnglishRatio', 8)
+  const datePosted = ctx.str('datePosted', 'past-week') as 'past-24h' | 'past-week' | 'past-month'
+  const sortBy = ctx.str('sortBy', 'date') as 'relevance' | 'date'
 
   // `undefined` is the open-web lane, which is how the adapter spells it too.
   const lanes: Array<{ platform: Platform | undefined; label: string }> = [
@@ -446,6 +508,18 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   /** Kept per lane so the run console can say WHERE the material came from. */
   const perLaneCounts = new Map<string, number>()
   let offBrand = 0
+  /** Dropped for having too small an audience — only countable where one was stated. */
+  let belowFollowerFloor = 0
+  /** Dropped as prose this brand cannot publish from. */
+  let notEnglish = 0
+  /** Too short to judge the language of, so exempted rather than guessed at. */
+  let languageUnknown = 0
+  /**
+   * Kept DESPITE the follower floor because the source stated no follower count.
+   * Reported rather than folded into the kept total: a floor that silently
+   * exempts most of a lane is a floor the operator should know is not biting.
+   */
+  let followersNotStated = 0
 
   // The work unit is one keyword on one lane. Flattening the pair means the
   // concurrency ceiling governs actual browser page-loads rather than keywords,
@@ -453,25 +527,50 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   const jobs = keywords.flatMap((keyword) => lanes.map((lane) => ({ keyword, lane })))
 
   const perJob = await mapWithConcurrency(jobs, maxParallel, async ({ keyword, lane }) => {
-    ctx.emit('activity', `Scraping ${lane.label} for “${keyword.term}”`, {
+    /*
+     * THE CHAIN, NOT A SOURCE.
+     *
+     * Resolved per lane rather than once per run, because the open web is always
+     * crawl4ai while a platform lane follows the token. A platform lane with a
+     * token is Apify FIRST and crawl4ai BEHIND IT: an actor that is deprecated,
+     * rate-limited or simply broken today must not turn a keyword crawl4ai could
+     * have read into nothing captured. Which source answered travels on every
+     * event, so the run console can say why one lane carries engagement and
+     * another does not.
+     */
+    const chain = captureChainFor(lane.platform)
+    const primary = (chain[0] as CaptureAttempt).source
+
+    ctx.emit('activity', `Scraping ${lane.label} for “${keyword.term}” via ${primary.label}`, {
       status: 'running',
       keyword: keyword.term,
       platform: lane.platform ?? 'open-web',
+      via: primary.label,
     })
 
     let rows: RawPost[] = []
-    try {
+    /** The source that actually answered, for the per-row stamp and the log. */
+    let servedBy = primary
+    /** Set only when the primary failed and the backup answered instead. */
+    let laneFallbackReason = ''
+    const attemptReasons: string[] = []
+
+    for (const [index, attemptSource] of chain.entries()) {
+      const source = attemptSource.source
       let lastError: unknown
       for (let attempt = 0; attempt <= retries; attempt += 1) {
         try {
-          rows = await crawl4aiSearch.run({
+          rows = await source.run({
             keyword: keyword.term,
             ...(lane.platform === undefined ? {} : { platform: lane.platform }),
-            // The operator's per-keyword cap still applies, bounded by the
-            // crawler's own page ceiling — fifty browser page-loads per keyword
-            // per lane is not a reasonable ask of a local machine.
-            maxItems: Math.min(maxItems, config.crawl4ai.maxPagesPerKeyword),
+            // Each source clamps this to its own ceiling — Apify to the env
+            // billing cap, crawl4ai to its page limit — so the knob asks for
+            // the same thing on every lane and the source decides what it can
+            // honestly serve.
+            maxItems,
             maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+            datePosted,
+            sortBy,
           })
           lastError = undefined
           break
@@ -481,27 +580,85 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
           await new Promise((r) => setTimeout(r, 600 * 2 ** attempt))
         }
       }
-      if (lastError !== undefined) throw lastError
-    } catch (error) {
-      // An empty lane is normal — Instagram and Facebook index very little to a
-      // logged-out crawl. It is reported and the run carries on; there is
-      // nothing to substitute and nothing is substituted.
+
+      if (lastError === undefined) {
+        servedBy = source
+        if (attemptSource.isBackup) {
+          // The degradation, named at the point it happened and carried onto
+          // every row: these posts state no engagement, and the reason is not
+          // "no token" but "the actor did not answer".
+          laneFallbackReason =
+            `${primary.label} did not answer — ${attemptReasons[0] ?? 'no reason given'}. ` +
+            `Captured with ${source.label} instead, which states no engagement figures.`
+          // Also into the lane reasons, so it lands in `captureFallbackReasons`
+          // and therefore in the persisted run summary. An event alone would
+          // mean the fallback was only knowable to whoever was watching.
+          if (!laneReasons.includes(laneFallbackReason)) laneReasons.push(laneFallbackReason)
+          ctx.emit('activity', `${lane.label} · ${keyword.term}: fell back to ${source.label}`, {
+            status: 'warn',
+            keyword: keyword.term,
+            platform: lane.platform ?? 'open-web',
+            via: source.label,
+            reason: laneFallbackReason,
+          })
+        }
+        break
+      }
+
       const reason =
-        error instanceof AdapterError
-          ? error.toReason()
-          : `crawl4ai failed — ${error instanceof Error ? error.message : String(error)}`
-      if (!laneReasons.includes(reason)) laneReasons.push(reason)
-      ctx.emit('activity', `${lane.label} · ${keyword.term}: nothing captured`, {
-        status: 'warn',
-        keyword: keyword.term,
-        platform: lane.platform ?? 'open-web',
-        reason,
-      })
-      return []
+        lastError instanceof AdapterError
+          ? lastError.toReason()
+          : `${source.label} failed — ${lastError instanceof Error ? lastError.message : String(lastError)}`
+      attemptReasons.push(reason)
+
+      // Nothing left to try. An empty lane is normal — a narrow keyword
+      // genuinely returns nothing on some platforms — so it is reported and the
+      // run carries on. There is nothing to substitute and nothing is substituted.
+      if (index === chain.length - 1) {
+        const combined = attemptReasons.join(' · then ')
+        if (!laneReasons.includes(combined)) laneReasons.push(combined)
+        ctx.emit('activity', `${lane.label} · ${keyword.term}: nothing captured`, {
+          status: 'warn',
+          keyword: keyword.term,
+          platform: lane.platform ?? 'open-web',
+          via: primary.label,
+          reason: combined,
+        })
+        return []
+      }
     }
+
+    const source = servedBy
 
     const posts: ScrapedPost[] = []
     for (const raw of rows) {
+      // A follower count of zero means the source did not state one, not that
+      // the author has no audience — so the floor applies only where there is a
+      // number to apply it to. Exemptions are counted, never hidden.
+      if (minAuthorFollowers > 0) {
+        if (raw.authorFollowers === 0) {
+          followersNotStated += 1
+        } else if (raw.authorFollowers < minAuthorFollowers) {
+          belowFollowerFloor += 1
+          continue
+        }
+      }
+      /*
+       * READABILITY BEFORE RELEVANCE. A post can be squarely on-topic and still
+       * be unusable evidence: the brand writes in English, and a caption grounded
+       * in a body it cannot quote is a caption grounded in nothing. Checked before
+       * alignment because it is the cheaper test and the more decisive one.
+       */
+      if (minEnglishRatio > 0) {
+        const ratio = englishRatio(raw.text)
+        if (ratio === -1) {
+          languageUnknown += 1
+        } else if (ratio < minEnglishRatio) {
+          notEnglish += 1
+          continue
+        }
+      }
+
       const alignment = alignmentOf(raw.text, keyword.term, vocabulary)
       if (alignment.score < minBrandRelevance) {
         offBrand += 1
@@ -534,7 +691,8 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
         captured: rows.length,
         // Names WHICH implementation answered, not just that one did — rule 6
         // wants the evidence behind the decision.
-        via: crawl4aiSearch.label,
+        via: source.label,
+        metricsAvailable: rows[0]?.metricsAvailable ?? false,
       },
     )
 
@@ -557,7 +715,7 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   const evidence = prepareEvidence(
     posts.map((post) => ({
       id: post.externalId ?? post.title,
-      source: post.sourceName ?? 'crawl4ai',
+      source: post.sourceName ?? 'capture',
       ...(post.url ? { url: post.url } : {}),
       ...(post.authorName ? { author: post.authorName } : {}),
       content: post.text ?? post.snippet ?? '',
@@ -584,10 +742,36 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
     .map(([label, n]) => `${label} ${n}`)
     .join(' · ')
 
+  const withMetrics = posts.filter((p) => p.metricsAvailable).length
+
   ctx.log(
     `${posts.length} page(s) across ${keywords.length} keyword(s) and ${lanes.length} lane(s)` +
       (breakdown === '' ? '' : ` — ${breakdown}`) +
-      (offBrand > 0 ? ` · ${offBrand} dropped below the ${minBrandRelevance}% brand-alignment floor` : ''),
+      (offBrand > 0 ? ` · ${offBrand} dropped below the ${minBrandRelevance}% brand-alignment floor` : '') +
+      (belowFollowerFloor > 0
+        ? ` · ${belowFollowerFloor} dropped below the ${minAuthorFollowers}-follower floor`
+        : '') +
+      (followersNotStated > 0
+        ? ` · ${followersNotStated} kept with no stated follower count, so the floor could not be applied`
+        : '') +
+      (notEnglish > 0
+        ? ` · ${notEnglish} dropped below the ${minEnglishRatio}% English-prose floor`
+        : '') +
+      (languageUnknown > 0
+        ? ` · ${languageUnknown} too short to judge the language of, kept`
+        : ''),
+  )
+
+  // The number the Validation Agent's engagement, velocity and growth
+  // components will actually run on. Said here, at capture, because a trend
+  // score computed over a handful of metric-bearing rows is a different claim
+  // from one computed over all of them.
+  ctx.log(
+    withMetrics === posts.length
+      ? `All ${posts.length} page(s) carry engagement figures.`
+      : `${withMetrics} of ${posts.length} page(s) carry engagement figures; the rest were ` +
+        'read from search-indexed pages that state none, and are excluded from the engagement, ' +
+        'velocity and growth components of the trend score.',
   )
 
   return {
@@ -780,8 +964,15 @@ registerSkill<PipelinePayload>('scraping.hashtag.expand', async (payload, ctx) =
 
   const candidates = payload.hashtagCandidates ?? []
   if (candidates.length === 0) return {}
-  if (!crawl4aiSearch.isConfigured()) {
-    ctx.log(`Hashtag feeds not read — ${crawl4aiSearch.unavailableReason()}`)
+  // With an Apify token the tag is read on LinkedIn itself, which returns real
+  // engagement and makes the independent reading a genuine volume AND strength
+  // signal. Without one it falls back to the open web, where only volume is
+  // knowable — the same degradation as the platform lanes, for the same reason.
+  const tagLane: Platform | undefined = apifySearch.isConfigured() ? 'linkedin' : undefined
+  const tagSource = captureFor(tagLane)
+
+  if (!tagSource.isConfigured()) {
+    ctx.log(`Hashtag feeds not read — ${tagSource.unavailableReason()}`)
     return {}
   }
 
@@ -800,17 +991,24 @@ registerSkill<PipelinePayload>('scraping.hashtag.expand', async (payload, ctx) =
     const target = byTag.get(candidate.tag)
     if (!target) return
 
-    // The tag is read as a search term rather than as a feed URL: the feed
-    // pages themselves are login-walled and render nothing to a logged-out
-    // crawl, whereas the indexed posts that carry the tag are readable.
-    const query = candidate.displayTag.replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim()
+    // On the open-web fallback the tag is read as a search term rather than as
+    // a feed URL, because the feed pages themselves are login-walled and render
+    // nothing to a logged-out crawl. Through an actor the tag can be asked for
+    // as a tag, so the `#` is kept.
+    const query =
+      tagLane === undefined
+        ? candidate.displayTag.replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim()
+        : `#${candidate.displayTag.replace(/^#/, '')}`
 
     let rows: RawPost[]
     try {
-      rows = await crawl4aiSearch.run({
+      rows = await tagSource.run({
         keyword: query,
-        maxItems: Math.min(itemsPerHashtag, config.crawl4ai.maxPagesPerKeyword),
+        ...(tagLane === undefined ? {} : { platform: tagLane }),
+        maxItems: itemsPerHashtag,
         maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+        datePosted: 'past-month',
+        sortBy: 'date',
       })
     } catch {
       // An independent reading that could not be taken simply is not taken.
@@ -922,23 +1120,36 @@ registerSkill<PipelinePayload>('scraping.competitor.track', async (_payload, ctx
     return { competitorPosts: [] }
   }
 
-  if (!crawl4aiSearch.isConfigured()) {
-    ctx.log(`Competitors not read — ${crawl4aiSearch.unavailableReason()}`)
+  const competitorSource = captureFor('linkedin')
+
+  if (!competitorSource.isConfigured()) {
+    ctx.log(`Competitors not read — ${competitorSource.unavailableReason()}`)
     return { competitorPosts: [] }
   }
 
   const results = await mapWithConcurrency(competitors, maxParallel, async (competitor) => {
     let rows2: RawPost[]
     try {
-      rows2 = await crawl4aiSearch.run({
+      rows2 = await competitorSource.run({
         keyword: competitor.name,
         platform: 'linkedin',
-        maxItems: Math.min(postsPer, config.crawl4ai.maxPagesPerKeyword),
+        maxItems: postsPer,
         maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+        datePosted: 'past-month',
+        sortBy: 'date',
       })
     } catch {
       return []
     }
+
+    // Relative to this competitor's own batch, so a large account and a small
+    // one are comparable. Only computable where the source stated figures —
+    // otherwise it stays zero, meaning "not measured", and the Analysis Agent
+    // reads volume instead.
+    const maxEngagement = Math.max(
+      ...rows2.filter((p) => p.metricsAvailable).map((p) => engagementOf(p)),
+      1,
+    )
 
     return rows2.map<CompetitorPostRecord>((p) => ({
       competitor: competitor.name,
@@ -946,9 +1157,9 @@ registerSkill<PipelinePayload>('scraping.competitor.track', async (_payload, ctx
       // The format of an indexed page is not knowable from the page, and
       // guessing it would put a fabricated attribute on a real record.
       format: 'Unknown',
-      // Not an engagement index: no figure was stated. Brand alignment is what
-      // is actually measurable here, and the Analysis Agent reads it as volume.
-      engagementIndex: 0,
+      engagementIndex: p.metricsAvailable
+        ? Math.round((engagementOf(p) / maxEngagement) * 100)
+        : 0,
       postedAt: p.postedAt,
       topics: matchedTopics(p.text, 4),
       tier: 'Registered',

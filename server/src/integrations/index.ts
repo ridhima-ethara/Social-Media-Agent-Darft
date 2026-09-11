@@ -30,6 +30,12 @@ export {
 } from './parallel'
 
 export {
+  describeGcpAuth,
+  gcpAuthAvailable,
+  serviceAccountEmail,
+} from './gcp-auth'
+
+export {
   gcpImage,
   gcpText,
   rewriteTemplateCaption,
@@ -53,9 +59,22 @@ export {
   type OllamaTextInput,
 } from './ollama'
 
-export { crawl4aiSearch, type Crawl4aiSearchInput, type RawPost } from './crawl4ai'
+export { crawl4aiSearch, type Crawl4aiSearchInput } from './crawl4ai'
+
+export { apifySearch, rawPostEngagement } from './apify'
+
+export {
+  captureChainFor,
+  captureFor,
+  platformLaneDowngradeReason,
+  type CaptureAttempt,
+  type CaptureInput,
+  type CaptureSource,
+  type RawPost,
+} from './capture'
 
 import { describeAdapter, type AdapterReport } from './adapter'
+import { apifySearch } from './apify'
 import { crawl4aiSearch } from './crawl4ai'
 import { gcpImage, gcpText } from './gcp-llm'
 import { ollamaImage, ollamaText } from './ollama'
@@ -64,6 +83,7 @@ import { parallelResearch } from './parallel'
 /** Every adapter in the product, for a single reachability sweep. */
 export function allAdapters() {
   return [
+    apifySearch,
     crawl4aiSearch,
     parallelResearch,
     gcpText,
