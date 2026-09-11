@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
+import { hostname } from 'node:os'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -25,14 +26,29 @@ export default defineConfig({
     host: true,
     /*
      * Vite rejects a Host header it does not recognise — DNS-rebinding
-     * protection — which allows raw IPs but answers 403 to the Mac's own
-     * Bonjour name. That name is the more useful address of the two: a DHCP
-     * lease changes the IP, `<machine>.local` keeps working.
+     * protection — which allows raw IPs but answers 403 to a name.
      *
-     * Scoped to the `.local` suffix rather than opened with `true`, so this
-     * stays a LAN affordance and not an invitation to any Host header.
+     * `['.local']` covered the Bonjour name and nothing else, so a visitor on
+     * Windows typing `http://Mac-mini-2:5173` — the bare DHCP hostname, which is
+     * what Windows and most routers resolve — got a 403 that the browser
+     * presents as the site being broken. `.lan` and `.home` are what consumer
+     * routers commonly append, and the bare name is read from the machine itself
+     * rather than written down, so renaming the Mac cannot silently break this.
+     *
+     * Still a list rather than `true`: this is a LAN affordance, not an
+     * invitation to any Host header a rebinding attack cares to send.
      */
-    allowedHosts: ['.local'],
+    allowedHosts: [
+      '.local',
+      '.lan',
+      '.home',
+      '.internal',
+      // Both cases: the suffix rules above are matched case-insensitively but an
+      // exact host is not, and DNS is case-insensitive — so a browser sending
+      // `mac-mini-2` for a machine named `Mac-mini-2` was answered with a 403.
+      hostname().replace(/\.local$/i, ''),
+      hostname().replace(/\.local$/i, '').toLowerCase(),
+    ],
     proxy: {
       /*
        * SAME-ORIGIN API, DELIBERATELY.

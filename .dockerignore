@@ -39,6 +39,16 @@ packages/runtime/.claude
 server/.env
 server/.env.bak-*
 
+# CREDENTIALS. `COPY . .` in the runtime stage would otherwise commit these to
+# an image layer, where they are readable by anyone who can pull the image and
+# survive even if a later layer deletes them. server/secrets.env holds the Apify
+# and Parallel tokens; server/secrets/ holds the GCP service-account private key.
+# The container is configured through compose environment and a read-only bind
+# mount instead, so the key stays on the host filesystem.
+server/secrets.env
+server/secrets.env.*
+server/secrets/
+
 # Editor, OS and agent scaffolding.
 .DS_Store
 **/.DS_Store

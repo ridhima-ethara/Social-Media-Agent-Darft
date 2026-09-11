@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Ethara SocialAI API — agent runtime, orchestrator and the command plane",
+  "description": "Ethara SocialAI API \u2014 agent runtime, orchestrator and the command plane",
   "engines": {
     "node": ">=22"
   },
@@ -13,7 +13,8 @@
     "typecheck": "tsc -b",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
-    "db:reset": "tsx src/db/migrate.ts && tsx src/db/seed.ts"
+    "db:reset": "tsx src/db/migrate.ts && tsx src/db/seed.ts",
+    "db:needs-seed": "tsx scripts/needs-seed.ts"
   },
   "dependencies": {
     "dotenv": "17.4.2",

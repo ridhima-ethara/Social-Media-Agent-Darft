@@ -88,25 +88,58 @@ services:
       CRAWL4AI_TIMEOUT_MS: ${CRAWL4AI_TIMEOUT_MS:-300000}
       CRAWL4AI_HEADLESS: 'true'
 
-      # ── Text ──
-      TEXT_MODEL_PROVIDER: ${TEXT_MODEL_PROVIDER:-ollama}
-      ASSISTANT_MODEL_PROVIDER: ${ASSISTANT_MODEL_PROVIDER:-ollama}
+      # ── Research ──
+      PARALLEL_API_KEY: ${PARALLEL_API_KEY:-}
+
+      # ── Text and images · Gemini ──
+      # `gcp` by default because that is what this deployment is configured for:
+      # captions, calendar copy and the creative backgrounds all come from
+      # Gemini. Blank credentials degrade to the local model, and then to the
+      # deterministic template writer — labelled either way, never silently.
+      TEXT_MODEL_PROVIDER: ${TEXT_MODEL_PROVIDER:-gcp}
+      ASSISTANT_MODEL_PROVIDER: ${ASSISTANT_MODEL_PROVIDER:-gcp}
+      GCP_API_KEY: ${GCP_API_KEY:-}
+      # A service account authenticates Vertex. The JSON is NOT copied into the
+      # image — `.dockerignore` excludes it, because an image layer is readable
+      # by anyone who can pull it. It is bind-mounted read-only below, and this
+      # path is where the container sees it.
+      GCP_SERVICE_ACCOUNT_JSON: ${GCP_SERVICE_ACCOUNT_JSON:-/run/secrets/gcp-sa.json}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+      GCP_LOCATION: ${GCP_LOCATION:-us-central1}
+      GCP_TEXT_MODEL: ${GCP_TEXT_MODEL:-gemini-2.5-pro}
+      GCP_FAST_TEXT_MODEL: ${GCP_FAST_TEXT_MODEL:-gemini-2.5-flash}
+      # A `gemini-*` image model is served over :generateContent and an
+      # `imagen-*` one over :predict; the adapter routes on the name.
+      GCP_IMAGE_MODEL: ${GCP_IMAGE_MODEL:-gemini-2.5-flash-image}
+      GCP_TIMEOUT_MS: ${GCP_TIMEOUT_MS:-90000}
+      GCP_MAX_OUTPUT_TOKENS: ${GCP_MAX_OUTPUT_TOKENS:-2048}
+
+      # ── Local text model, as the fallback behind Gemini ──
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_TEXT_MODEL: ${OLLAMA_TEXT_MODEL:-qwen3:14b}
       OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-300000}
 
       # ── Images ──
-      # Intentionally blank: MLX cannot run on Linux. The brand SVG renderer
-      # takes over and says so on every asset it produces.
+      # Intentionally blank: MLX cannot run on Linux. With Gemini configured the
+      # creative background comes from it; without any painter the brand SVG
+      # renderer takes over and says so on every asset it produces.
       MFLUX_PYTHON: ''
 
       # ── First-boot behaviour ──
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
-      RUN_SEED: ${RUN_SEED:-true}
+      # `auto` seeds ONLY a database with no ideas and no captured posts, so a
+      # restart cannot wipe the calendar. `true` reseeds and DELETES existing
+      # content; `false` never seeds. See docker/entrypoint.sh.
+      RUN_SEED: ${RUN_SEED:-auto}
     volumes:
       # Operator-supplied documents for `npm run corpus:ingest`. Bind-mounted so
       # a PDF dropped on the host is ingestable without rebuilding.
       - ./corpus:/app/corpus
+      # THE GCP SERVICE ACCOUNT, READ-ONLY AND NEVER IN A LAYER.
+      # `${GCP_SA_FILE}` is a host path; the container only ever sees the mount.
+      # Comment this out if you authenticate with GCP_API_KEY instead — the
+      # adapter prefers the key when both are present.
+      - ${GCP_SA_FILE:-./server/secrets/gcp-sa.json}:/run/secrets/gcp-sa.json:ro
       # The Python tier's own store, which is where the Calendar, Content and
       # Image agents recall from. On a named volume so a rebuild does not
       # discard what the Learning Agent has written.
