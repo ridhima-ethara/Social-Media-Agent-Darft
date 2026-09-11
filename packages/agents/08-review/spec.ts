@@ -17,7 +17,7 @@ import type { AgentSpec } from '../../contracts/src/index'
 
 export const spec: AgentSpec = {
   id: 'review',
-  name: 'Review Agent',
+  name: 'Reviewer',
   stage: 'create',
   role: 'Applies human edits and checks the twenty rules.',
   description:

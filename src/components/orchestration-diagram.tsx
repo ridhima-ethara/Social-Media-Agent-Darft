@@ -33,6 +33,19 @@ export function agentRealName(id: AgentId): string {
   return lead.endsWith(' Agent') ? lead : spec.name
 }
 
+/**
+ * Whether the role line would only restate the name.
+ *
+ * An agent with no mascot is named for its job, so its display name and its
+ * role are the same words: "Knowledge" and "Knowledge Agent". A mascot's role
+ * genuinely adds something — Sherlock is the Scraping Agent — and is kept.
+ */
+function redundantRole(id: AgentId): boolean {
+  const display = agentDisplayName(id)
+  const real = agentRealName(id)
+  return real === display || real === `${display} Agent`
+}
+
 /* ── Layout, from the registry ─────────────────────────────────────────── */
 
 const W = 1400
@@ -259,7 +272,9 @@ export function OrchestrationDiagram({ agents, focused, focusExplicit, commandAc
             onClick={() => onSelect(node.id)}
             onPointerEnter={() => onHover(node.id)}
             onPointerLeave={() => onHover(null)}
-            aria-label={`${agentDisplayName(node.id)}, ${agentRealName(node.id)}, ${AGENT_STATUS_META[status].label}`}
+            aria-label={`${agentDisplayName(node.id)}${
+              redundantRole(node.id) ? '' : `, ${agentRealName(node.id)}`
+            }, ${AGENT_STATUS_META[status].label}`}
             className="group anim-fade-up absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center text-center outline-none"
             style={{ left: `${(node.x / W) * 100}%`, top: `${(node.y / H) * 100}%`, width: 150, animationDelay: `${node.index * 45}ms` }}
           >
@@ -295,7 +310,12 @@ export function OrchestrationDiagram({ agents, focused, focusExplicit, commandAc
             </span>
 
             <span className="mt-2 text-[12.5px] font-semibold leading-tight text-ink">{agentDisplayName(node.id)}</span>
-            <span className="text-[10.5px] leading-tight text-ink-3">{agentRealName(node.id)}</span>
+            {/* A mascot's second line names the job it does. Where the agent has
+                no mascot the second line only repeats the first — "Knowledge"
+                over "Knowledge Agent" — and repeating it is noise. */}
+            {redundantRole(node.id) ? null : (
+              <span className="text-[10.5px] leading-tight text-ink-3">{agentRealName(node.id)}</span>
+            )}
             <span className="mt-1 flex items-center gap-1.5 text-[10.5px] text-ink-3">
               <span className={`h-1.5 w-1.5 rounded-full ${AGENT_STATUS_META[status].dot}`} aria-hidden="true" />
               {AGENT_STATUS_META[status].label}

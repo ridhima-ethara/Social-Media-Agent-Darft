@@ -201,7 +201,9 @@ export const AGENTS: AgentSpec[] = [
   },
   {
     id: 'review',
-    name: 'Review Agent',
+    // Display name and machine id are independent: the id stays `review`
+    // because it is the storage key on every skill_run and activity row.
+    name: 'Reviewer',
     icon: 'check-shield',
     stage: 'create',
     role: 'Human edits and compliance',

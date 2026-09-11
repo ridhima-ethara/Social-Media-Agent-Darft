@@ -34,6 +34,8 @@ export const SEED_KEYWORDS: SeedKeyword[] = [
   { term: 'AI infrastructure', category: 'Adjacent', weight: 66 },
   { term: 'inference optimization', category: 'Adjacent', weight: 64 },
   { term: 'AI research lab', category: 'Positioning', weight: 60 },
+  { term: 'frontier AI research', category: 'Positioning', weight: 62 },
+  { term: 'frontier AI research lab', category: 'Positioning', weight: 61 },
   { term: 'frontier models', category: 'Positioning', weight: 58 },
   { term: 'AI safety evaluation', category: 'Positioning', weight: 56 },
   { term: 'enterprise AI adoption', category: 'Positioning', weight: 52 },
