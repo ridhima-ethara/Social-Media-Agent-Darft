@@ -2,7 +2,47 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
+import { existsSync, readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
+
+/**
+ * The API port, read from the same place the API reads it.
+ *
+ * `server/.env` is the single home for PORT; this used to hardcode 4001 beside
+ * it, which is two homes for one number. Falls back to the same 4001 default
+ * `server/src/config.ts` uses, so an absent .env still resolves identically.
+ */
+function apiPort(): number {
+  const fromEnv = process.env.PORT?.trim()
+  if (fromEnv && Number.isFinite(Number.parseInt(fromEnv, 10))) {
+    return Number.parseInt(fromEnv, 10)
+  }
+
+  for (const name of ['.env', 'secrets.env']) {
+    const path = fileURLToPath(new URL(`./server/${name}`, import.meta.url))
+    if (!existsSync(path)) continue
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      const match = /^\s*PORT\s*=\s*(\d+)/.exec(line)
+      if (match?.[1]) return Number.parseInt(match[1], 10)
+    }
+  }
+  return 4001
+}
+
+const API_PORT = apiPort()
+
+/**
+ * Extra hostnames the dev server will answer to, from `ALLOWED_HOSTS`.
+ *
+ * Comma-separated. A leading dot matches a whole domain, exactly as Vite's own
+ * entries do. `ALLOWED_HOSTS=*` disables the host check entirely — deliberately
+ * spelled out rather than the default, because it turns off DNS-rebinding
+ * protection.
+ */
+const EXTRA_ALLOWED_HOSTS: string[] = (process.env.ALLOWED_HOSTS ?? '')
+  .split(',')
+  .map((host) => host.trim())
+  .filter((host) => host.length > 0)
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -38,11 +78,34 @@ export default defineConfig({
      * Still a list rather than `true`: this is a LAN affordance, not an
      * invitation to any Host header a rebinding attack cares to send.
      */
-    allowedHosts: [
+    allowedHosts: EXTRA_ALLOWED_HOSTS.includes('*') ? true : [
       '.local',
       '.lan',
       '.home',
       '.internal',
+      /*
+       * Cloudflare quick tunnels. `deploy/cloudflare/tunnel.sh` publishes the dev
+       * server at a generated `*.trycloudflare.com` name, and Vite answers 403 to
+       * any Host it does not recognise — which presented as the whole platform
+       * being broken over the tunnel rather than as a host check.
+       *
+       * Still a suffix rather than `true`: this admits Cloudflare's tunnel
+       * domain, not any Host header a rebinding attack cares to send.
+       */
+      '.trycloudflare.com',
+      // Cloudflare Pages' own domain, and Vercel/Netlify previews — the same
+      // situation as a quick tunnel: a generated name nobody can write down.
+      '.pages.dev',
+      '.vercel.app',
+      '.netlify.app',
+      // Anything else the operator is actually deploying behind, from the
+      // environment rather than from this file. A named tunnel or a real
+      // domain (`socialai.ethara.ai`) is a host Vite has never heard of, and
+      // the 403 it returns reads as the whole platform being broken. One
+      // comma-separated variable admits it without editing code or opening the
+      // server to every Host header a rebinding attack cares to send:
+      //   ALLOWED_HOSTS=socialai.ethara.ai,.internal.example
+      ...EXTRA_ALLOWED_HOSTS,
       // Both cases: the suffix rules above are matched case-insensitively but an
       // exact host is not, and DNS is case-insensitive — so a browser sending
       // `mac-mini-2` for a machine named `Mac-mini-2` was answered with a 403.
@@ -64,7 +127,7 @@ export default defineConfig({
        * same way rather than diverging.
        */
       '/api': {
-        target: 'http://127.0.0.1:4001',
+        target: `http://127.0.0.1:${API_PORT}`,
         changeOrigin: true,
         // A discovery run executes INSIDE its HTTP request and holds it open
         // for the whole crawl, and three routes stream (SSE). Both default
@@ -74,6 +137,35 @@ export default defineConfig({
       },
     },
   },
+  /*
+   * PREVIEW — what a REMOTE client should be served.
+   *
+   * The dev server hands out hundreds of individual ES modules and needs an HMR
+   * websocket. That is right on localhost and wrong through a tunnel: a remote
+   * browser pays a round trip per module and the HMR socket frequently cannot
+   * connect, so the app loads slowly or not at all. `vite preview` serves the
+   * built bundle — a handful of files, no websocket — which is what makes the
+   * deployed URL usable from another machine.
+   *
+   * `preview` needs its own proxy and host allowlist: it does NOT inherit
+   * `server.*`, which is easy to miss and presents as the API 404ing in
+   * production while working in dev.
+   */
+  preview: {
+    port: 4173,
+    strictPort: false,
+    host: true,
+    allowedHosts: ['.local', '.lan', '.home', '.internal', '.trycloudflare.com'],
+    proxy: {
+      '/api': {
+        target: `http://127.0.0.1:${API_PORT}`,
+        changeOrigin: true,
+        timeout: 0,
+        proxyTimeout: 0,
+      },
+    },
+  },
+
   build: {
     outDir: 'dist',
     sourcemap: true,

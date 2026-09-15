@@ -1,173 +1,87 @@
 /**
- * THE BOOT SEQUENCE
+ * THE BOOT · a pre-flight
  *
- * A full-screen boot in three beats, dismissible via Skip, Esc or the final
- * action. Every count in it is real, read from state — a boot screen that lied
- * about the numbers would be the worst possible first impression of a system
- * whose whole claim is that it knows.
+ * "Shall I start them?" is a question the screen can already answer. The
+ * emblem, a greeting, and the eight-stage rail — but the rail carries the
+ * last run's real outcome under each stage, and the two that need a person
+ * are amber. What a run will and will not do is read off the stages, so the
+ * greeting says nothing twice and the primary action just runs.
  *
- *   1  Ignition   — the emblem blooms in over a soft ground, with three short
- *                   status lines beneath it.
- *   2  Assembly   — the eight stages land left to right, then light in pipeline
- *                   order, one every 150ms, while a single lit line draws along
- *                   the rail behind them with a light at its head. One moving
- *                   element, timed to the lighting — the earlier free-running
- *                   spark dot fought the stages instead of leading them.
- *   3  Hand-off   — the greeting streams in, then the one action.
- *
- * WHAT IS DELIBERATELY NOT HERE. The twelve agents used to roll-call as
- * individual chips beneath the stages, and each stage carried its own agent
- * count. Both restated what the greeting says in one line — "twelve agents are
- * online" — and between them they turned the calmest screen in the product into
- * the densest. The stage rail answers "what will happen"; the greeting answers
- * "what is waiting". Nothing needs to answer either twice.
- *
- * TIMING IS DERIVED, NOT GUESSED. The hand-off waits for the last stage to
- * light, computed from the same constants that drive the lighting. It used to be
- * a hardcoded 2400ms while the stages finished at 2740ms, so the greeting cut
- * across the assembly it was supposed to follow.
- *
- * Under reduced motion the whole thing lands at once, complete.
+ * The rail stands on a shallow arc that recedes at both ends and turns a
+ * few degrees toward the pointer. Labels stay upright: depth comes from
+ * position and scale, never from skewing text. Under reduced motion the
+ * whole screen lands at once, complete.
  */
 
-import { useEffect, useMemo, useState } from 'react'
-import { Brain, CalendarDays, Gauge, Network, Search, Send, ShieldCheck, Sparkles } from 'lucide-react'
-import { REGISTRY_SUMMARY } from '@shared/agent-registry'
-import { addressOperator } from '@shared/assistant-persona'
-import { useStore, prefersReducedMotion } from '../../store'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from 'react'
+import { Brain, CalendarDays, Gauge, Network, Play, Search, Send, ShieldCheck, Sparkles } from 'lucide-react'
+import { EMBLEM_DATA_URI } from '../../../shared/emblem-data'
+import { prefersReducedMotion, useStore } from '../../store'
 import { Btn } from '../ui'
-import { PlayButton } from '../play-button'
-import { BootEmblem } from './boot-emblem'
 import { STAGES } from '../layout'
 
 const STAGE_ICON = [Search, ShieldCheck, Gauge, CalendarDays, Sparkles, Send, Network, Brain]
+const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'
+/** The brand definition is configuration, not a lesson. */
+const BRAND_DEFINITION_CATEGORIES = ['Brand Corpus', 'Brand Voice', 'Brand Guideline', 'Visual Identity', 'Compliance Rule']
 
-/* ── Timing ───────────────────────────────────────────────────────────────────
-   One place, and the hand-off is computed from the rest so the beats cannot
-   drift out of order when a value is tuned. */
-
-/** When the emblem settles and the stage rail begins to land. */
-const T_ASSEMBLY = 800
-/** How long after assembly the first stage lights. */
-const T_SPARK_LEAD = 360
-/** Gap between one stage lighting and the next. Slow enough to read. */
-const T_STAGE_STEP = 150
-/** The greeting follows the last stage, never overlaps it. */
-const T_HANDOFF = T_ASSEMBLY + T_SPARK_LEAD + T_STAGE_STEP * STAGES.length + 140
-
-/** Streams text in at a fixed cadence. Whole under reduced motion. */
-function useTypewriter(text: string, active: boolean, cadenceMs = 16): string {
-  const [shown, setShown] = useState(0)
-
-  useEffect(() => {
-    if (!active) return
-    if (prefersReducedMotion()) {
-      setShown(text.length)
-      return
-    }
-    setShown(0)
-    const timer = window.setInterval(() => {
-      setShown((n) => {
-        if (n >= text.length) {
-          window.clearInterval(timer)
-          return n
-        }
-        return n + 1
-      })
-    }, cadenceMs)
-    return () => window.clearInterval(timer)
-  }, [text, active, cadenceMs])
-
-  return text.slice(0, shown)
+interface StageReading {
+  /** What the last run returned at this stage. */
+  line: string
+  /** Whether a person is needed here. */
+  attention: boolean
 }
 
 export function BootSequence() {
   const bootOpen = useStore((s) => s.bootOpen)
   const user = useStore((s) => s.user)
-  const agents = useStore((s) => s.agents)
-  const ideas = useStore((s) => s.ideas)
+  const theme = useStore((s) => s.theme)
   const apiMode = useStore((s) => s.apiMode)
-  const settings = useStore((s) => s.settings)
   const publishMode = useStore((s) => s.mode.publishMode)
+  const scraped = useStore((s) => s.scraped)
+  const signals = useStore((s) => s.keywordSignals)
+  const ideas = useStore((s) => s.ideas)
+  const published = useStore((s) => s.published)
+  const knowledge = useStore((s) => s.knowledge)
+  const reviewQueue = useStore((s) => s.reviewQueue)
 
-  const [beat, setBeat] = useState(0)
   const [leaving, setLeaving] = useState(false)
-  const [linesShown, setLinesShown] = useState(0)
-  const [litStages, setLitStages] = useState(0)
+  const [tilt, setTilt] = useState({ x: 6, y: 0 })
+  const frameRef = useRef<HTMLDivElement | null>(null)
 
-  const awaitingLeadership = ideas.filter((i) => i.status === 'pending_leadership').length
+  /* ── What the last run returned, stage by stage ─────────────────────── */
+  const readings = useMemo<StageReading[]>(() => {
+    const openVerdicts = reviewQueue.filter((q) => !q.resolved).length
+    const scored = scraped.filter((s) => s.validation !== 'pending').length
+    const trending = signals.filter((s) => s.is_trending).length
+    const drafted = ideas.filter((i) => i.status !== 'suggested').length
+    const gated = ideas.filter((i) => i.status === 'pending_leadership' || i.status === 'in_review').length
+    const lessons = knowledge.filter((e) => e.active && !BRAND_DEFINITION_CATEGORIES.includes(e.category)).length
+    const n = (count: number, noun: string, none: string): string => (count === 0 ? none : `${count} ${noun}`)
+    return [
+      { line: n(scraped.length, 'kept', 'nothing yet'), attention: false },
+      openVerdicts > 0 ? { line: `${openVerdicts} for you`, attention: true } : { line: n(scored, 'scored', '0 new'), attention: false },
+      { line: n(trending, 'trends', 'no trends'), attention: false },
+      { line: n(ideas.length, 'ranked', 'none ranked'), attention: false },
+      { line: n(drafted, 'drafted', 'none drafted'), attention: false },
+      gated > 0 ? { line: `${gated} gated`, attention: true } : { line: n(published.length, 'out', 'none out'), attention: false },
+      { line: n(published.length, 'posts', 'nothing measured'), attention: false },
+      { line: n(lessons, 'lessons', 'no lessons'), attention: false },
+    ]
+  }, [scraped, signals, ideas, published, knowledge, reviewQueue])
 
-  /** Three lines, not five: the registry, whether it is live, and the mode. */
-  const bootLines = useMemo(
-    () => [
-      `${REGISTRY_SUMMARY.agents} agents · ${REGISTRY_SUMMARY.skills} skills`,
-      apiMode === 'connected' ? 'Runtime connected' : 'Runtime standalone',
-      `Mode ${apiMode === 'connected' ? publishMode : 'demo'}`,
-    ],
-    [apiMode, publishMode],
-  )
+  const forYou = readings.filter((r) => r.attention).length
 
-  const who = addressOperator(user?.role ?? 'marketing', settings.assistantAddressStyle)
   const hour = new Date().getHours()
   const salutation = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
-
-  /**
-   * Two clauses, no counts.
-   *
-   * It used to read "12 agents online, 10 awaiting a verdict, 1 with
-   * Leadership" — three numbers in the one place nobody acts on them. The
-   * queue counts belong on the screens that can clear them, and the sidebar and
-   * Leadership badge already carry them. Here the only question is whether to
-   * start, so that is the only thing asked.
-   */
-  const greeting =
-    `${salutation}, ${who}. Agents are online. ` +
-    (user?.role === 'leadership' ? 'Shall I open the approvals?' : 'Shall I start them?')
-
-  const typed = useTypewriter(greeting, bootOpen && beat >= 2)
-  const greetingDone = typed.length === greeting.length
 
   const dismiss = (): void => {
     setLeaving(true)
     window.setTimeout(() => {
       useStore.setState({ bootOpen: false })
       setLeaving(false)
-      setBeat(0)
-      setLinesShown(0)
-      setLitStages(0)
     }, 320)
   }
-
-  // The three beats. Under reduced motion everything lands at once.
-  useEffect(() => {
-    if (!bootOpen) return
-
-    if (prefersReducedMotion()) {
-      setBeat(2)
-      setLinesShown(bootLines.length)
-      setLitStages(STAGES.length)
-      return
-    }
-
-    const timers: number[] = []
-    for (const [i] of bootLines.entries()) {
-      timers.push(window.setTimeout(() => setLinesShown(i + 1), 160 * (i + 1)))
-    }
-    timers.push(window.setTimeout(() => setBeat(1), T_ASSEMBLY))
-    // The spark lights each stage as it arrives, in pipeline order.
-    for (let i = 0; i < STAGES.length; i += 1) {
-      timers.push(
-        window.setTimeout(
-          () => setLitStages(i + 1),
-          T_ASSEMBLY + T_SPARK_LEAD + T_STAGE_STEP * (i + 1),
-        ),
-      )
-    }
-    timers.push(window.setTimeout(() => setBeat(2), T_HANDOFF))
-    return () => {
-      for (const timer of timers) window.clearTimeout(timer)
-    }
-  }, [bootOpen, bootLines])
 
   useEffect(() => {
     if (!bootOpen) return
@@ -186,213 +100,280 @@ export function BootSequence() {
     void useStore.getState().runScraping()
   }
 
+  const calm = prefersReducedMotion()
+  const onMove = (event: PointerEvent<HTMLDivElement>): void => {
+    if (calm || event.pointerType === 'touch') return
+    const rect = frameRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const px = (event.clientX - rect.left) / rect.width - 0.5
+    const py = (event.clientY - rect.top) / rect.height - 0.5
+    setTilt({ x: 6 - py * 6, y: px * 6 })
+  }
+
+  const light = theme === 'light'
+  const mid = (STAGES.length - 1) / 2
+
   return (
     <div
-      className="fixed inset-0 z-[95] flex flex-col items-center justify-center overflow-hidden bg-page px-6"
+      ref={frameRef}
+      onPointerMove={onMove}
+      onPointerLeave={() => setTilt({ x: 6, y: 0 })}
+      className="fixed inset-0 z-[95] flex flex-col items-center justify-center overflow-hidden bg-page px-6 text-ink"
       style={leaving ? { animation: 'boot-leave 320ms var(--ease-out-soft) both' } : undefined}
       role="dialog"
       aria-modal="true"
       aria-label="Starting Ethara SocialAI"
     >
-      {/* Ambient ground. One soft glow and a very faint grid — quiet enough that
-          the emblem is the only thing that reads as lit. */}
-      <div className="pointer-events-none absolute inset-0" aria-hidden="true">
-        <span
-          className="absolute left-1/2 top-[38%] h-[520px] w-[520px] -translate-x-1/2 -translate-y-1/2 rounded-full blur-3xl"
-          style={{
-            background: 'var(--color-glow)',
-            opacity: 0.2,
-            animation: 'glow-pulse 11s var(--ease-in-out-soft) infinite',
-          }}
-        />
-        <span
-          className="absolute left-[28%] top-[26%] h-[380px] w-[380px] -translate-x-1/2 -translate-y-1/2 rounded-full blur-3xl"
-          style={{ background: 'var(--color-accent)', opacity: 0.11, animation: 'drift-a 20s var(--ease-in-out-soft) infinite' }}
-        />
-        <span
-          className="absolute left-[70%] top-[52%] h-[320px] w-[320px] -translate-x-1/2 -translate-y-1/2 rounded-full blur-3xl"
-          style={{ background: 'var(--color-magenta)', opacity: 0.09, animation: 'drift-b 24s var(--ease-in-out-soft) infinite' }}
-        />
-        <div
-          className="grid-pan absolute inset-0 opacity-[0.14]"
-          style={{
-            backgroundImage:
-              'linear-gradient(to right, var(--color-hud) 1px, transparent 1px), linear-gradient(to bottom, var(--color-hud) 1px, transparent 1px)',
-            backgroundSize: '72px 72px',
-          }}
-        />
-      </div>
+      <Ground light={light} />
 
       <button
         type="button"
         onClick={dismiss}
-        className="absolute right-6 top-6 z-10 text-[11px] uppercase tracking-[0.14em] text-ink-3 transition-colors hover:text-ink"
+        className="mono absolute right-6 top-6 z-10 text-[10.5px] uppercase tracking-[0.14em] text-ink-3 transition-colors hover:text-ink"
       >
         Skip · Esc
       </button>
 
-      {/* ── Beat 1 · Ignition ─────────────────────────────────────────────── */}
-      <div
-        className="relative z-10 flex items-center justify-center transition-all duration-[var(--dur-cinematic)] ease-[var(--ease-out-expo)]"
-        style={{ transform: beat >= 1 ? 'translateY(-4px) scale(0.5)' : 'scale(1)' }}
-      >
-        <BootEmblem state={beat === 0 ? 'thinking' : greetingDone ? 'dormant' : 'working'} size={236} />
-        {beat >= 1 ? (
+      <div className="relative z-10 flex w-full max-w-[1000px] flex-col items-center">
+        {/* ── The mark ──────────────────────────────────────────────────── */}
+        <div className="relative flex h-[150px] w-[150px] shrink-0 items-center justify-center">
           <span
-            className="pointer-events-none absolute inset-[14%] rounded-full border-2 border-accent"
-            style={{ animation: 'boot-settle 900ms var(--ease-out-soft) both' }}
             aria-hidden="true"
+            className="absolute -inset-[14px] rounded-full"
+            style={{ background: 'radial-gradient(circle, var(--color-hud), transparent 70%)', animation: 'eth-mark-breathe 6.5s cubic-bezier(0.4, 0, 0.2, 1) infinite' }}
           />
-        ) : null}
-      </div>
-
-      {beat === 0 ? (
-        <div className="relative z-10 mt-6 flex flex-col items-center gap-1 text-[11.5px] text-ink-3">
-          {bootLines.slice(0, linesShown).map((line) => (
-            <p key={line} style={{ animation: 'boot-line 320ms var(--ease-out-soft) both' }}>
-              {line}
-            </p>
-          ))}
-        </div>
-      ) : null}
-
-      {/* ── Beat 2 · Assembly ─────────────────────────────────────────────── */}
-      {beat >= 1 ? (
-        <div className="relative z-10 mt-2 w-full max-w-3xl">
-          <div className="relative flex items-start justify-center gap-3 overflow-x-auto pb-1">
-            {/* The rail behind the icons: a track, and a lit line that draws
-                across it stage by stage with a light at its head. */}
-            <span className="pointer-events-none absolute left-[38px] right-[38px] top-5 h-px bg-line" aria-hidden="true" />
+          <span
+            aria-hidden="true"
+            className="absolute -inset-[3px] rounded-full border border-line-strong"
+            style={{ animation: 'eth-mark-ring 6.5s cubic-bezier(0.4, 0, 0.2, 1) infinite' }}
+          />
+          <span
+            role="img"
+            aria-label="Ethara"
+            className="relative block h-[116px] w-[116px] overflow-hidden rounded-full"
+            style={{ animation: `eth-mark-settle 900ms ${EASE} 180ms both` }}
+          >
+            <img src={EMBLEM_DATA_URI} alt="" width={116} height={116} draggable={false} className="block h-full w-full rounded-full object-cover" style={{ background: 'var(--color-surface)' }} />
             <span
-              className="pointer-events-none absolute left-[38px] top-5 h-px"
-              style={{
-                width: `calc((100% - 76px) * ${Math.max(0, litStages - 1) / Math.max(1, STAGES.length - 1)})`,
-                background: 'linear-gradient(90deg, var(--color-accent), var(--color-accent-bright))',
-                boxShadow: '0 0 10px -1px var(--color-glow)',
-                transition: `width ${T_STAGE_STEP}ms var(--ease-out-soft)`,
-              }}
               aria-hidden="true"
-            >
-              {litStages > 0 && litStages < STAGES.length ? (
-                <span
-                  className="absolute -right-1 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full"
-                  style={{ background: 'var(--color-accent-bright)', boxShadow: '0 0 12px 3px var(--color-glow)' }}
-                />
-              ) : null}
-            </span>
+              className="absolute inset-0"
+              style={{
+                background: `linear-gradient(100deg, transparent 42%, color-mix(in srgb, var(--color-ink) ${light ? 80 : 30}%, transparent) 50%, transparent 58%)`,
+                animation: 'eth-mark-sheen 9s cubic-bezier(0.4, 0, 0.2, 1) 1.2s infinite',
+              }}
+            />
+          </span>
+        </div>
+
+        <h1 className="mt-[26px] text-[28px] font-semibold leading-tight tracking-[-0.028em]" style={{ animation: `eth-rise 520ms ${EASE} 240ms both` }}>
+          {salutation}.
+        </h1>
+
+        {/* ── The rail, in depth ────────────────────────────────────────── */}
+        <div className="mt-10 w-full" style={{ perspective: 1400, perspectiveOrigin: '50% 30%' }}>
+          <div
+            className="relative flex w-full items-start justify-between px-0 pb-[26px] pt-[18px]"
+            style={{
+              transformStyle: 'preserve-3d',
+              transform: `rotateX(${tilt.x.toFixed(2)}deg) rotateY(${tilt.y.toFixed(2)}deg)`,
+              transition: `transform 700ms ${EASE}`,
+            }}
+          >
+            {/* a floor arc under the stages */}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute -bottom-[22px] left-[-6%] right-[-6%] h-[120px] rounded-[50%] border border-line-strong"
+              style={{
+                borderTopColor: 'transparent',
+                transform: 'translateZ(-120px) rotateX(70deg)',
+                background: 'radial-gradient(ellipse at 50% 100%, color-mix(in srgb, var(--color-hud) 60%, transparent), transparent 70%)',
+              }}
+            />
 
             {STAGES.map((stage, i) => {
               const Icon = STAGE_ICON[i] ?? Sparkles
-              const lit = i < litStages
-              const running = stage.agents.some(
-                (agentId) => agents.find((a) => a.agent_id === agentId)?.status === 'running',
-              )
+              const reading = readings[i] ?? { line: '', attention: false }
+              const t = (i - mid) / mid
+              const z = -Math.round(t * t * 150)
+              const y = Math.round(t * t * 10)
+              const s = (1 - t * t * 0.08).toFixed(3)
+              const rest = `translate3d(0, ${y}px, ${z}px) scale(${s})`
+              const from = `translate3d(0, ${y + 24}px, ${z - 220}px) scale(${s})`
+              const opacity = (1 - t * t * 0.18).toFixed(3)
+              const tone = reading.attention ? 'var(--color-serious)' : null
               return (
-                <div
-                  key={stage.id}
-                  className="flex w-[76px] shrink-0 flex-col items-center gap-2 text-center"
-                  style={{ animation: `boot-stage-in 520ms var(--ease-out-expo) ${0.04 + i * 0.08}s both` }}
-                >
-                  <span
-                    className="relative flex h-10 w-10 items-center justify-center rounded-full border bg-surface-2 transition-[border-color,box-shadow] duration-[var(--dur-slow)] ease-[var(--ease-out-soft)]"
-                    style={{
-                      borderColor: lit ? 'var(--color-accent)' : 'var(--color-line)',
-                      boxShadow: lit ? '0 0 22px -6px var(--color-glow)' : 'none',
-                      ...(lit ? { animation: 'boot-stage-light 560ms var(--ease-out-expo) both' } : {}),
-                    }}
+                <StageAndLink key={stage.id} first={i === 0} linkT={(i - 0.5 - mid) / mid}>
+                  <div
+                    className="group flex w-[96px] shrink-0 flex-col items-center gap-[9px]"
+                    style={
+                      {
+                        transformStyle: 'preserve-3d',
+                        '--from': from,
+                        '--rest': rest,
+                        '--op': opacity,
+                        animation: `eth-stage-in 720ms ${EASE} ${380 + i * 60}ms both`,
+                      } as CSSProperties
+                    }
+                    title={`${stage.label} · ${reading.line}`}
                   >
-                    <Icon
-                      size={15}
-                      className={`transition-colors duration-[var(--dur-slow)] ${lit || running ? 'text-accent-bright' : 'text-ink-3'}`}
-                      aria-hidden="true"
-                    />
-                    {/* One ring bursts outward the moment the stage lights. */}
-                    {lit ? (
-                      <span
-                        className="absolute inset-0 rounded-full border border-accent"
-                        style={{ animation: 'boot-ring 760ms var(--ease-out-soft) both' }}
-                        aria-hidden="true"
-                      />
-                    ) : null}
-                    {running ? (
-                      <span className="anim-ping-slow absolute inset-0 rounded-full border border-accent" aria-hidden="true" />
-                    ) : null}
-                  </span>
-                  <span
-                    className={`text-[11px] transition-colors duration-[var(--dur-slow)] ${
-                      lit ? 'font-medium text-ink' : 'text-ink-3'
-                    }`}
-                  >
-                    {stage.label}
-                  </span>
-                </div>
+                    <span
+                      className="relative flex h-[46px] w-[46px] items-center justify-center rounded-full border transition-[transform,box-shadow] duration-[260ms] ease-[var(--ease-out-soft)] group-hover:[transform:translateZ(26px)_scale(1.1)]"
+                      style={{
+                        borderColor: tone ?? 'var(--color-line-strong)',
+                        color: tone ?? 'var(--color-ink-3)',
+                        background: light
+                          ? 'radial-gradient(circle at 35% 30%, var(--color-surface), var(--color-surface-3) 70%)'
+                          : 'radial-gradient(circle at 35% 30%, var(--color-surface-3), var(--color-page) 72%)',
+                        boxShadow:
+                          `inset 0 1px 0 color-mix(in srgb, var(--color-ink) ${light ? 95 : 8}%, transparent), ` +
+                          `inset 0 -6px 12px rgba(0, 0, 0, ${light ? 0.06 : 0.45}), ` +
+                          `0 18px 30px -18px rgba(0, 0, 0, ${light ? 0.35 : 0.85})` +
+                          (tone ? `, 0 0 0 4px color-mix(in srgb, ${tone} 12%, transparent)` : ''),
+                      }}
+                    >
+                      <Icon size={19} strokeWidth={1.6} aria-hidden="true" style={tone ? { filter: `drop-shadow(0 0 6px color-mix(in srgb, ${tone} 55%, transparent))` } : undefined} />
+                      {reading.attention ? (
+                        <span
+                          aria-hidden="true"
+                          className="absolute -inset-[3px] rounded-full border border-serious opacity-40"
+                          style={{ animation: 'eth-attention-breathe 4s ease-in-out infinite' }}
+                        />
+                      ) : null}
+                    </span>
+                    <span className={`text-[11.5px] font-semibold tracking-[-0.01em] ${reading.attention ? 'text-ink' : 'text-ink-2'}`}>{stage.label}</span>
+                    <span className={`mono text-[10px] ${reading.attention ? 'text-serious' : 'text-ink-3'}`}>{reading.line}</span>
+                  </div>
+                </StageAndLink>
               )
             })}
           </div>
         </div>
-      ) : null}
 
-      {/* ── Beat 3 · Hand-off ─────────────────────────────────────────────── */}
-      {beat >= 2 ? (
-        <div className="anim-fade-up relative z-10 mt-7 flex max-w-xl flex-col items-center gap-6 text-center">
-          <p
-            className={`min-h-[2.6em] text-[15px] leading-relaxed text-ink ${
-              greetingDone ? '' : 'assistant-caret'
-            }`}
-          >
-            {typed}
-          </p>
-
-          <div
-            className="flex flex-wrap items-center justify-center gap-2.5 transition-opacity duration-[var(--dur-slow)]"
-            style={{ opacity: greetingDone ? 1 : 0.35 }}
-          >
-            {user?.role === 'leadership' ? (
-              <>
-                <span className="anim-fade-up" style={{ animationDelay: '80ms' }}>
-                  <PlayButton
-                    label="Open final approvals"
-                    hint={`${awaitingLeadership} awaiting your decision`}
-                    icon={<ShieldCheck size={14} />}
-                    onClick={() => {
-                      useStore.getState().setPage('leadership')
-                      dismiss()
-                    }}
-                    className="boot-cta"
-                  />
-                </span>
-                <span className="anim-fade-up" style={{ animationDelay: '200ms' }}>
-                  <Btn variant="ghost" onClick={start}>
-                    Run Ethara SocialAI
-                  </Btn>
-                </span>
-              </>
-            ) : (
-              <>
-                <span className="anim-fade-up" style={{ animationDelay: '80ms' }}>
-                  <PlayButton
-                    label="Run Ethara SocialAI"
-                    hint="Scrape → Validate → Analyse → Plan → Create"
-                    onClick={start}
-                    className="boot-cta"
-                  />
-                </span>
-                <span className="anim-fade-up" style={{ animationDelay: '200ms' }}>
-                  <Btn variant="ghost" onClick={dismiss}>
-                    Take me to the dashboard
-                  </Btn>
-                </span>
-              </>
-            )}
-          </div>
-
-          {/* Law 9 — the mode is always visible. One clause, not a sentence that
-              repeats what the greeting just said. */}
-          <p className="text-[10.5px] uppercase tracking-[0.14em] text-ink-3">
-            {apiMode === 'connected' ? 'Live runtime' : 'Standalone · bundled data'}
-          </p>
+        {/* ── One action ────────────────────────────────────────────────── */}
+        <div className="mt-[46px] flex items-center gap-2.5" style={{ animation: `eth-rise 520ms ${EASE} 920ms both` }}>
+          {user?.role === 'leadership' ? (
+            <>
+              <PrimaryAction label="Open final approvals" icon={<ShieldCheck size={13} aria-hidden="true" />} onClick={() => { useStore.getState().setPage('leadership'); dismiss() }} />
+              <Btn variant="ghost" onClick={start} className="!rounded-[9px] !px-4 !py-[11px] !text-[13.5px]">Run Social AI</Btn>
+            </>
+          ) : (
+            <>
+              <PrimaryAction label="Run Social AI" icon={<Play size={12} fill="currentColor" aria-hidden="true" />} onClick={start} />
+              <Btn variant="ghost" onClick={dismiss} className="!rounded-[9px] !px-4 !py-[11px] !text-[13.5px]">Dashboard</Btn>
+            </>
+          )}
         </div>
+
+        {/* Mode is stated, not implied: the three things that change what to do next. */}
+        <p className="mono mt-5 text-[10px] uppercase tracking-[0.14em] text-ink-3" style={{ animation: `eth-rise 520ms ${EASE} 1040ms both` }}>
+          {apiMode === 'connected' ? `Live runtime · ${publishMode} mode` : 'Standalone · bundled data'}
+          {forYou > 0 ? <span className="text-serious"> · {forYou} for you</span> : null}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/** A stage, preceded by its link from the stage before — the link sits on the same arc. */
+function StageAndLink({ first, linkT, children }: { first: boolean; linkT: number; children: ReactNode }) {
+  if (first) return <>{children}</>
+  const z = -Math.round(linkT * linkT * 150)
+  const y = Math.round(linkT * linkT * 10)
+  return (
+    <>
+      <span
+        aria-hidden="true"
+        className="mt-[18px] h-px min-w-3 flex-1 bg-line-strong"
+        style={{ transform: `translate3d(0, ${y}px, ${z}px)`, opacity: 1 - linkT * linkT * 0.18 }}
+      />
+      {children}
+    </>
+  )
+}
+
+function PrimaryAction({ label, icon, onClick }: { label: string; icon: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex items-center gap-[11px] rounded-[9px] border border-accent bg-accent px-[18px] py-[11px] text-left transition-[transform,background-color] duration-[220ms] ease-[var(--ease-out-soft)] hover:-translate-y-0.5 hover:bg-accent-bright active:translate-y-0"
+    >
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-on-accent text-accent">{icon}</span>
+      <span className="block text-[14px] font-semibold leading-snug text-on-accent">{label}</span>
+    </button>
+  )
+}
+
+/**
+ * The ground. Dark: one bloom, a floor receding to the horizon, a vignette.
+ * Light: a gradient ground, two slow blooms, a masked dot grid, the floor,
+ * a beam at the horizon, and the vignette.
+ */
+function Ground({ light }: { light: boolean }) {
+  const gridLine = 'var(--color-hud)'
+  return (
+    <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+      {light ? (
+        <>
+          <span className="absolute inset-0" style={{ background: 'linear-gradient(180deg, var(--color-surface) 0%, var(--color-page) 52%, var(--color-surface-3) 100%)' }} />
+          <span
+            className="absolute -left-[10%] -top-[22%] h-[620px] w-[820px] rounded-full blur-[70px]"
+            style={{ background: 'radial-gradient(circle, var(--color-hud-strong), transparent 66%)', animation: 'eth-lbloom-a 40s cubic-bezier(0.4, 0, 0.2, 1) infinite' }}
+          />
+          <span
+            className="absolute -right-[14%] top-[6%] h-[560px] w-[720px] rounded-full blur-[78px]"
+            style={{ background: 'radial-gradient(circle, var(--color-hud-glow), transparent 66%)', animation: 'eth-lbloom-b 52s cubic-bezier(0.4, 0, 0.2, 1) infinite' }}
+          />
+          <span className="absolute -bottom-[30%] left-[30%] h-[560px] w-[760px] rounded-full blur-[80px]" style={{ background: 'radial-gradient(circle, var(--color-hud-strong), transparent 66%)' }} />
+          <span
+            className="absolute inset-0"
+            style={{
+              backgroundImage: 'radial-gradient(var(--color-line-strong) 0.8px, transparent 0.8px)',
+              backgroundSize: '22px 22px',
+              maskImage: 'radial-gradient(70% 60% at 50% 42%, #000 20%, transparent 100%)',
+              WebkitMaskImage: 'radial-gradient(70% 60% at 50% 42%, #000 20%, transparent 100%)',
+            }}
+          />
+        </>
+      ) : (
+        <span
+          className="absolute left-1/2 top-[30%] h-[720px] w-[1080px] -translate-x-1/2 -translate-y-1/2 rounded-full"
+          style={{ background: 'radial-gradient(circle, var(--color-hud), transparent 66%)' }}
+        />
+      )}
+
+      <div className="absolute inset-x-0 bottom-0 h-[400px]" style={{ perspective: light ? 760 : 720, perspectiveOrigin: '50% 0%' }}>
+        <div
+          className="absolute -bottom-1/2 -left-[34%] -right-[34%] top-0 origin-top"
+          style={{
+            transform: 'rotateX(80deg)',
+            backgroundImage: `linear-gradient(to right, ${gridLine} 1px, transparent 1px), linear-gradient(to bottom, ${gridLine} 1px, transparent 1px)`,
+            backgroundSize: light ? '76px 76px' : '84px 84px',
+            maskImage: 'linear-gradient(to bottom, transparent 0%, #000 42%, transparent 92%)',
+            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, #000 42%, transparent 92%)',
+            animation: `eth-floorpan-slow ${light ? 30 : 34}s cubic-bezier(0.37, 0, 0.63, 1) infinite`,
+          }}
+        />
+      </div>
+
+      {light ? (
+        <span
+          className="absolute inset-x-0 top-[60%] h-px"
+          style={{
+            background: 'linear-gradient(90deg, transparent, var(--color-hud-strong) 30%, var(--color-hud-strong) 70%, transparent)',
+            animation: 'eth-lbeam 11s cubic-bezier(0.37, 0, 0.63, 1) infinite',
+          }}
+        />
       ) : null}
+
+      <span
+        className="absolute inset-0"
+        style={{
+          background: light
+            ? 'radial-gradient(118% 84% at 50% 40%, transparent 52%, color-mix(in srgb, var(--color-surface-3) 55%, transparent) 100%)'
+            : 'radial-gradient(118% 84% at 50% 40%, transparent 48%, color-mix(in srgb, var(--color-page) 88%, transparent) 100%)',
+        }}
+      />
     </div>
   )
 }

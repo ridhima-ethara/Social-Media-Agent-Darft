@@ -126,8 +126,16 @@ export function PipelineGraph({
 
       <Edge path={bezier(SCRAPE_X + AGENT_R, midY, VALIDATE_X - AGENT_R, midY)} status={coreStatus} weight={1.6} />
       {handoffLabel ? (
-        <text x={(SCRAPE_X + VALIDATE_X) / 2} y={midY - 10} textAnchor="middle" fontSize={9} fontWeight={500} fill="var(--color-ink-3)">
-          {handoffLabel}
+        <text
+          x={(SCRAPE_X + VALIDATE_X) / 2}
+          y={midY - 11}
+          textAnchor="middle"
+          fontSize={8.5}
+          fill="var(--color-ink-3)"
+          className="mono"
+          letterSpacing="0.06em"
+        >
+          {handoffLabel.toUpperCase()}
         </text>
       ) : null}
 
@@ -163,7 +171,7 @@ export function PipelineGraph({
               y={-17}
               width={SOURCE_W}
               height={34}
-              rx={8}
+              rx={6}
               fill="var(--color-surface)"
               stroke={selected ? 'var(--color-accent)' : tone(source.status)}
               strokeWidth={selected ? 1.6 : 1}
@@ -171,8 +179,8 @@ export function PipelineGraph({
             <text x={0} y={-2} textAnchor="middle" fontSize={10} fontWeight={500} fill="var(--color-ink)">
               {source.label.length > 16 ? `${source.label.slice(0, 16)}…` : source.label}
             </text>
-            <text x={0} y={10} textAnchor="middle" fontSize={9} fill="var(--color-ink-3)" className="tabular">
-              {source.count} items
+            <text x={0} y={10} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)" className="mono" letterSpacing="0.06em">
+              {source.count} KEPT
             </text>
           </g>
         )
@@ -200,17 +208,27 @@ export function PipelineGraph({
               y={-20}
               width={BUCKET_W}
               height={40}
-              rx={8}
+              rx={6}
               fill="var(--color-surface)"
               stroke={selected ? 'var(--color-accent)' : filled ? bucket.tone : 'var(--color-line-strong)'}
               strokeWidth={selected ? 1.6 : 1}
             />
-            <text x={0} y={-3} textAnchor="middle" fontSize={14} fontWeight={600} fill={filled ? bucket.tone : 'var(--color-ink-3)'} className="tabular">
+            <text x={0} y={-3} textAnchor="middle" fontSize={15} fill={filled ? bucket.tone : 'var(--color-ink-3)'} className="mono">
               {bucket.count}
             </text>
-            <text x={0} y={11} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)">
-              {bucket.label}
+            <text x={0} y={12} textAnchor="middle" fontSize={7.5} fill="var(--color-ink-3)" className="mono" letterSpacing="0.08em">
+              {bucket.label.toUpperCase()}
             </text>
+            {/* A human is required: the one bucket that cannot clear itself. */}
+            {bucket.id === 'needs_review' && filled ? (
+              <circle
+                cx={BUCKET_W / 2 - 7}
+                cy={-13}
+                r={2.6}
+                fill={bucket.tone}
+                style={{ animation: 'eth-attention-breathe 2.6s var(--ease-in-out-soft) infinite', animationPlayState: paused ? 'paused' : 'running' }}
+              />
+            ) : null}
           </g>
         )
       })}
@@ -240,6 +258,7 @@ function AgentNode({
   return (
     <g transform={`translate(${x}, ${y})`}>
       <circle r={AGENT_R} fill="var(--color-surface)" stroke={colour} strokeWidth={1.4} />
+      {/* An agent is working: the work arc, and nothing else on this node. */}
       {status === 'working' ? (
         <circle
           r={AGENT_R + 5}
@@ -248,17 +267,36 @@ function AgentNode({
           strokeWidth={1.2}
           strokeLinecap="round"
           strokeDasharray="60 220"
-          style={{ transformOrigin: 'center', transformBox: 'fill-box', animation: 'ring-spin 1.6s linear infinite', animationPlayState: paused ? 'paused' : 'running' }}
+          style={{
+            transformOrigin: 'center',
+            transformBox: 'fill-box',
+            animation: 'eth-work-arc 1.6s linear infinite',
+            animationPlayState: paused ? 'paused' : 'running',
+          }}
+        />
+      ) : null}
+      {/* A decision landed: one stroke, drawn once. */}
+      {status === 'done' ? (
+        <path
+          d={`M ${-AGENT_R - 1} 0 A ${AGENT_R + 1} ${AGENT_R + 1} 0 0 1 ${AGENT_R + 1} 0`}
+          fill="none"
+          stroke={colour}
+          strokeWidth={1.2}
+          strokeLinecap="round"
+          /* The commit keyframe runs dashoffset 26 → 0, so the path is
+             measured in the same 26 units and draws itself completely. */
+          pathLength={26}
+          style={{ strokeDasharray: 26, animation: 'eth-commit-check 620ms cubic-bezier(0.16, 1, 0.3, 1) both' }}
         />
       ) : null}
       <text x={0} y={-2} textAnchor="middle" fontSize={11} fontWeight={600} fill="var(--color-ink)">
         {name}
       </text>
-      <text x={0} y={11} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)">
-        {role}
+      <text x={0} y={11} textAnchor="middle" fontSize={7.5} fill="var(--color-ink-3)" className="mono" letterSpacing="0.08em">
+        {role.toUpperCase()}
       </text>
-      <text x={0} y={AGENT_R + 16} textAnchor="middle" fontSize={9} fontWeight={500} fill={colour}>
-        {label}
+      <text x={0} y={AGENT_R + 17} textAnchor="middle" fontSize={8.5} fill={colour} className="mono" letterSpacing="0.08em">
+        {label.toUpperCase()}
       </text>
     </g>
   )

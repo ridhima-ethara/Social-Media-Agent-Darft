@@ -11,10 +11,12 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useId,
   useState,
   type ReactNode,
 } from 'react'
-import { X } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { Check, ChevronDown, X } from 'lucide-react'
 import { Tilt } from './tilt'
 import type { Platform, ToolRisk } from '../types'
 
@@ -665,7 +667,18 @@ export function Dialog({
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-[68] flex items-center justify-center p-3">
+    /*
+     * ABOVE EVERY OTHER OVERLAY.
+     *
+     * This was `z-[68]`, which sits UNDER the Pipeline Theater (`z-[92]`) and the
+     * boot sequence (`z-[95]`). Opening a post while the theater was mounted —
+     * which is the normal state after pressing Run SocialAI — rendered the dialog
+     * correctly and then buried it, so the card appeared not to open at all.
+     *
+     * A dialog is the thing a person just asked for, so it outranks anything
+     * ambient. `z-[99]` keeps it above both.
+     */
+    <div className="fixed inset-0 z-[99] flex items-center justify-center p-3">
       <div className="absolute inset-0 bg-page/82 backdrop-blur-md" onClick={onClose} aria-hidden="true" />
       <div
         role="dialog"
@@ -950,4 +963,198 @@ export function useOutsideClick<T extends HTMLElement>(onOutside: () => void) {
     return () => document.removeEventListener('mousedown', handler)
   }, [onOutside])
   return ref
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SELECT
+
+   The native <select> pops the operating system's own menu, which ignores
+   the product's theme entirely — a dark grey sheet over a light screen. This
+   one is the product's: a trigger in our tokens and a listbox rendered
+   through a portal (so no panel can clip it), with the keyboard behaviour a
+   native select has: arrows, Home/End, Enter, Escape, and a check on the
+   current value.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface SelectOption {
+  value: string
+  label: string
+  /** Options with the same group are listed under one heading, in order. */
+  group?: string
+}
+
+const SELECT_SIZE = {
+  xs: 'gap-1 rounded-[5px] px-1.5 py-0.5 text-[9.5px]',
+  sm: 'gap-1.5 rounded-md px-2 py-1 text-[11.5px]',
+  md: 'gap-1.5 rounded-md px-2.5 py-1.5 text-[12px]',
+} as const
+
+export function Select({
+  value,
+  onChange,
+  options,
+  ariaLabel,
+  id,
+  className = '',
+  size = 'md',
+  mono = false,
+}: {
+  value: string
+  onChange: (value: string) => void
+  options: SelectOption[]
+  ariaLabel?: string
+  id?: string
+  className?: string
+  size?: keyof typeof SELECT_SIZE
+  /** Machine values — times, model tags — set in the mono face. */
+  mono?: boolean
+}) {
+  const uid = useId()
+  const [at, setAt] = useState<{ top: number; left: number; width: number } | null>(null)
+  const [active, setActive] = useState(0)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const open = at !== null
+  const current = options.find((o) => o.value === value)
+
+  /** Below the trigger when there is room, above it when there is not. */
+  const openAt = (): void => {
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const groups = new Set(options.map((o) => o.group).filter(Boolean)).size
+    const height = Math.min(320, options.length * 30 + groups * 24 + 10)
+    const width = Math.max(rect.width, 168)
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))
+    const top = window.innerHeight - rect.bottom >= height + 8 ? rect.bottom + 4 : Math.max(8, rect.top - height - 4)
+    setActive(Math.max(0, options.findIndex((o) => o.value === value)))
+    setAt({ top, left, width })
+  }
+  const close = (): void => setAt(null)
+  const choose = (next: string): void => {
+    onChange(next)
+    close()
+    triggerRef.current?.focus()
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent): void => {
+      const target = event.target as Node
+      if (triggerRef.current?.contains(target) || listRef.current?.contains(target)) return
+      close()
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' || event.key === 'Tab') return close()
+      if (event.key === 'ArrowDown') { event.preventDefault(); setActive((i) => Math.min(options.length - 1, i + 1)) }
+      if (event.key === 'ArrowUp') { event.preventDefault(); setActive((i) => Math.max(0, i - 1)) }
+      if (event.key === 'Home') { event.preventDefault(); setActive(0) }
+      if (event.key === 'End') { event.preventDefault(); setActive(options.length - 1) }
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        const pick = options[active]
+        if (pick) choose(pick.value)
+      }
+    }
+    // The list scrolls inside itself; only the page scrolling underneath closes it.
+    const onScroll = (event: Event): void => {
+      if (listRef.current?.contains(event.target as Node)) return
+      close()
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', close)
+    }
+    // `choose` and `close` are stable per render and read only props/state that are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, options, active])
+
+  useEffect(() => {
+    if (!open) return
+    listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [open, active])
+
+  let lastGroup: string | undefined
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        id={id}
+        type="button"
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? `${uid}-list` : undefined}
+        aria-label={ariaLabel}
+        onClick={() => (open ? close() : openAt())}
+        onKeyDown={(event) => {
+          if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+            event.preventDefault()
+            openAt()
+          }
+        }}
+        className={`inline-flex items-center border bg-surface text-left outline-none transition-colors hover:border-accent focus-visible:border-accent ${
+          open ? 'border-accent' : 'border-line-strong'
+        } ${mono ? 'mono' : ''} ${size === 'xs' ? 'text-ink-3 hover:text-ink' : 'text-ink'} ${SELECT_SIZE[size]} ${className}`}
+      >
+        <span className="min-w-0 flex-1 truncate">{current?.label ?? value}</span>
+        <ChevronDown
+          size={size === 'xs' ? 10 : 12}
+          className="shrink-0 text-ink-3"
+          aria-hidden="true"
+          style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-fast) var(--ease-out-soft)' }}
+        />
+      </button>
+
+      {at
+        ? createPortal(
+            <div
+              ref={listRef}
+              id={`${uid}-list`}
+              role="listbox"
+              aria-label={ariaLabel}
+              aria-activedescendant={`${uid}-opt-${active}`}
+              className="fixed z-[130] max-h-[320px] overflow-y-auto rounded-[10px] border border-line-strong bg-surface p-1 shadow-xl"
+              style={{ top: at.top, left: at.left, minWidth: at.width, animation: 'eth-rise 180ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
+            >
+              {options.map((option, i) => {
+                const heading = option.group !== undefined && option.group !== lastGroup ? option.group : null
+                lastGroup = option.group
+                const selected = option.value === value
+                return (
+                  <div key={`${option.value}-${i}`}>
+                    {heading ? (
+                      <p className="mono px-2 pb-1 pt-2 text-[9px] uppercase tracking-[0.12em] text-ink-3">{heading}</p>
+                    ) : null}
+                    <button
+                      type="button"
+                      role="option"
+                      id={`${uid}-opt-${i}`}
+                      data-index={i}
+                      aria-selected={selected}
+                      onMouseEnter={() => setActive(i)}
+                      onClick={() => choose(option.value)}
+                      className={`flex w-full items-center gap-2 rounded-md px-2 py-[6px] text-left transition-colors ${
+                        mono ? 'mono text-[11px]' : 'text-[12px]'
+                      } ${i === active ? 'bg-surface-2 text-ink' : 'text-ink-2'}`}
+                    >
+                      <span className="flex h-3 w-3 shrink-0 items-center justify-center">
+                        {selected ? <Check size={12} strokeWidth={2.4} className="text-accent-bright" aria-hidden="true" /> : null}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                    </button>
+                  </div>
+                )
+              })}
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  )
 }

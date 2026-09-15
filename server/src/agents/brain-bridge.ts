@@ -17,10 +17,9 @@
  */
 
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
 
-const PY = join(process.cwd(), '..', 'backend', '.venv', 'bin', 'python')
-const AGENT_API = join(process.cwd(), '..', 'backend', 'api.py')
+import { agentSpawn } from '../integrations/agent-tier'
+
 
 export interface Remembered {
   stored: boolean
@@ -36,12 +35,28 @@ export async function rememberDirective(
   category = 'Human Directive',
   timeoutMs = 20_000,
 ): Promise<Remembered> {
+  // Resolved and existence-checked before anything is spawned. A missing
+  // interpreter is reported as a stated reason, not as a spawn error.
+  const resolved = agentSpawn([
+    'learn',
+    '--title',
+    title,
+    '--content',
+    content,
+    '--category',
+    category,
+  ])
+
+  if ('error' in resolved) {
+    return {
+      stored: false,
+      action: 'unavailable',
+      reason: `The preference was not stored — ${resolved.error}`,
+    }
+  }
+
   return new Promise((resolve) => {
-    const child = spawn(
-      PY,
-      [AGENT_API, 'learn', '--title', title, '--content', content, '--category', category],
-      { cwd: join(process.cwd(), '..') },
-    )
+    const child = spawn(resolved.python, resolved.args, { cwd: resolved.cwd })
 
     let out = ''
     let err = ''

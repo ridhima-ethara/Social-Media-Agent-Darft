@@ -418,6 +418,9 @@ async function executePlan(input: ExecuteOptions): Promise<RunCommandResult> {
     workspaceId: opts.workspaceId,
     actor: opts.actor,
     role: opts.role,
+    // What the operator said, verbatim. A tool that records a durable preference
+    // reads it from here rather than trusting the parser's extraction.
+    utterance: opts.utterance,
     // Recorded so an operator-triggered run is indistinguishable from a scheduled
     // one in telemetry, apart from this label and the turn id.
     trigger: knobs.recordAsTrigger === 'assistant' ? 'assistant' : 'api',

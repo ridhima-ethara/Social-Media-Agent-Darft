@@ -27,7 +27,7 @@ from .schema import AgentResult, InjectionAttempt, SourceMode
 
 
 class Agent:
-    """Subclasses declare `agent_id`, `stage`, `hands_off_to`, and `tools()`."""
+    """Subclasses declare `agent_id`, `stage`, `hands_off_to`, `skills`, and `tools()`."""
 
     agent_id: str = ""
     name: str = ""
@@ -37,12 +37,27 @@ class Agent:
     hands_off_to: list[str] = []
     max_turns: int = 8
 
+    #: The skills under `packages/skills/` that specify this agent's behaviour,
+    #: in the order they are presented to the model. CLAUDE.md: "Skills are the
+    #: specification. Code implements them. Prompts point at them." Pointing at
+    #: a file the model was never given is not pointing at it, so the Rules and
+    #: Boundaries of every skill named here travel with the system prompt.
+    #:
+    #: More than one is allowed because some agents genuinely implement more
+    #: than one specification — the Image Agent writes the brief AND renders it.
+    #: Forcing a single choice there would leave half its behaviour unspecified.
+    skills: list[str] = []
+
     def __init__(self, brain: Brain, overrides: dict[str, Any] | None = None) -> None:
         if not self.agent_id:
             raise ValueError(f"{type(self).__name__} must declare an agent_id.")
         self.brain = brain
         self.config = Config(self.agent_id, overrides)
         self.folder = Path(__file__).resolve().parent.parent / "agents" / self.agent_id
+        # Resolved from this file rather than the working directory: the agents
+        # are spawned as a subprocess from the Node tier, and a cwd-relative
+        # path would bind whichever directory the API happened to be started in.
+        self.skills_dir = Path(__file__).resolve().parent.parent.parent / "packages" / "skills"
         self._injection: list[InjectionAttempt] = []
 
     # ── The folder's markdown ──────────────────────────────────────────────
@@ -56,15 +71,92 @@ class Agent:
             )
         return path.read_text(encoding="utf-8").strip()
 
+    # ── The skill specification ────────────────────────────────────────────
+
+    @staticmethod
+    def _section(body: str, heading: str) -> str:
+        """
+        One `## <heading>` section of a SKILL.md, without its heading line.
+
+        Returns an empty string when the section is absent, which the caller
+        reports rather than silently accepting — a skill whose Rules cannot be
+        found would otherwise reach the model as an agent with no rules at all.
+        """
+        lines = body.splitlines()
+        target = f"## {heading}".lower()
+        out: list[str] = []
+        collecting = False
+        for line in lines:
+            if line.strip().lower() == target:
+                collecting = True
+                continue
+            if collecting and line.startswith("## "):
+                break
+            if collecting:
+                out.append(line)
+        return "\n".join(out).strip()
+
+    def skill_specification(self) -> str:
+        """
+        The Rules and Boundaries of every declared skill, as one block.
+
+        Only those two sections: CLAUDE.md names them the requirements document.
+        Purpose, Inputs and Outputs describe the contract the code already
+        implements, and sending them too would spend context restating what the
+        tool signatures state exactly.
+        """
+        blocks: list[str] = []
+        for skill in self.skills:
+            path = self.skills_dir / skill / "SKILL.md"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"{self.agent_id} declares the skill '{skill}', but "
+                    f"{path} does not exist. The skill is the specification, so a "
+                    "missing one means this agent has no stated rules. Add the file "
+                    "or correct the `skills` declaration."
+                )
+            body = path.read_text(encoding="utf-8")
+            rules = self._section(body, "Rules")
+            boundaries = self._section(body, "Boundaries")
+            if not rules and not boundaries:
+                raise ValueError(
+                    f"{path} carries neither a `## Rules` nor a `## Boundaries` "
+                    "section. Those two sections are the requirements document; "
+                    "without them the file specifies nothing."
+                )
+            parts = [f"## Skill · {skill}"]
+            if rules:
+                parts.append(f"### Rules\n\n{rules}")
+            if boundaries:
+                parts.append(f"### Boundaries\n\n{boundaries}")
+            blocks.append("\n\n".join(parts))
+        return "\n\n".join(blocks)
+
     def system_prompt(self) -> str:
         """
         Assembled from the folder, every run. The instructions and the tool
         contract travel with the prompt, so the model cannot act on a stale
         copy of either.
+
+        The skill comes FIRST and says so, because CLAUDE.md makes it the
+        authority: "Any conflict between a skill and anything else — this file
+        included — the skill wins." Ordering the prompt the other way round
+        would state the opposite precedence to the model.
         """
         settings = "\n".join(f"  {k} = {v}" for k, v in self.config.used().items())
+        specification = self.skill_specification()
+        skill_block = (
+            f"---\n\n# Specification\n\n"
+            "The following is the behavioural specification for your work, taken "
+            "from the skill files that define this role. Where anything below in "
+            "this prompt appears to conflict with it, the specification wins.\n\n"
+            f"{specification}\n\n"
+            if specification
+            else ""
+        )
         return (
             f"{self._read('prompt.md')}\n\n"
+            f"{skill_block}"
             f"---\n\n# Instructions\n\n{self._read('instructions.md')}\n\n"
             f"---\n\n# Tools\n\n{self._read('tools.md')}\n\n"
             f"---\n\n# Resolved settings for this run\n\n{settings or '  (none declared)'}\n\n"
@@ -151,6 +243,13 @@ class Agent:
                 source=SourceMode.LIVE if reasoning.used_model else SourceMode.FIXTURE,
                 fallback_reason=reasoning.fallback_reason,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                # Recorded so the run stays replayable: `agent_runs.config_used`
+                # is written from this, and it is what lets a past run be
+                # explained after the knobs have moved on.
+                config_used=self.config.used(),
+                provider=reasoning.provider,
+                model=reasoning.model,
+                degraded_from=reasoning.degraded_from,
             )
             if self.config.rejected:
                 result.reason = "Settings rejected: " + "; ".join(self.config.rejected)
@@ -163,6 +262,9 @@ class Agent:
                 summary=f"{self.name or self.agent_id} failed: {error}",
                 duration_ms=int((time.monotonic() - started) * 1000),
                 error=str(error),
+                # A failed agent still records what it was configured to do. That
+                # is often the most useful thing about it.
+                config_used=self.config.used(),
             )
 
     def _summary_for(self, reasoning: Reasoning, output: dict[str, Any]) -> str:

@@ -15,9 +15,9 @@ import {
 import type { Platform } from '../../../../shared/agent-contract'
 import {
   temperatureFromPercent,
-  textAdapter,
-  textModelId,
-  withFallback,
+  textChain,
+  textModelIdFor,
+  withChainFallback,
   writeTemplateCaption,
 } from '../../integrations'
 import { listKnowledge } from '../../db/repo'
@@ -43,12 +43,20 @@ registerSkill<CaptionPayload>('generation.caption.mode', (payload, ctx) => {
     else writingMode = 'Long-form'
   }
 
-  // Whichever provider is bound right now — local or hosted. The agent does
-  // not know which, and should not.
-  const writer = textAdapter()
-  const modelReady = preferModel && writer.isConfigured()
+  // The ordered providers, not just the preferred one. Asking whether the
+  // PREFERRED adapter is configured would report the template writer whenever
+  // the primary is absent but its backup can serve — and then the caption would
+  // be written by a model this line said would not write it.
+  const chain = textChain()
+  const modelReady = preferModel && chain.length > 0
   ctx.log(
-    `Writing mode: ${writingMode} · ${modelReady ? `${textModelId()} will write it` : 'the deterministic template writer will write it'}`,
+    `Writing mode: ${writingMode} · ${
+      modelReady
+        ? `${textModelIdFor(chain[0]?.adapter.id)} will write it${
+            chain.length > 1 ? `, with ${textModelIdFor(chain[1]?.adapter.id)} behind it` : ''
+          }`
+        : 'the deterministic template writer will write it'
+    }`,
   )
 
   return { writingMode }
@@ -194,8 +202,8 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
     Observation: () => `Something shifted in ${topic.toLowerCase()} this month, and the benchmarks show it.`,
   }
 
-  const outcome = await withFallback(
-    textAdapter(),
+  const outcome = await withChainFallback(
+    textChain(),
     {
       systemInstruction,
       prompt,
@@ -238,7 +246,7 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
   }
 
   ctx.log(
-    `${style} hook, ${hook.split(/\s+/).length} word(s), by ${outcome.source === 'live' ? textModelId() : 'the template writer'}`,
+    `${style} hook, ${hook.split(/\s+/).length} word(s), by ${outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'the template writer'}`,
   )
 
   return { hook }
@@ -303,8 +311,8 @@ registerSkill<CaptionPayload>('generation.caption.problem', async (payload, ctx)
     return sentences.slice(0, Math.max(1, maxSentences)).join(' ')
   }
 
-  const outcome = await withFallback(
-    textAdapter(),
+  const outcome = await withChainFallback(
+    textChain(),
     {
       systemInstruction,
       prompt,
@@ -323,7 +331,7 @@ registerSkill<CaptionPayload>('generation.caption.problem', async (payload, ctx)
   const problem = outcome.value.trim().replace(/^#+\s*/gm, '')
 
   ctx.log(
-    `Problem section by ${outcome.source === 'live' ? textModelId() : 'the template writer'}` +
+    `Problem section by ${outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'the template writer'}` +
       (quantify && figure ? ', carrying a figure from the grounding' : ', with no numeric claim'),
   )
 
@@ -424,8 +432,8 @@ registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, 
     `Write exactly ${layers} short paragraphs that explain how it works and what it implies. No hook, no close, no hashtags.`,
   ].join('\n')
 
-  const outcome = await withFallback(
-    textAdapter(),
+  const outcome = await withChainFallback(
+    textChain(),
     {
       systemInstruction,
       prompt,
@@ -461,13 +469,13 @@ registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, 
   const explanation = outcome.value.trim()
 
   ctx.log(
-    `${layers}-layer explanation written by ${outcome.source === 'live' ? textModelId() : 'the deterministic template writer'}`,
+    `${layers}-layer explanation written by ${outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'the deterministic template writer'}`,
   )
 
   return {
     explanation,
     captionSource: outcome.source,
-    captionModel: outcome.source === 'live' ? textModelId() : 'ethara-template-writer',
+    captionModel: outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'ethara-template-writer',
     ...(outcome.fallbackReason === undefined ? {} : { captionFallbackReason: outcome.fallbackReason }),
   }
 })
@@ -532,8 +540,8 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
     'No hashtags, no emoji, no heading, no quotation marks around it.',
   ].join('\n')
 
-  const outcome = await withFallback(
-    textAdapter(),
+  const outcome = await withChainFallback(
+    textChain(),
     {
       systemInstruction,
       prompt,
@@ -580,7 +588,7 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
   }
 
   ctx.log(
-    `${closeStyle} close by ${outcome.source === 'live' ? textModelId() : 'the template writer'}` +
+    `${closeStyle} close by ${outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'the template writer'}` +
       (wantsQuestion ? `, ending in a question` : ''),
   )
 

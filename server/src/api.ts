@@ -62,6 +62,7 @@ import {
   listKeywords,
   countKnowledge,
   listKnowledge,
+  embeddingCoverage,
   listKnowledgeBuilds,
   listMediaForIdeas,
   listPlatformAnalytics,
@@ -100,7 +101,11 @@ import {
   listConversations,
   pendingConfirmation,
 } from './db/assistant-repo'
+import { describeImage } from './integrations/ollama'
 import { capabilities, registeredToolIds } from './assistant/tools/index'
+import { agentSpawn, describeAgentTier, isConfigured as agentTierConfigured } from './integrations/agent-tier'
+import { requireRole, requireSession, sessionOf } from './auth/guard'
+import { SESSION_COOKIE, authEnforced, encodeSession, signIn } from './auth/session'
 import { availableImageModels } from './agents/image/image-models/index'
 import { integrationReport,
   describeGcpAuth,
@@ -186,7 +191,7 @@ function toReference(reference: ReferenceInput): {
     ...(reference.text === undefined ? {} : { text: reference.text }),
     ...(reference.unreadableReason === undefined
       ? reference.text === undefined && reference.dataUri !== undefined
-        ? { note: 'an image was attached; the caption writer reads text only' }
+        ? { note: 'an image was attached; it is read by the vision model and described to the writer' }
         : {}
       : { note: reference.unreadableReason }),
   }
@@ -199,18 +204,39 @@ function toReference(reference: ReferenceInput): {
  * named and reported as not sent. A caller who believes their moodboard was
  * passed to the model would read the result as a response to it.
  */
-function describeReferencesForPrompt(references?: ReferenceInput[]): string {
+/**
+ * Folds attachments into an instruction.
+ *
+ * An attached IMAGE is now read rather than named and dropped. `describeImage`
+ * puts it through the local vision model and returns words, which is the one
+ * currency every painter and writer accepts. What reaches the model is a
+ * DESCRIPTION of the reference, and the prompt says exactly that — an operator
+ * must not be able to believe their picture was handed over when it was
+ * paraphrased.
+ *
+ * `intent` shapes the description: an illustrator wants composition and palette,
+ * a writer wants to know what the thing depicts.
+ */
+async function describeReferencesForPrompt(
+  references: ReferenceInput[] | undefined,
+  intent: 'caption' | 'image' = 'image',
+): Promise<string> {
   if (!references || references.length === 0) return ''
 
-  const lines = references.map((reference) => {
-    if (reference.text && reference.text.trim().length > 0) {
-      return `· ${reference.name}: ${reference.text.slice(0, 1_200)}`
-    }
-    if (reference.dataUri) {
-      return `· ${reference.name}: an image was attached, but this painter takes a text prompt, so its contents were not sent.`
-    }
-    return `· ${reference.name}: contents unavailable — ${reference.unreadableReason ?? 'unreadable'}.`
-  })
+  const lines = await Promise.all(
+    references.map(async (reference) => {
+      if (reference.text && reference.text.trim().length > 0) {
+        return `· ${reference.name}: ${reference.text.slice(0, 1_200)}`
+      }
+      if (reference.dataUri) {
+        const seen = await describeImage(reference.dataUri, intent)
+        return seen === ''
+          ? `· ${reference.name}: an image was attached but could not be read, so it did not influence this result.`
+          : `· ${reference.name} (attached image, described by the vision model — not the image itself): ${seen}`
+      }
+      return `· ${reference.name}: contents unavailable — ${reference.unreadableReason ?? 'unreadable'}.`
+    }),
+  )
 
   return `\n\nOperator reference material:\n${lines.join('\n')}`
 }
@@ -222,6 +248,68 @@ function describeReferencesForPrompt(references?: ReferenceInput[]): string {
 export function createApiRouter(): Router {
   const api = express.Router()
 
+  /* ── SESSION ─────────────────────────────────────────────────────────────── */
+  /*
+   * Mounted before the guard so signing in does not require being signed in.
+   * The guard itself also exempts `/session`, but ordering makes that explicit.
+   */
+
+  api.post('/session', (req, res) => {
+    const body = (req.body ?? {}) as { role?: unknown; password?: unknown }
+    const outcome = signIn(body.role, body.password)
+
+    if (outcome.session === null) {
+      res.status(401).json({ error: outcome.reason })
+      return
+    }
+
+    res.setHeader(
+      'Set-Cookie',
+      [
+        `${SESSION_COOKIE}=${encodeURIComponent(encodeSession(outcome.session))}`,
+        'Path=/',
+        'HttpOnly',
+        'SameSite=Lax',
+        `Max-Age=${config.auth.sessionTtlSeconds}`,
+        ...(config.auth.secureCookie ? ['Secure'] : []),
+      ].join('; '),
+    )
+    res.json({
+      role: outcome.session.role,
+      actor: outcome.session.actor,
+      expiresAt: new Date(outcome.session.expiresAt * 1000).toISOString(),
+      enforced: authEnforced(),
+    })
+  })
+
+  api.get('/session', (req, res) => {
+    const session = sessionOf(req)
+    if (session === null) {
+      res.status(200).json({ role: null, actor: null, enforced: authEnforced() })
+      return
+    }
+    res.json({
+      role: session.role,
+      actor: session.actor,
+      expiresAt: new Date(session.expiresAt * 1000).toISOString(),
+      enforced: authEnforced(),
+    })
+  })
+
+  api.delete('/session', (_req, res) => {
+    // Expire rather than omit: a cleared cookie must actually replace the one
+    // the browser holds.
+    res.setHeader(
+      'Set-Cookie',
+      `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+    )
+    res.json({ ok: true })
+  })
+
+  // Everything below that MUTATES needs an operator behind it. Mounted here so a
+  // route added later is guarded by default rather than by memory.
+  api.use(requireSession)
+
   /* ── HEALTH AND REGISTRY ─────────────────────────────────────────────────── */
 
   api.get('/health', async (_req, res) => {
@@ -231,6 +319,10 @@ export function createApiRouter(): Router {
       ok: database,
       database: database ? 'postgres' : 'unreachable',
       publishMode: config.core.publishMode,
+      // Whether a password is actually required. An open gate must be visible
+      // rather than assumed shut: with no OPERATOR_PASSWORD configured any
+      // password is accepted, and that is a fact an operator needs.
+      auth: { enforced: authEnforced() },
       workspace: config.core.workspaceSlug,
       registry: REGISTRY_SUMMARY,
       tools: TOOL_SUMMARY,
@@ -245,6 +337,14 @@ export function createApiRouter(): Router {
           platformLanes: statuses.apify.platformLanes,
         },
         crawl4ai: { configured: statuses.crawl4ai.configured, reason: statuses.crawl4ai.reason },
+        // The second engine's process boundary. Reported here for the same reason
+        // crawl4ai is: it is a spawned sidecar, and "why did Run agents do
+        // nothing" must be answerable from the health payload rather than from a
+        // stream that stopped.
+        agentTier: {
+          configured: agentTierConfigured(),
+          reason: describeAgentTier(),
+        },
         parallel: { configured: statuses.parallel.configured, reason: statuses.parallel.reason },
         gcp: {
           // The ADAPTER's own answer, not the config's. `config.gcp.configured`
@@ -261,6 +361,17 @@ export function createApiRouter(): Router {
           textModel: statuses.ollama.textModel,
           imageModel: statuses.ollama.imageModel,
         },
+        // Semantic retrieval. `coverage` is the load-bearing part: an embedder
+        // that is configured but has embedded nothing yet still retrieves
+        // lexically, and an operator asking "why did search miss that" needs to
+        // see the gap rather than infer it from a configured flag.
+        embeddings: {
+          configured: statuses.embeddings.configured,
+          reason: statuses.embeddings.reason,
+          model: statuses.embeddings.model,
+          dimensions: statuses.embeddings.dimensions,
+          coverage: database ? await embeddingCoverage() : [],
+        },
         mflux: {
           configured: statuses.mflux.configured,
           reason: statuses.mflux.reason,
@@ -271,6 +382,11 @@ export function createApiRouter(): Router {
         text: {
           provider: statuses.text.provider,
           resolved: statuses.text.resolved,
+          // The ordered providers, so "why did Qwen write this when Gemini is
+          // configured" is answerable here rather than inferred from the stamp
+          // on the card.
+          chain: statuses.text.chain,
+          backup: statuses.text.backup,
           configured: statuses.text.configured,
           reason: statuses.text.reason,
         },
@@ -437,7 +553,7 @@ export function createApiRouter(): Router {
         utterance: body.utterance,
         channel: body.channel,
         ...(body.conversationId ? { conversationId: body.conversationId } : {}),
-        actor: body.actor ?? 'Ridhima',
+        actor: sessionOf(req)?.actor ?? body.actor ?? 'Operator',
         role: body.role ?? 'marketing',
         ...(body.focus === undefined ? {} : { focus: body.focus }),
         emit: send,
@@ -1038,9 +1154,54 @@ export function createApiRouter(): Router {
     '/ideas/:id/draft',
     route(async (req, _res, workspaceId) => {
       const body = parseBody(
-        z.object({ platform: platformSchema.optional(), withImage: z.boolean().optional() }),
+        z.object({
+          platform: platformSchema.optional(),
+          withImage: z.boolean().optional(),
+          /*
+           * THE EDIT INSTRUCTION.
+           *
+           * This was absent from the schema, so zod stripped it silently: an
+           * operator asking to "make it shorter and more CTO-focused" got a
+           * regenerated caption that had never seen the request, and the length
+           * moved in whatever direction the fresh generation happened to land.
+           * The change looked like obedience and was coincidence.
+           */
+          instruction: z.string().max(2_000).optional(),
+          references: z.array(referenceSchema).max(8).optional(),
+        }),
         req.body,
       )
+
+      // An attached image is read by the vision model and described to the
+      // writer, so a moodboard influences the words rather than being named and
+      // dropped. `caption` intent asks what the picture DEPICTS.
+      const referenceNote = await describeReferencesForPrompt(body.references, 'caption')
+      const instruction = `${body.instruction ?? ''}${referenceNote}`.trim()
+
+      /*
+       * An instruction REVISES; its absence GENERATES. `applyInstruction` is the
+       * revision path — it rewrites the existing draft against what was asked and
+       * raises a finding when the request conflicts with a brand rule, rather
+       * than resolving the conflict silently. Regenerating instead would discard
+       * the operator's words, which is what happened before.
+       */
+      if (instruction !== '') {
+        // `platform` is required by the revision path, so it is resolved from the
+        // idea when the caller did not name one.
+        const target = await getIdea(workspaceId, String(req.params.id))
+        if (!target) throw new Error('No such idea.')
+        return applyInstruction({
+          workspaceId,
+          trigger: 'api',
+          ideaId: target.id,
+          platform: body.platform ?? target.platform,
+          instruction,
+          ...(body.references === undefined
+            ? {}
+            : { references: body.references.map(toReference) }),
+        })
+      }
+
       return generateDraft({
         workspaceId,
         trigger: 'api',
@@ -1068,7 +1229,7 @@ export function createApiRouter(): Router {
       // The painters take a prompt, not an image, so a textual reference folds
       // into the instruction and an attached picture is named rather than sent.
       // Saying which happened beats silently discarding the file.
-      const referenceNote = describeReferencesForPrompt(body.references)
+      const referenceNote = await describeReferencesForPrompt(body.references, 'image')
       const instruction =
         body.instruction === undefined && referenceNote === ''
           ? undefined
@@ -1200,13 +1361,16 @@ export function createApiRouter(): Router {
 
   api.post(
     '/ideas/:id/approve',
-    route(async (req, _res, workspaceId) => {
-      const body = parseBody(z.object({ by: z.string().min(1) }), req.body)
+    route(async (req, res, workspaceId) => {
+      // The FIRST of two signatures. Marketing only — and `by` comes from the
+      // session, not the body, so a caller cannot sign as someone else.
+      const session = sessionOf(req)
+      if (!requireRole(res, session, ['marketing'])) return undefined
       const idea = await approveMarketing({
         workspaceId,
         trigger: 'api',
         ideaId: String(req.params.id),
-        by: body.by,
+        by: session?.actor ?? '',
       })
       return { idea }
     }),
@@ -1214,17 +1378,17 @@ export function createApiRouter(): Router {
 
   api.post(
     '/ideas/:id/leadership/approve',
-    route(async (req, _res, workspaceId) => {
-      const body = parseBody(
-        z.object({ by: z.string().min(1), publish: z.boolean().default(true) }),
-        req.body,
-      )
+    route(async (req, res, workspaceId) => {
+      // The SECOND signature. Leadership only, so one account cannot supply both.
+      const session = sessionOf(req)
+      if (!requireRole(res, session, ['leadership'])) return undefined
+      const body = parseBody(z.object({ publish: z.boolean().default(true) }), req.body)
       return decideLeadership({
         workspaceId,
         trigger: 'api',
         ideaId: String(req.params.id),
         decision: 'approved',
-        by: body.by,
+        by: session?.actor ?? '',
         publish: body.publish,
       })
     }),
@@ -1232,11 +1396,11 @@ export function createApiRouter(): Router {
 
   api.post(
     '/ideas/:id/leadership/reject',
-    route(async (req, _res, workspaceId) => {
+    route(async (req, res, workspaceId) => {
       // The reason is mandatory, enforced here as well as in the repository.
-      const parsed = z
-        .object({ by: z.string().min(1), reason: z.string().min(1) })
-        .safeParse(req.body ?? {})
+      const session = sessionOf(req)
+      if (!requireRole(res, session, ['leadership'])) return undefined
+      const parsed = z.object({ reason: z.string().min(1) }).safeParse(req.body ?? {})
       if (!parsed.success) {
         throw new Error('A rejection needs a reason — it is what the agents learn from.')
       }
@@ -1245,7 +1409,7 @@ export function createApiRouter(): Router {
         trigger: 'api',
         ideaId: String(req.params.id),
         decision: 'rejected',
-        by: parsed.data.by,
+        by: session?.actor ?? '',
         reason: parsed.data.reason,
       })
     }),
@@ -1253,7 +1417,8 @@ export function createApiRouter(): Router {
 
   api.post(
     '/ideas/:id/publish',
-    route(async (req, _res, workspaceId) => {
+    route(async (req, res, workspaceId) => {
+      if (!requireRole(res, sessionOf(req), ['marketing', 'leadership'])) return undefined
       const body = parseBody(z.object({ platform: platformSchema.optional() }), req.body)
       return publishIdea({
         workspaceId,
@@ -1421,13 +1586,19 @@ export function createApiRouter(): Router {
      agent start and finish in real time. There is no second HTTP server and no
      shared runtime — the process boundary is the interface. */
 
-  const PY = join(process.cwd(), '..', 'backend', '.venv', 'bin', 'python')
-  const AGENT_API = join(process.cwd(), '..', 'backend', 'api.py')
-
   /** Runs one backend command and parses its NDJSON. Never throws on bad output. */
   function runAgentCommand(args: string[], timeoutMs = 300_000): Promise<Record<string, unknown>[]> {
     return new Promise((resolve, reject) => {
-      const child = spawn(PY, [AGENT_API, ...args], { cwd: join(process.cwd(), '..') })
+      // Resolved and existence-checked here rather than at module load, so a
+      // venv created after the API started is picked up without a restart —
+      // and so a missing one is a named reason instead of a spawn ENOENT.
+      const resolvedSpawn = agentSpawn(args)
+      if ('error' in resolvedSpawn) {
+        reject(new Error(resolvedSpawn.error))
+        return
+      }
+
+      const child = spawn(resolvedSpawn.python, resolvedSpawn.args, { cwd: resolvedSpawn.cwd })
       const frames: Record<string, unknown>[] = []
       let stderr = ''
       let buffer = ''
@@ -1505,7 +1676,28 @@ export function createApiRouter(): Router {
     if (body.overrides) args.push('--overrides', JSON.stringify(body.overrides))
     if (body.stopAfter) args.push('--stop-after', body.stopAfter)
 
-    const child = spawn(PY, [AGENT_API, ...args], { cwd: join(process.cwd(), '..') })
+    /*
+     * THE CHECK THAT TURNS A DEAD STREAM INTO AN ANSWER.
+     *
+     * This route holds an SSE connection open for the whole run, so a spawn
+     * failure used to arrive as `error` with "spawn ENOENT" — or, worse, as a
+     * stream that simply stopped producing frames, which the Run Console shows
+     * as an agent run that started and never finished. Resolving first means an
+     * absent interpreter is a single frame naming the key and the fix.
+     */
+    const resolvedSpawn = agentSpawn(args)
+    if ('error' in resolvedSpawn) {
+      res.write(
+        `event: error\ndata: ${JSON.stringify({
+          message: `The agent backend cannot run — ${resolvedSpawn.error}`,
+        })}\n\n`,
+      )
+      res.write(`event: end\ndata: ${JSON.stringify({ code: 1 })}\n\n`)
+      res.end()
+      return
+    }
+
+    const child = spawn(resolvedSpawn.python, resolvedSpawn.args, { cwd: resolvedSpawn.cwd })
     let buffer = ''
     let finished = false
 
@@ -1773,6 +1965,10 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     },
     mode: {
       publishMode: config.core.publishMode,
+      // Whether a password is actually required. An open gate must be visible
+      // rather than assumed shut: with no OPERATOR_PASSWORD configured any
+      // password is accepted, and that is a fact an operator needs.
+      auth: { enforced: authEnforced() },
       assistantProvider: config.assistant.provider,
       integrations: integrationReport().adapters,
     },

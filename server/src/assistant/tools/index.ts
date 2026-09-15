@@ -76,6 +76,22 @@ export interface ToolContext {
   role: 'marketing' | 'leadership'
   trigger: Trigger
   turnId: string | null
+  /**
+   * What the operator actually said, verbatim.
+   *
+   * Present because a durable instruction has to be stored in the operator's own
+   * words, and the parser cannot be relied on to hand them over: the model is
+   * asked to fill `entities.instruction` and frequently returns `{}` while still
+   * identifying the action correctly. When that happened, `calendar.reshuffle`
+   * found no instruction and no platform, so it stored nothing and moved nothing
+   * — the operator was told the calendar had been reshuffled to favour a
+   * platform, and the next agent run planned it away because the Calendar Agent
+   * had never been told anything.
+   *
+   * The utterance is the ground truth for what was asked. A tool that records a
+   * preference reads it from here rather than trusting extraction.
+   */
+  utterance: string
   /** Results of the earlier steps in this plan, keyed by tool id. */
   prior: Map<string, ToolResult>
 }
@@ -933,8 +949,44 @@ const RESHUFFLE_FROZEN = new Set<IdeaStatus>([
 ])
 
 tool('calendar.reshuffle', async (args, ctx) => {
-  const preferred = typeof args.platform === 'string' ? (args.platform as Platform) : null
-  const instruction = typeof args.instruction === 'string' ? args.instruction.trim() : ''
+  /*
+   * THE PARSER IS NOT TRUSTED TO HAND OVER THE INSTRUCTION.
+   *
+   * The model is asked to fill `entities` with the tool's own argument names and
+   * often returns `{}` while identifying the action correctly — so `platform` and
+   * `instruction` arrived empty on a request that plainly named both. The
+   * consequences were silent and compounding: nothing moved, nothing was stored,
+   * the narration still claimed the calendar had been reshuffled to favour a
+   * platform, and the next agent run planned the operator's preference away
+   * because the Calendar Agent had never heard it.
+   *
+   * So both are recovered from the utterance when extraction fails. The
+   * utterance is what the operator actually said; it cannot be more wrong than
+   * an empty object.
+   */
+  const spokenPlatform = ((): Platform | null => {
+    const lower = ctx.utterance.toLowerCase()
+    if (/\blinked ?in\b/.test(lower)) return 'linkedin'
+    if (/\binsta(gram)?\b/.test(lower)) return 'instagram'
+    if (/\bfacebook\b|\bfb\b/.test(lower)) return 'facebook'
+    if (/\b(twitter|x)\b/.test(lower)) return 'x'
+    return null
+  })()
+
+  const preferred =
+    typeof args.platform === 'string' ? (args.platform as Platform) : spokenPlatform
+
+  /*
+   * The instruction defaults to the whole utterance. A preference is only
+   * durable if it is written down in the words that were used — "we get the best
+   * engagement there" is the reason, and a reason the Learning Agent never sees
+   * is a preference it cannot weigh against evidence later.
+   */
+  const instruction =
+    typeof args.instruction === 'string' && args.instruction.trim() !== ''
+      ? args.instruction.trim()
+      : ctx.utterance.trim()
+
   const remember = args.remember !== false
   const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
 

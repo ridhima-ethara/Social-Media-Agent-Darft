@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { Plus, Trash2, Pencil, Check, X } from 'lucide-react'
 import { KEYWORD_CATEGORIES } from '@shared/keywords'
 import { useStore } from '../store'
-import { Badge, Btn, Modal, fmt } from './ui'
+import { Select, Badge, Btn, Modal, fmt } from './ui'
 import type { KeywordSignal } from '../types'
 
 export function KeywordBoard({
@@ -98,18 +98,13 @@ export function KeywordBoard({
                   </td>
 
                   <td className="px-3 py-2">
-                    <select
+                    <Select
                       value={keyword.category}
-                      onChange={(event) => void updateKeyword(keyword.id, { category: event.target.value })}
-                      aria-label={`Category for ${keyword.term}`}
-                      className="rounded-md border border-line bg-surface-2 px-1.5 py-1 text-[11px] text-ink-2 outline-none focus:border-accent"
-                    >
-                      {KEYWORD_CATEGORIES.map((category) => (
-                        <option key={category} value={category}>
-                          {category}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(category) => void updateKeyword(keyword.id, { category })}
+                      options={KEYWORD_CATEGORIES.map((category) => ({ value: category, label: category }))}
+                      ariaLabel={`Category for ${keyword.term}`}
+                      size="sm"
+                    />
                   </td>
 
                   <td className="px-3 py-2">
@@ -276,17 +271,12 @@ export function KeywordBoard({
 
           <label className="block">
             <span className="text-[11px] uppercase tracking-[0.08em] text-ink-3">Category</span>
-            <select
+            <Select
               value={newCategory}
-              onChange={(event) => setNewCategory(event.target.value)}
-              className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent"
-            >
-              {KEYWORD_CATEGORIES.map((category) => (
-                <option key={category} value={category}>
-                  {category}
-                </option>
-              ))}
-            </select>
+              onChange={setNewCategory}
+              options={KEYWORD_CATEGORIES.map((category) => ({ value: category, label: category }))}
+              className="mt-1 w-full"
+            />
           </label>
 
           <label className="block">

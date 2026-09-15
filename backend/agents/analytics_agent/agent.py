@@ -99,6 +99,7 @@ class AnalyticsAgent(Agent):
     icon = identity["icon"]
     stage = "learn"
     hands_off_to = ["learning_agent"]
+    skills = ["performance-collection"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         posts = payload.get("published_posts", [])

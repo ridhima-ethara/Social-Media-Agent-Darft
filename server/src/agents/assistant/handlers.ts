@@ -171,6 +171,7 @@ registerSkill<AssistantPayload>('assistant.tool.dispatch', async (payload, ctx) 
       workspaceId: ctx.workspaceId,
       actor: payload.actor ?? 'Operator',
       role: payload.role ?? 'marketing',
+      utterance: payload.utterance ?? '',
       trigger: 'assistant',
       turnId,
     },

@@ -23,7 +23,7 @@ import { AgentIcon } from '../components/agent-icon'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
 import { api } from '../lib/api'
-import { Badge, Metric, RiskPill, Tabs } from '../components/ui'
+import { Select, Badge, Metric, RiskPill, Tabs } from '../components/ui'
 import type { AgentId, RegistrySkill } from '../types'
 
 type ConfigValue = string | number | boolean
@@ -414,17 +414,13 @@ function SkillCard({
                       />
                     </button>
                   ) : field.type === 'enum' ? (
-                    <select
+                    <Select
                       value={String(value)}
-                      onChange={(event) => onPatch(field.key, event.target.value)}
-                      className="mt-1.5 w-full rounded-md border border-line bg-surface px-2 py-1 text-[11.5px] outline-none focus:border-accent"
-                    >
-                      {(field.options ?? []).map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(next) => onPatch(field.key, next)}
+                      options={(field.options ?? []).map((option) => ({ value: option, label: option }))}
+                      className="mt-1.5 w-full"
+                      size="sm"
+                    />
                   ) : field.type === 'text' ? (
                     <input
                       value={String(value)}

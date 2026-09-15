@@ -12,6 +12,17 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import {
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_GCP_TEXT_MODEL,
+  DEFAULT_OLLAMA_TEXT_MODEL,
+} from '../../shared/text-models'
+import {
+  DEFAULT_GCP_IMAGE_MODEL,
+  DEFAULT_MFLUX_MODEL,
+  DEFAULT_OLLAMA_IMAGE_MODEL,
+} from '../../shared/image-models'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SERVER_ROOT = join(HERE, '..')
 
@@ -146,11 +157,30 @@ export const config = {
 
   /* ── Core ───────────────────────────────────────────────────────────────── */
   core: {
+    /**
+     * THE CANONICAL DATABASE IS `ethara_socialai`.
+     *
+     * It is what `docker-compose.yml` creates (`POSTGRES_DB`), so the default
+     * here and the container agree. They used to differ — this defaulted to
+     * `ethara_sma` — which meant copying `server/.env.example` as the README
+     * instructs produced a URL pointing at a database nothing ever created, and
+     * the API refused to start for a reason no message explained. A test parses
+     * both out of `docker-compose.yml` so they cannot drift again.
+     */
     get databaseUrl(): string {
-      return str('DATABASE_URL', 'postgresql://ethara:ethara@localhost:5432/ethara_sma')
+      return str('DATABASE_URL', 'postgresql://ethara:ethara@localhost:5432/ethara_socialai')
     },
+    /**
+     * THE CANONICAL PORT IS 4001.
+     *
+     * Not 4000: another project on this machine answers there with a different
+     * API, and `detectApi()` only trusts a `/health` carrying this product's
+     * registry summary — so a stranger on the port reads as "no API" rather than
+     * a half-working one. `vite.config.ts` reads this same value for its proxy
+     * target, and nginx uses it in the container image.
+     */
     get port(): number {
-      return int('PORT', 4000)
+      return int('PORT', 4001)
     },
     get workspaceSlug(): string {
       return str('WORKSPACE_SLUG', 'ethara')
@@ -265,14 +295,14 @@ export const config = {
       return str('GCP_SERVICE_ACCOUNT_JSON')
     },
     get textModel(): string {
-      return str('GCP_TEXT_MODEL', 'gemini-2.5-pro')
+      return str('GCP_TEXT_MODEL', DEFAULT_GCP_TEXT_MODEL)
     },
     /** Same rule as Ollama's: an unset fast model means the configured one. */
     get fastTextModel(): string {
       return str('GCP_FAST_TEXT_MODEL', this.textModel)
     },
     get imageModel(): string {
-      return str('GCP_IMAGE_MODEL', 'imagen-4.0-generate-001')
+      return str('GCP_IMAGE_MODEL', DEFAULT_GCP_IMAGE_MODEL)
     },
     get timeoutMs(): number {
       return int('GCP_TIMEOUT_MS', 90000)
@@ -305,7 +335,7 @@ export const config = {
     },
     /** Content generation, calendar reasoning, review rewrites, the planner. */
     get textModel(): string {
-      return str('OLLAMA_TEXT_MODEL', 'qwen3:14b')
+      return str('OLLAMA_TEXT_MODEL', DEFAULT_OLLAMA_TEXT_MODEL)
     },
     /**
      * Short, cheap calls — narration and single rewrites.
@@ -321,7 +351,7 @@ export const config = {
     },
     /** Background painting. Empty disables the Ollama image transport. */
     get imageModel(): string {
-      return str('OLLAMA_IMAGE_MODEL', 'x/flux2-klein:9b')
+      return str('OLLAMA_IMAGE_MODEL', DEFAULT_OLLAMA_IMAGE_MODEL)
     },
     /** Local generation is slower per token than a hosted API; budget for it. */
     get timeoutMs(): number {
@@ -339,6 +369,100 @@ export const config = {
     },
   },
 
+  /* ── Identity and role ───────────────────────────────────────────────────── */
+  auth: {
+    /**
+     * The shared operator password. BLANK MEANS NO PASSWORD IS REQUIRED — the
+     * product must run with an empty `.env`, so an absent credential opens the
+     * gate rather than closing the product. `/api/health` reports
+     * `auth.enforced` so an open gate is visible rather than assumed shut.
+     */
+    get operatorPassword(): string {
+      return str('OPERATOR_PASSWORD')
+    },
+    /**
+     * The HMAC key for session cookies. Blank means a random per-process key:
+     * sessions then end on restart, which is inconvenient and safe. A shipped
+     * constant would be neither — every deployment would share a signing key.
+     */
+    get sessionSecret(): string {
+      return str('SESSION_SECRET')
+    },
+    get sessionTtlSeconds(): number {
+      return int('SESSION_TTL_SECONDS', 60 * 60 * 12)
+    },
+    /**
+     * Whether the session cookie is marked `Secure`.
+     *
+     * Off by default because development is plain HTTP on localhost and a
+     * `Secure` cookie would simply never be stored — which presents as sign-in
+     * silently not working. Turn it on for any deployment behind TLS.
+     */
+    get secureCookie(): boolean {
+      return flag('SESSION_SECURE_COOKIE', false)
+    },
+  },
+
+  /* ── The Python agent tier · process boundary ────────────────────────────── */
+  agentTier: {
+    /**
+     * The interpreter that runs `backend/api.py`.
+     *
+     * Blank means "the venv inside the backend root", derived from the module's
+     * own location rather than the working directory — see
+     * `integrations/agent-tier.ts`. Present for the same reason
+     * `CRAWL4AI_PYTHON` is: a sidecar reached across a process boundary is
+     * deployment configuration, and it must be overridable and checkable.
+     */
+    get python(): string {
+      return str('AGENT_PYTHON')
+    },
+    /** The directory holding `api.py` and `.venv`. Blank means `<repo>/backend`. */
+    get backendRoot(): string {
+      return str('AGENT_BACKEND_ROOT')
+    },
+  },
+
+  /* ── Semantic retrieval · embeddings over the same Ollama daemon ─────────── */
+  embeddings: {
+    /**
+     * The embedding model. Rides the Ollama daemon that already serves text, so
+     * enabling semantic retrieval costs no new service, key or egress.
+     */
+    get model(): string {
+      return str('EMBEDDING_MODEL', DEFAULT_EMBEDDING_MODEL)
+    },
+    /**
+     * The vector width this model returns. Declared here for VALIDATION, not
+     * configuration: `schema.sql` fixes the column at vector(768) because
+     * pgvector needs a literal dimension for an HNSW index. A model returning
+     * anything else is rejected at write time with both numbers named, rather
+     * than allowed to fail later inside a distance operator.
+     */
+    get dimensions(): number {
+      return int('EMBEDDING_DIMENSIONS', 768)
+    },
+    /** How many texts go in one request. Ollama accepts an array on /api/embed. */
+    get batchSize(): number {
+      return int('EMBEDDING_BATCH_SIZE', 16)
+    },
+    get timeoutMs(): number {
+      return int('EMBEDDING_TIMEOUT_MS', 120000)
+    },
+    /**
+     * Whether semantic retrieval is on. Defaults to on WHEN a daemon exists,
+     * because the embedder is the same daemon the text model already uses — but
+     * `EMBEDDINGS_ENABLED=false` turns it off without unsetting OLLAMA_BASE_URL,
+     * which is what you want to isolate a retrieval problem.
+     */
+    get enabled(): boolean {
+      return flag('EMBEDDINGS_ENABLED', true)
+    },
+    get configured(): boolean {
+      return this.enabled && has('OLLAMA_BASE_URL')
+    },
+  },
+
   /* ── Local background painter · mflux (FLUX.2 Klein on MLX) ─────────────── */
   mflux: {
     /**
@@ -350,7 +474,7 @@ export const config = {
       return str('MFLUX_PYTHON')
     },
     get model(): string {
-      return str('MFLUX_MODEL', 'flux2-klein-9b')
+      return str('MFLUX_MODEL', DEFAULT_MFLUX_MODEL)
     },
     /** Klein is distilled — few steps is the point of it. */
     get steps(): number {
@@ -504,33 +628,62 @@ export function integrationStatuses(): {
   parallel: IntegrationStatus
   gcp: IntegrationStatus
   ollama: IntegrationStatus & { textModel: string; imageModel: string }
+  embeddings: IntegrationStatus & { model: string; dimensions: number }
   mflux: IntegrationStatus & { model: string }
   crawl4ai: IntegrationStatus
   apify: IntegrationStatus & { platformLanes: 'apify' | 'crawl4ai' }
   zImage: IntegrationStatus
-  text: IntegrationStatus & { provider: TextProvider; resolved: 'ollama' | 'gcp' | 'template' }
+  text: IntegrationStatus & {
+    provider: TextProvider
+    resolved: 'ollama' | 'gcp' | 'template'
+    /** The ordered providers that will be tried, primary first. */
+    chain: Array<'ollama' | 'gcp'>
+    /** The provider standing behind the primary, or `null` when there is none. */
+    backup: 'ollama' | 'gcp' | null
+  }
   assistant: IntegrationStatus & { provider: AssistantProvider }
 } {
   const gcpConfigured = config.gcp.configured
   const ollamaConfigured = config.ollama.configured
 
-  // Which implementation `textAdapter()` will actually bind. Reported rather
-  // than inferred, because "which model wrote this" is the first question an
-  // operator asks about a caption.
-  const resolved: 'ollama' | 'gcp' | 'template' =
-    config.textProvider === 'ollama'
-      ? ollamaConfigured
+  /*
+   * THE ORDERED PROVIDERS, mirroring `textChain()` exactly.
+   *
+   * Reported rather than inferred, because "which model wrote this" is the
+   * first question an operator asks about a caption — and with a chain the
+   * answer is no longer a single name. A named provider that is unreachable now
+   * degrades to the OTHER vendor before it degrades to the template writer, so
+   * reporting only the preference would describe a path that is not taken.
+   */
+  const preferred: 'ollama' | 'gcp' =
+    config.textProvider === 'gcp'
+      ? 'gcp'
+      : config.textProvider === 'ollama'
         ? 'ollama'
-        : 'template'
-      : config.textProvider === 'gcp'
-        ? gcpConfigured
-          ? 'gcp'
-          : 'template'
         : ollamaConfigured
           ? 'ollama'
-          : gcpConfigured
-            ? 'gcp'
-            : 'template'
+          : 'gcp'
+
+  const configuredFor = { ollama: ollamaConfigured, gcp: gcpConfigured }
+  const backupName: 'ollama' | 'gcp' = preferred === 'ollama' ? 'gcp' : 'ollama'
+
+  const chain: Array<'ollama' | 'gcp'> = []
+  if (configuredFor[preferred]) chain.push(preferred)
+  if (configuredFor[backupName]) chain.push(backupName)
+
+  // Derived from the same two booleans as `chain` rather than read off its
+  // first element, which would narrow the union and lose 'template'.
+  const resolved: 'ollama' | 'gcp' | 'template' = configuredFor[preferred]
+    ? preferred
+    : configuredFor[backupName]
+      ? backupName
+      : 'template'
+
+  // A backup exists only when the primary is also configured. When the
+  // preferred provider is absent the other one IS the primary, and naming it a
+  // backup would report a degradation that did not happen.
+  const backup: 'ollama' | 'gcp' | null =
+    configuredFor[preferred] && configuredFor[backupName] ? backupName : null
 
   const assistantProvider = config.assistant.provider
   const assistantConfigured =
@@ -544,6 +697,16 @@ export function integrationStatuses(): {
       ...statusFor(ollamaConfigured, 'OLLAMA_BASE_URL'),
       textModel: config.ollama.textModel,
       imageModel: config.ollama.imageModel,
+    },
+    embeddings: {
+      configured: config.embeddings.configured,
+      reason: config.embeddings.configured
+        ? `Semantic retrieval on — ${config.embeddings.model} (${config.embeddings.dimensions} dims) on ${config.ollama.baseUrl}`
+        : config.embeddings.enabled
+          ? 'OLLAMA_BASE_URL is not set, so nothing can embed — retrieval is lexical only'
+          : 'EMBEDDINGS_ENABLED is false — retrieval is lexical only',
+      model: config.embeddings.model,
+      dimensions: config.embeddings.dimensions,
     },
     mflux: {
       ...statusFor(config.mflux.configured, 'MFLUX_PYTHON'),
@@ -562,13 +725,25 @@ export function integrationStatuses(): {
     text: {
       provider: config.textProvider,
       resolved,
+      chain,
+      backup,
       configured: resolved !== 'template',
       reason:
-        resolved === 'ollama'
-          ? `Local model — ${config.ollama.textModel} on ${config.ollama.baseUrl}`
-          : resolved === 'gcp'
-            ? `Hosted model — ${config.gcp.textModel}`
-            : 'No text provider configured — running on the deterministic template writer',
+        resolved === 'template'
+          ? 'No text provider configured — running on the deterministic template writer'
+          : [
+              resolved === 'ollama'
+                ? `Local model — ${config.ollama.textModel} on ${config.ollama.baseUrl}`
+                : `Hosted model — ${config.gcp.textModel}`,
+              // The backup is stated whenever there is one, because a chain of
+              // two degrades differently from a chain of one and an operator
+              // reading this should not have to work that out.
+              backup === null
+                ? 'no second provider is configured, so a failure here falls straight to the template writer'
+                : backup === 'ollama'
+                  ? `backed by the local model ${config.ollama.textModel} if it fails`
+                  : `backed by the hosted model ${config.gcp.textModel} if it fails`,
+            ].join(', '),
     },
     assistant: {
       provider: assistantProvider,

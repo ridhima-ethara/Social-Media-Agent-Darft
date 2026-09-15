@@ -12,6 +12,7 @@
  * only the utterance drops every answer on the floor.
  */
 
+import { useState } from 'react'
 import { Check, Loader, Volume2, X } from 'lucide-react'
 import { RiskPill, timeAgo } from '../ui'
 import { AssistantCore } from './core'
@@ -92,6 +93,16 @@ export function Exchange({
   const running = turn.status === 'running' || turn.status === 'planning'
   const awaiting = turn.status === 'awaiting_confirmation'
   const done = steps.filter((s) => s.status === 'completed').length
+  const finished = turn.status === 'completed' || turn.status === 'failed' || turn.status === 'cancelled'
+  // The work is what the operator watches while it runs, and what they can
+  // check afterwards. Once the answer is in, it folds beneath the answer.
+  const [showWork, setShowWork] = useState(!finished)
+  // The operator's own row carries the question and nothing else while a
+  // conversation is live; the answer is the assistant's row that follows it.
+  const questionOnly = turn.speaker === 'operator' && !turn.narration && !turn.plan && steps.length === 0
+  // What the tools actually found, in their own words — the evidence the
+  // prose is a reading of. Shown first, because it is the part that is measured.
+  const evidence = [...new Set(steps.filter((s) => s.status === 'completed' && s.summary).map((s) => s.summary as string))]
 
   return (
     <li className="anim-fade-up space-y-2">
@@ -108,7 +119,8 @@ export function Exchange({
         </div>
       ) : null}
 
-      {/* The work, then the answer */}
+      {/* The work, then the answer — unless this row is only the question. */}
+      {questionOnly ? null : (
       <div className="flex gap-2">
         <AssistantCore
           state={running ? 'working' : awaiting ? 'attention' : 'dormant'}
@@ -117,7 +129,52 @@ export function Exchange({
         />
 
         <div className="min-w-0 flex-1 space-y-1.5">
-          {turn.plan ? (
+          {/* The answer, first, once there is one. */}
+          {turn.narration && finished ? (
+            <div className="group rounded-[10px] border border-line-strong bg-surface px-3 py-2.5">
+              {evidence.length > 0 ? (
+                <>
+                  <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">What the tools found</p>
+                  <ul className="mt-1 space-y-1">
+                    {evidence.map((line) => (
+                      <li key={line} className="flex gap-2 text-[12.5px] leading-relaxed text-ink">
+                        <span className="mt-[9px] h-[3px] w-[3px] shrink-0 rounded-full bg-accent" aria-hidden="true" />
+                        <span className="min-w-0">{line}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mono mt-2.5 text-[9px] uppercase tracking-[0.12em] text-ink-3">Ethara’s reading</p>
+                </>
+              ) : (
+                <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">Answer</p>
+              )}
+              <p className={`mt-1 whitespace-pre-wrap leading-relaxed ${evidence.length > 0 ? 'text-[12px] text-ink-2' : 'text-[12.5px] text-ink'}`}>{turn.narration}</p>
+              <div className="mt-1.5 flex items-center gap-3">
+                {steps.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowWork((v) => !v)}
+                    aria-expanded={showWork}
+                    className="mono text-[9.5px] uppercase tracking-[0.1em] text-ink-3 transition-colors hover:text-ink"
+                  >
+                    {showWork ? 'hide the work' : `how I got there · ${steps.length} step${steps.length === 1 ? '' : 's'}`}
+                  </button>
+                ) : null}
+                {onSpeak ? (
+                  <button
+                    type="button"
+                    onClick={() => onSpeak(turn.narration ?? '')}
+                    aria-label="Speak this"
+                    className="inline-flex items-center gap-1 text-[10px] text-ink-3 transition-colors hover:text-ink-2"
+                  >
+                    <Volume2 size={11} /> Speak
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {turn.plan && (showWork || !finished) ? (
             <div className="rounded-xl border border-line bg-surface-2 px-2.5 py-2">
               <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
                 <span className="min-w-0 flex-1 text-[11px] font-medium leading-snug text-ink">
@@ -154,7 +211,7 @@ export function Exchange({
             </div>
           ) : null}
 
-          {turn.narration ? (
+          {questionOnly || (turn.narration && finished) ? null : turn.narration ? (
             <div className="group">
               <p
                 className={`whitespace-pre-wrap text-[12px] leading-relaxed text-ink-2 ${
@@ -213,6 +270,7 @@ export function Exchange({
           )}
         </div>
       </div>
+      )}
     </li>
   )
 }

@@ -40,15 +40,17 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from core.models import DEFAULT_MFLUX_MODEL, DEFAULT_OLLAMA_IMAGE_MODEL, resolved
+
 # Transport binding is environment, not operator settings — the same split
 # `core/llm.py` makes. Which machine a model runs on is deployment; how the
 # agent behaves once it has one is configuration, and that lives in the registry.
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
-OLLAMA_IMAGE_MODEL = os.environ.get("OLLAMA_IMAGE_MODEL", "x/flux2-klein:9b")
+OLLAMA_IMAGE_MODEL = resolved("OLLAMA_IMAGE_MODEL", DEFAULT_OLLAMA_IMAGE_MODEL)
 OLLAMA_IMAGE_TIMEOUT_S = int(os.environ.get("OLLAMA_IMAGE_TIMEOUT_MS", "600000")) // 1000
 
 MFLUX_PYTHON = os.environ.get("MFLUX_PYTHON", "").strip()
-MFLUX_MODEL = os.environ.get("MFLUX_MODEL", "flux2-klein-4b")
+MFLUX_MODEL = resolved("MFLUX_MODEL", DEFAULT_MFLUX_MODEL)
 MFLUX_STEPS = int(os.environ.get("MFLUX_STEPS", "4"))
 MFLUX_SEED = int(os.environ.get("MFLUX_SEED", "42"))
 MFLUX_QUANTIZE = int(os.environ.get("MFLUX_QUANTIZE", "8"))

@@ -1,143 +1,28 @@
 /**
  * WEEKLY CALENDAR
  *
- * The grid renders only `primary` cards — the top five per platform. Everything
- * the agents placed but kept off the calendar sits below in More suggestions,
- * with its rank, promotable in one click.
+ * Capacity is the first thing you see: five pips per platform, filled or
+ * free, with the count waiting below the cut beside them. The week itself
+ * carries only drafted work, seven columns on a shallow arc, each card a
+ * title with a small creative under it. The ranked queue on the right is what
+ * this screen is actually for: every idea below the cut shows the rank it
+ * holds, and promoting one states exactly what it displaces before it does.
+ *
+ * The assistant lives in a popover under Ask Ethara, scoped to this week.
  */
 
-import { useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Copy, Trash2, ArrowUp, ArrowDown, Check } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useStore } from '../store'
-import { PageHeader } from '../components/layout'
 import { CalendarAssistant } from '../components/assistant/calendar-assistant'
-import { gradientPlaceholder } from '../lib/image-gen'
-import {
-  Badge,
-  Btn,
-  EmptyState,
-  PlatformIcon,
-  PLATFORM_LABEL,
-  fmt,
-} from '../components/ui'
-import type { Idea, Platform } from '../types'
+import { PlatformIcon, PLATFORM_LABEL, PLATFORM_TOKEN } from '../components/ui'
+import type { Idea, IdeaStatus, Platform } from '../types'
 
 const PLATFORMS: Platform[] = ['linkedin', 'instagram', 'x', 'facebook']
+const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'
+const DAY_MS = 24 * 60 * 60 * 1000
 
-/* ── Resizable suggestion columns ─────────────────────────────────────────────
-   Frontend-only state: a panel height is a viewing preference, not something the
-   server has an opinion about, so it lives in localStorage and no API changes
-   with it. */
-
-const SUGGESTION_HEIGHT_KEY = 'ethara.calendar.suggestionHeight'
-const CARD_DETAIL_KEY = 'ethara.calendar.cardDetail'
-
-/**
- * How much of a card is shown on the calendar itself.
- *
- * The cards clamped the title to two lines and the description to two, so
- * reading either in full meant opening the post. These levels trade the number
- * of cards visible at once against how much of each you can read — one control
- * for the whole grid, so the columns stay the same shape as each other.
- */
-export type CardDetail = 'compact' | 'standard' | 'detailed'
-
-const CARD_DETAIL_LABEL: Record<CardDetail, string> = {
-  compact: 'Compact',
-  standard: 'Standard',
-  detailed: 'Detailed',
-}
-
-const CARD_DETAIL_HINT: Record<CardDetail, string> = {
-  compact: 'Full title and the platform line — the most cards on screen',
-  standard: 'Full title, the creative, and a two-line summary',
-  detailed: 'Full title, longer summary, and the caption itself',
-}
-
-const CARD_DETAILS: CardDetail[] = ['compact', 'standard', 'detailed']
-
-function isCardDetail(value: string | null): value is CardDetail {
-  return value === 'compact' || value === 'standard' || value === 'detailed'
-}
-/** Below this the header and one row stop fitting; above it the page is unusable. */
-const MIN_PANEL_HEIGHT = 180
-const MAX_PANEL_HEIGHT = 900
-/** One keyboard press. Large enough to feel, small enough to aim with. */
-const HEIGHT_STEP = 32
-
-function clampHeight(value: number): number {
-  return Math.min(MAX_PANEL_HEIGHT, Math.max(MIN_PANEL_HEIGHT, Math.round(value)))
-}
-
-/**
- * The grip along the bottom of a suggestion column.
- *
- * Pointer events rather than mouse events, so a trackpad, a mouse and a touch
- * drag all work through one path. `setPointerCapture` keeps the drag alive when
- * the pointer leaves the handle, which is what makes a fast drag not stick.
- *
- * It is a real `separator` with a value, so the panel is resizable from the
- * keyboard as well — arrows nudge, Home and End go to the extremes.
- */
-function ResizeHandle({
-  height,
-  onResize,
-}: {
-  height: number
-  onResize: (next: number) => void
-}) {
-  const drag = useRef<{ startY: number; startHeight: number } | null>(null)
-
-  return (
-    <div
-      role="separator"
-      aria-orientation="horizontal"
-      aria-label="Resize the suggestion panels"
-      aria-valuenow={height}
-      aria-valuemin={MIN_PANEL_HEIGHT}
-      aria-valuemax={MAX_PANEL_HEIGHT}
-      tabIndex={0}
-      onPointerDown={(event) => {
-        drag.current = { startY: event.clientY, startHeight: height }
-        event.currentTarget.setPointerCapture(event.pointerId)
-      }}
-      onPointerMove={(event) => {
-        const state = drag.current
-        if (!state) return
-        onResize(state.startHeight + (event.clientY - state.startY))
-      }}
-      onPointerUp={(event) => {
-        drag.current = null
-        event.currentTarget.releasePointerCapture(event.pointerId)
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'ArrowDown') {
-          event.preventDefault()
-          onResize(height + HEIGHT_STEP)
-        }
-        if (event.key === 'ArrowUp') {
-          event.preventDefault()
-          onResize(height - HEIGHT_STEP)
-        }
-        if (event.key === 'Home') {
-          event.preventDefault()
-          onResize(MIN_PANEL_HEIGHT)
-        }
-        if (event.key === 'End') {
-          event.preventDefault()
-          onResize(MAX_PANEL_HEIGHT)
-        }
-      }}
-      title="Drag to resize every column · arrows to nudge"
-      className="group mt-1.5 flex shrink-0 cursor-ns-resize touch-none items-center justify-center rounded py-1 outline-none focus-visible:ring-1 focus-visible:ring-accent"
-    >
-      <span
-        className="h-0.5 w-8 rounded-full bg-line-strong transition-colors duration-[var(--dur-fast)] group-hover:bg-accent group-focus-visible:bg-accent"
-        aria-hidden="true"
-      />
-    </div>
-  )
-}
+/* ── Dates: local calendar days, never UTC midnight ─────────────────────── */
 
 function startOfWeek(date: Date): Date {
   const out = new Date(date)
@@ -145,36 +30,15 @@ function startOfWeek(date: Date): Date {
   out.setHours(0, 0, 0, 0)
   return out
 }
-
-function addDays(date: Date, days: number): Date {
+function addDays(date: Date, n: number): Date {
   const out = new Date(date)
-  out.setDate(out.getDate() + days)
+  out.setDate(out.getDate() + n)
   return out
 }
-
-/**
- * The calendar date of a moment, in the operator's own timezone.
- *
- * `toISOString()` gives the UTC date, and local midnight in Kolkata is the
- * previous evening in UTC — so every day column was labelled with the day
- * before, matched nothing the server had scheduled, and the week read as
- * empty while nine ideas sat on it. The column header says Monday 7th; the
- * string it compares against must say the same.
- */
 function isoDate(date: Date): string {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
-
-/** A `YYYY-MM-DD` as a local calendar day, never as UTC midnight. */
-function localDate(iso: string): Date {
-  const [y, m, d] = iso.slice(0, 10).split('-').map(Number)
-  return new Date(y, m - 1, d)
-}
-
-/** Sorts by clock time, so a day column reads top-to-bottom in posting order. */
+/** Sorts by clock time, so a day column reads top to bottom in posting order. */
 function timeValue(time: string): number {
   const match = /(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(time)
   if (!match) return 0
@@ -182,27 +46,51 @@ function timeValue(time: string): number {
   if (/PM/i.test(match[3] ?? '')) hour += 12
   return hour * 60 + Number(match[2])
 }
+/** "10:30 AM" → "10:30", as the design prints it. */
+function clock(time: string): string {
+  const match = /(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(time)
+  if (!match) return time
+  let hour = Number(match[1]) % 12
+  if (/PM/i.test(match[3] ?? '')) hour += 12
+  return `${String(hour).padStart(2, '0')}:${match[2]}`
+}
+
+/* ── Status → tone ──────────────────────────────────────────────────────── */
+
+const STATUS_TONE: Partial<Record<IdeaStatus, string>> = {
+  approved: 'var(--color-good)',
+  scheduled: 'var(--color-good)',
+  published: 'var(--color-good)',
+  drafted: 'var(--color-accent)',
+  in_review: 'var(--color-serious)',
+  pending_leadership: 'var(--color-serious)',
+}
+const STATUS_INK: Partial<Record<IdeaStatus, string>> = {
+  approved: 'var(--color-good-ink)',
+  scheduled: 'var(--color-good-ink)',
+  published: 'var(--color-good-ink)',
+  drafted: 'var(--color-accent-bright)',
+  in_review: 'var(--color-serious)',
+  pending_leadership: 'var(--color-serious)',
+}
+const STATUS_CHIP: Partial<Record<IdeaStatus, string>> = {
+  approved: 'APPROVED',
+  scheduled: 'SCHEDULED',
+  published: 'PUBLISHED',
+  drafted: 'DRAFTED',
+  in_review: 'IN REVIEW',
+  pending_leadership: 'WITH LEADERSHIP',
+}
 
 export function CalendarPage() {
   const ideas = useStore((s) => s.ideas)
-  const moveIdea = useStore((s) => s.moveIdea)
+  const cap = useStore((s) => s.settings.topPerPlatform)
   const openReview = useStore((s) => s.openReview)
 
   /*
-   * OPEN ON THE WEEK THAT ACTUALLY HOLDS THE CONTENT.
-   *
-   * This opened on the current week, always. The Calendar Agent plans forward
-   * from today and skips weekends, so a run on a Friday afternoon has one weekday
-   * left in this week and places the rest of the platform's slots in the next
-   * one. The operator then opened the calendar, saw a nearly empty grid, and
-   * concluded the agent had produced nothing — while five primaries sat one click
-   * to the right.
-   *
-   * So the initial week follows the work: the week containing the earliest
-   * primary that has not already passed. Ideas dated in the past do not pull the
-   * view backwards, and with nothing scheduled at all it stays on this week,
-   * where the empty state explains itself. Only the INITIAL value is derived —
-   * once the operator pages, that is their choice and it is left alone.
+   * Open on the week that actually holds the content: the one containing the
+   * earliest primary that has not passed. Once the operator pages, that is
+   * their choice and it is left alone.
    */
   const [weekOffset, setWeekOffset] = useState(() => {
     const today = startOfWeek(new Date()).getTime()
@@ -212,494 +100,566 @@ export function CalendarPage() {
       .filter((week) => week >= today)
       .sort((a, b) => a - b)
     const earliest = upcoming[0]
-    if (earliest === undefined) return 0
-    return Math.round((earliest - today) / (7 * 24 * 60 * 60 * 1000))
+    return earliest === undefined ? 0 : Math.round((earliest - today) / (7 * DAY_MS))
   })
-  const [dragging, setDragging] = useState<string | null>(null)
-  /**
-   * ONE height for every suggestion column.
-   *
-   * Deliberately shared rather than per-column: the four columns sit in a grid,
-   * so letting one grow on its own leaves the row ragged and the others short.
-   * Dragging any handle sets this, every column follows, and they stay aligned —
-   * which is what "resize one and the others are managed accordingly" has to
-   * mean in a grid. Persisted, because a size an operator chose should survive a
-   * reload.
-   */
-  const [cardDetail, setCardDetail] = useState<CardDetail>(() => {
-    const stored = window.localStorage.getItem(CARD_DETAIL_KEY)
-    return isCardDetail(stored) ? stored : 'standard'
-  })
-
-  const commitDetail = (next: CardDetail): void => {
-    setCardDetail(next)
-    window.localStorage.setItem(CARD_DETAIL_KEY, next)
-  }
-
-  const [panelHeight, setPanelHeight] = useState<number>(() => {
-    const stored = Number(window.localStorage.getItem(SUGGESTION_HEIGHT_KEY))
-    return Number.isFinite(stored) && stored > 0 ? clampHeight(stored) : 320
-  })
-
-  const commitHeight = (next: number): void => {
-    const clamped = clampHeight(next)
-    setPanelHeight(clamped)
-    window.localStorage.setItem(SUGGESTION_HEIGHT_KEY, String(clamped))
-  }
+  const [spotlight, setSpotlight] = useState<Platform | null>(null)
+  const [askOpen, setAskOpen] = useState(false)
+  const gridRef = useRef<HTMLDivElement | null>(null)
 
   const weekStart = useMemo(() => addDays(startOfWeek(new Date()), weekOffset * 7), [weekOffset])
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart])
   const todayIso = isoDate(new Date())
+  const weekIsos = useMemo(() => new Set(days.map(isoDate)), [days])
 
   /*
-   * THE CALENDAR CARRIES DRAFTED WORK. SUGGESTIONS CARRY IDEAS.
-   *
-   * A slot alone was enough to put a card on the grid, so an idea the Calendar
-   * Agent had merely placed — no caption written, status still `suggested` —
-   * appeared beside a finished post and looked equally ready. Twenty-one of
-   * twenty-nine cards on the grid were in that state.
-   *
-   * `calendar_slot` still decides placement, so promoting and demoting keep
-   * working exactly as before; the added condition is that the post must
-   * actually have been written. A `suggested` idea therefore waits in
-   * suggestions until the Content Agent drafts it, whichever slot it holds.
+   * The calendar carries drafted work; the queue carries ideas. A slot alone
+   * is not enough to put a card on the grid — the post must have been written.
    */
   const live = ideas.filter((i) => i.status !== 'rejected')
   const primary = live.filter((i) => i.calendar_slot === 'primary' && i.status !== 'suggested')
-  const suggestions = live.filter(
-    (i) => i.calendar_slot === 'suggestion' || i.status === 'suggested',
-  )
+  const queued = live.filter((i) => i.calendar_slot === 'suggestion' || i.status === 'suggested')
+  const weekPrimary = primary.filter((i) => weekIsos.has(i.scheduled_date))
 
-  const weekRows = useMemo(() => {
-    const counts = days.map((day) => {
-      const iso = isoDate(day)
-      return primary.filter((idea) => idea.scheduled_date === iso).length
-    })
-    return Math.max(1, ...counts) + 1
-  }, [days, primary])
+  const capacity = PLATFORMS.map((platform) => {
+    const placed = weekPrimary.filter((i) => i.platform === platform).length
+    const waiting = queued.filter((i) => i.platform === platform).length
+    return { platform, placed, free: Math.max(0, cap - placed), waiting }
+  })
+  const totalPlaced = weekPrimary.length
+  const totalFree = capacity.reduce((s, c) => s + c.free, 0)
 
-  const weekIdeas = primary.filter((idea) =>
-    days.some((day) => isoDate(day) === idea.scheduled_date),
-  )
+  useEffect(() => {
+    if (!askOpen) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setAskOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [askOpen])
+
+  const label = (d: Date): string => d.toLocaleDateString('en-GB', { day: 'numeric' })
+  const monthOf = (d: Date): string => d.toLocaleDateString('en-GB', { month: 'short' }).toUpperCase()
+  const weekLabel =
+    monthOf(weekStart) === monthOf(addDays(weekStart, 6))
+      ? `${label(weekStart)}–${label(addDays(weekStart, 6))} ${monthOf(weekStart)}`
+      : `${label(weekStart)} ${monthOf(weekStart)}–${label(addDays(weekStart, 6))} ${monthOf(addDays(weekStart, 6))}`
+
+  const mid = 3
 
   return (
-    <>
-      <PageHeader
-        title="Weekly Calendar"
-        subtitle="Drafted posts take a calendar slot. Ideas still waiting on a caption are ranked below."
-        agents={['calendar', 'caption', 'image', 'review']}
-        actions={
-          <>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => setWeekOffset(weekOffset - 1)}
-                aria-label="Previous week"
-                className="rounded-lg border border-line p-1.5 text-ink-3 transition-colors hover:text-ink"
-              >
-                <ChevronLeft size={15} />
-              </button>
-              <span className="tabular min-w-40 text-center text-[12px] text-ink-2">
-                {weekStart.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} –{' '}
-                {addDays(weekStart, 6).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
-              </span>
-              <button
-                type="button"
-                onClick={() => setWeekOffset(weekOffset + 1)}
-                aria-label="Next week"
-                className="rounded-lg border border-line p-1.5 text-ink-3 transition-colors hover:text-ink"
-              >
-                <ChevronRight size={15} />
-              </button>
-            </div>
+    <div className="-mx-6 -mt-5 -mb-5 flex min-h-[calc(100vh-56px)] flex-col">
+      {/* ── Command bar ─────────────────────────────────────────────────── */}
+      <header className="glass relative z-20 flex min-h-[58px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
+        <h1 className="whitespace-nowrap text-[17px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
+        <span className="mono inline-flex items-center gap-[7px] whitespace-nowrap rounded-md border border-line-strong px-[9px] py-1 text-[9.5px] tracking-[0.1em] text-ink-3">
+          TOP {cap} PER PLATFORM
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center overflow-hidden rounded-md border border-line-strong">
+            <button type="button" onClick={() => setWeekOffset(weekOffset - 1)} aria-label="Previous week" className="px-[9px] py-[5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink">
+              <ChevronLeft size={13} />
+            </button>
+            <span className="mono border-x border-line-strong px-3 py-[5px] text-[11px] text-ink">{weekLabel}</span>
+            <button type="button" onClick={() => setWeekOffset(weekOffset + 1)} aria-label="Next week" className="px-[9px] py-[5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink">
+              <ChevronRight size={13} />
+            </button>
+          </div>
 
-            {/* One control for every card, so the seven columns stay the same
-                shape as each other. */}
-            <div
-              role="group"
-              aria-label="How much of each card to show"
-              className="flex items-center rounded-lg border border-line p-0.5"
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setAskOpen((v) => !v)}
+              aria-expanded={askOpen}
+              aria-label="Ask Ethara"
+              className={`relative inline-flex items-center gap-2.5 rounded-full border bg-surface py-[5px] pl-1.5 pr-3 text-left transition-[border-color,transform,box-shadow] duration-[260ms] ease-[var(--ease-out-soft)] hover:-translate-y-px ${
+                askOpen ? 'border-accent' : 'border-line-strong hover:border-accent'
+              }`}
+              style={askOpen ? undefined : { boxShadow: 'none' }}
             >
-              {CARD_DETAILS.map((level) => (
-                <button
-                  key={level}
-                  type="button"
-                  onClick={() => commitDetail(level)}
-                  aria-pressed={cardDetail === level}
-                  title={CARD_DETAIL_HINT[level]}
-                  className={`rounded-md px-2 py-1 text-[11px] transition-colors duration-[var(--dur-fast)] ${
-                    cardDetail === level
-                      ? 'bg-surface-3 font-medium text-ink'
-                      : 'text-ink-3 hover:text-ink-2'
-                  }`}
-                >
-                  {CARD_DETAIL_LABEL[level]}
-                </button>
+              <AgentFace />
+              <span className="block leading-tight">
+                <span className="block text-[12.5px] font-semibold tracking-[-0.01em] text-ink">Ask Ethara</span>
+                <span className="mt-px block text-[10.5px] text-ink-3">Happy to move slots or redraft</span>
+              </span>
+              <span className="mono shrink-0 rounded-[4px] border border-line-strong px-[5px] text-[9.5px] text-ink-3">⌘K</span>
+            </button>
+
+            {askOpen ? (
+              <div
+                role="dialog"
+                aria-label="Ask Ethara about this week"
+                className="absolute right-0 top-[calc(100%+10px)] z-30 w-[420px] max-w-[calc(100vw-48px)] origin-top-right overflow-hidden rounded-[14px] border border-line-strong bg-surface shadow-2xl"
+                style={{ animation: `eth-pop 380ms ${EASE} both` }}
+              >
+                <div className="mono flex items-center gap-2 border-b border-line px-3.5 py-2 text-[9.5px] tracking-[0.1em] text-ink-3">
+                  SCOPED TO {weekLabel} · PLANS BEFORE IT RUNS
+                  <button type="button" onClick={() => setAskOpen(false)} aria-label="Close" className="ml-auto text-ink-3 transition-colors hover:text-ink">✕</button>
+                </div>
+                <div className="max-h-[520px] overflow-y-auto">
+                  <CalendarAssistant />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </header>
+
+      {/* ── Capacity band ───────────────────────────────────────────────── */}
+      <section aria-label="Slot capacity by platform" className="grid shrink-0 grid-cols-2 gap-px border-b border-line bg-line-strong md:grid-cols-4">
+        {capacity.map((c) => (
+          <button
+            key={c.platform}
+            type="button"
+            onPointerEnter={() => setSpotlight(c.platform)}
+            onPointerLeave={() => setSpotlight(null)}
+            onFocus={() => setSpotlight(c.platform)}
+            onBlur={() => setSpotlight(null)}
+            className="bg-surface px-3.5 py-[11px] text-left outline-none focus-visible:bg-surface-2"
+            title={`${PLATFORM_LABEL[c.platform]}: ${c.placed} of ${cap} slots taken this week`}
+          >
+            <div className="flex items-center gap-2">
+              <PlatformIcon platform={c.platform} size={12} />
+              <span className="text-[12px] font-semibold tracking-[-0.01em] text-ink">{PLATFORM_LABEL[c.platform]}</span>
+              <span className={`mono ml-auto text-[11px] ${c.free > 0 ? 'text-serious' : 'text-accent-bright'}`}>
+                {c.placed}/{cap}
+              </span>
+            </div>
+            <div className="mt-[9px] flex gap-[3px]" aria-hidden="true">
+              {Array.from({ length: cap }, (_, i) => (
+                <span
+                  key={i}
+                  className="h-1 flex-1 origin-left rounded-[2px]"
+                  style={{
+                    background: i < c.placed ? PLATFORM_TOKEN[c.platform] : 'var(--color-surface-3)',
+                    animation: `eth-seg 520ms cubic-bezier(0.16, 1, 0.3, 1) ${120 + i * 60}ms both`,
+                  }}
+                />
               ))}
             </div>
-          </>
-        }
-      />
+            <div className="mono mt-[7px] text-[9.5px] text-ink-3">
+              {c.free} slot{c.free === 1 ? '' : 's'} free · {c.waiting} queued below the cut
+            </div>
+          </button>
+        ))}
+      </section>
 
-      {/* Two columns on wide screens: the calendar on the left, the assistant as
-          an ordinary right-hand column. Both scroll with the page, so nothing
-          floats over the cards. Below `xl` the assistant stacks underneath. */}
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
-        <div className="min-w-0">
-          {weekIdeas.length === 0 ? (
-            <EmptyState
-              title="No scheduled content this week"
-              body="Nothing drafted for this week yet. Ideas waiting on a caption are listed below."
-              action={
-                <Btn variant="primary" onClick={() => useStore.getState().openBar('Run SocialAI')}>
-                  Ask Ethara to run discovery
-                </Btn>
-              }
-              className="mb-6"
-            />
-          ) : (
-            <section
-              className="mb-6 grid grid-cols-2 gap-x-2.5 gap-y-2 md:grid-cols-4 2xl:grid-cols-7"
-              style={{ gridAutoRows: 'auto' }}
+      {/* ── The week, and the queue ─────────────────────────────────────── */}
+      <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
+        <section
+          className="relative min-w-0 flex-1 overflow-hidden border-r border-line px-[18px] py-3.5"
+        >
+          <WeekGround />
+
+          <div className="relative z-10 mb-2.5 flex items-center gap-2.5">
+            <h2 className="text-[13.5px] font-semibold tracking-[-0.015em] text-ink">
+              {totalPlaced} slot{totalPlaced === 1 ? '' : 's'} placed
+            </h2>
+            <span className="mono text-[10px] text-ink-3">
+              {totalFree} of {cap * PLATFORMS.length} slots free · open a card to edit it or move its day
+            </span>
+          </div>
+
+          <div style={{ perspective: 1600, perspectiveOrigin: '50% 20%' }}>
+            <div
+              ref={gridRef}
+              className="relative z-10 grid grid-cols-2 items-start gap-[9px] md:grid-cols-4 xl:grid-cols-7"
+              style={{
+                transformStyle: 'preserve-3d',
+                /*
+                 * NO 3D ROTATION ON THE INTERACTIVE GRID.
+                 *
+                 * This carried `rotateY(tilt.y) rotateX(tilt.x)` under a
+                 * `perspective: 1600` parent — a mouse-driven parallax. It looked
+                 * good and broke clicking: a 3D-rotated element is hit-tested
+                 * against its TRANSFORMED geometry, so what a person sees and
+                 * what the browser considers clickable diverge, and the gap grows
+                 * with distance from `perspectiveOrigin`. Cards near the origin
+                 * opened; the rest silently missed. Worse, the tilt tracked the
+                 * cursor, so the hit area moved while it was being aimed at.
+                 *
+                 * The lift on a hovered card (`translateZ`) is kept — that is a
+                 * per-card z-translation, which does not displace hit-testing in
+                 * the plane. It is the ROTATION that has to go, and a decorative
+                 * parallax is not worth cards that cannot be clicked.
+                 *
+                 * AND THE CONTAINER MUST NOT OCCLUDE ITS OWN COLUMNS.
+                 *
+                 * The columns recede on a shallow arc, so every one except the
+                 * middle sits BEHIND this element's own z=0 plane under
+                 * `preserve-3d`. That put this div in front of them for hit
+                 * testing: `elementFromPoint` over Monday returned the grid, and
+                 * only Thursday — the one column at z=0 — could be clicked at
+                 * all. Taking the grid out of hit testing entirely hands every
+                 * event to the columns, which is where the handlers live.
+                 */
+                pointerEvents: 'none',
+                transition: `transform 900ms ${EASE}`,
+              }}
             >
-              {days.map((day) => {
+              {days.map((day, i) => {
                 const iso = isoDate(day)
                 const dayIdeas = primary
                   .filter((idea) => idea.scheduled_date === iso)
                   .sort((a, b) => timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
                 const isToday = iso === todayIso
-                const spare = weekRows - 1 - dayIdeas.length
-
+                const t = (i - mid) / mid
+                const z = -Math.round(t * t * 90)
                 return (
                   <div
                     key={iso}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={() => {
-                      if (dragging) void moveIdea(dragging, iso)
-                      setDragging(null)
-                    }}
-                    className="grid min-h-40"
-                    // Subgrid: every day's Nth card sits on the same row, so a
-                    // card growing in one column grows its whole row. Browsers
-                    // without subgrid fall back to an independent column.
-                    style={{ gridTemplateRows: 'subgrid', gridRow: `span ${weekRows}` }}
+                    className="flex min-w-0 flex-col gap-[7px]"
+                    style={
+                      {
+                        // The grid above is `pointer-events: none`, so the columns
+                        // take every event back.
+                        pointerEvents: 'auto',
+                        transformStyle: 'preserve-3d',
+                        '--from': `translate3d(0, 26px, ${z - 200}px)`,
+                        '--rest': `translate3d(0, 0, ${z}px)`,
+                        '--op': 1,
+                        animation: `eth-stage-in 760ms ${EASE} ${320 + i * 60}ms both`,
+                      } as CSSProperties
+                    }
                   >
-                    <header
-                      className={`flex items-baseline gap-1.5 px-1 pb-1 ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}
-                    >
-                      <span className="text-[11px] font-medium uppercase tracking-[0.08em]">
-                        {day.toLocaleDateString('en-GB', { weekday: 'short' })}
+                    <header className="flex items-baseline gap-1.5 px-0.5 pb-0.5">
+                      <span className={`mono text-[9.5px] tracking-[0.12em] ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}>
+                        {day.toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase()}
                       </span>
-                      <span className="tabular text-[11px]">{day.getDate()}</span>
+                      <span className={`mono text-[11px] ${isToday ? 'text-ink' : 'text-ink-3'}`}>{day.getDate()}</span>
+                      {isToday ? <span className="mono ml-auto text-[8.5px] tracking-[0.1em] text-accent-bright">TODAY</span> : null}
                     </header>
 
-                    {dayIdeas.map((idea, i) => (
-                      <IdeaCard
+                    {dayIdeas.map((idea) => (
+                      <SlotCard
                         key={idea.id}
                         idea={idea}
-                        index={i}
-                        detail={cardDetail}
-                        onDragStart={() => setDragging(idea.id)}
+                        dimmed={spotlight !== null && spotlight !== idea.platform}
+                        lifted={spotlight === idea.platform}
                         onOpen={() => openReview(idea.id)}
                       />
                     ))}
 
-                    {/* The rest of the column is a drop target: dashed and labelled
-                        when the day is empty, quiet otherwise, lit while dragging. */}
-                    {spare > 0 ? (
-                      <div
-                        className={`flex items-center justify-center rounded-xl border border-dashed px-2 py-6 text-center text-[10.5px] transition-colors ${
-                          dragging
-                            ? 'border-accent bg-accent/6 text-accent-bright'
-                            : dayIdeas.length === 0
-                              ? 'border-line text-ink-3'
-                              : 'border-transparent text-transparent'
-                        }`}
-                        style={{ gridRow: `span ${spare}` }}
-                      >
-                        Drop content here
-                      </div>
-                    ) : null}
+                    {/* A day with room left says so. It is a label, not a drop
+                        target — nothing on this grid is draggable. */}
+                    <div className="mono flex min-h-[84px] items-center justify-center rounded-[9px] border border-dashed border-line-strong text-[9px] tracking-[0.1em] text-ink-3">
+                      {dayIdeas.length === 0 ? 'NO SLOT TAKEN' : 'ROOM FOR MORE'}
+                    </div>
                   </div>
                 )
               })}
-            </section>
-          )}
+            </div>
+          </div>
+        </section>
 
-      {/* ── More suggestions ──────────────────────────────────────────────── */}
-          <section>
-            <header className="mb-3">
-              <h2 className="display text-lg">More suggestions</h2>
-              <p className="mt-0.5 text-[12px] text-ink-3">
-                Ideas the agents formed that have no caption yet, plus anything ranked below the
-                calendar cut. They move onto the calendar once the Content Agent drafts them. Drag the
-                grip under any column to resize all four.
-              </p>
-            </header>
-
-            {suggestions.length === 0 ? (
-              <EmptyState title="Nothing waiting" body="Every idea the agents formed is on the calendar." />
-            ) : (
-              <div className="grid gap-3 lg:grid-cols-2">
-                {PLATFORMS.map((platform) => {
-                  const rows = suggestions
-                    .filter((idea) => idea.platform === platform)
-                    .sort((a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99))
-
-                  return (
-                    <div
-                      key={platform}
-                      className="card flex flex-col overflow-hidden p-3"
-                      style={{ height: panelHeight }}
-                    >
-                      <header className="mb-2 flex shrink-0 items-center justify-between gap-2">
-                        <span className="flex items-center gap-1.5">
-                          <PlatformIcon platform={platform} size={13} />
-                          <span className="text-[12px] font-medium text-ink">{PLATFORM_LABEL[platform]}</span>
-                        </span>
-                        <span className="tabular text-[11px] text-ink-3">{rows.length}</span>
-                      </header>
-
-                      {/* Every row is here — the panel scrolls instead of hiding
-                          them behind a "show all", so making the panel taller is
-                          the only thing needed to read more. */}
-                      {rows.length === 0 ? (
-                        <p className="px-1 py-3 text-[11px] text-ink-3">
-                          Nothing in the queue for this platform.
-                        </p>
-                      ) : (
-                        <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-0.5">
-                          {rows.map((idea) => (
-                            <SuggestionRow key={idea.id} idea={idea} />
-                          ))}
-                        </ul>
-                      )}
-
-                      <ResizeHandle height={panelHeight} onResize={commitHeight} />
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </section>
-        </div>
-
-        <aside className="min-w-0">
-          <CalendarAssistant />
-        </aside>
+        <Queue queued={queued} capacity={capacity} weekPrimary={weekPrimary} cap={cap} />
       </div>
-    </>
+    </div>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   THE CARD
+   THE CARD — a title, with a small creative under it
    ═══════════════════════════════════════════════════════════════════════════ */
 
-const STATUS_TONE: Record<string, 'neutral' | 'accent' | 'good' | 'warn' | 'serious' | 'critical'> = {
-  suggested: 'neutral',
-  drafted: 'accent',
-  in_review: 'warn',
-  pending_leadership: 'serious',
-  approved: 'good',
-  scheduled: 'accent',
-  published: 'good',
-  rejected: 'critical',
-}
-
-const STATUS_LABEL: Record<string, string> = {
-  suggested: 'Suggested',
-  drafted: 'Drafted',
-  in_review: 'In review',
-  pending_leadership: 'With Leadership',
-  approved: 'Approved',
-  scheduled: 'Scheduled',
-  published: 'Published',
-  rejected: 'Rejected',
-}
-
-function IdeaCard({
+function SlotCard({
   idea,
-  index,
-  detail,
-  onDragStart,
+  dimmed,
+  lifted,
   onOpen,
 }: {
   idea: Idea
-  index: number
-  detail: CardDetail
-  onDragStart: () => void
+  dimmed: boolean
+  lifted: boolean
   onOpen: () => void
 }) {
-  const approveIdea = useStore((s) => s.approveIdea)
-  const duplicateIdea = useStore((s) => s.duplicateIdea)
-  const demoteIdea = useStore((s) => s.demoteIdea)
-  const deleteIdea = useStore((s) => s.deleteIdea)
+  const bar = STATUS_TONE[idea.status] ?? 'var(--color-line-strong)'
+  const ink = STATUS_INK[idea.status] ?? 'var(--color-ink-3)'
+  const chip = STATUS_CHIP[idea.status] ?? idea.status.toUpperCase()
+  const colour = PLATFORM_TOKEN[idea.platform]
 
-  const media = idea.media?.dataUri ?? gradientPlaceholder(idea.platform, idea.title)
-
+  /*
+   * OPENING A CARD THAT IS ALSO DRAGGABLE.
+   *
+   * `draggable` + `onClick` looks right and fails in practice: the browser starts
+   * a drag on a movement of one or two pixels, and a drag SUPPRESSES the click.
+   * On a trackpad that is most attempts, so the card simply did not open and
+   * there was nothing to debug — no error, no event.
+   *
+   * So the intent is measured rather than inferred. Pointer-down records where it
+   * began; pointer-up opens the card only if the pointer barely moved. A real
+   * drag moves further than the threshold and never opens anything.
+   */
+  /*
+   * OPENING A CARD: A PLAIN CLICK, AND NOTHING CLEVER.
+   *
+   * This went through three failed mechanisms, and the history matters because
+   * each one looked correct:
+   *
+   *   1. `draggable` + `onClick` — the browser starts a drag on a 1–2px movement
+   *      and a drag DISCARDS the click. Most trackpad attempts did nothing.
+   *   2. Pointer-down/up with a distance threshold — better, until you notice
+   *      that `draggable` also fires `pointercancel` when the drag begins. The
+   *      cancel handler cleared the press origin, so `pointerup` found nothing
+   *      and refused to open. That made it worse than (1).
+   *
+   * The lesson is that `draggable` and a reliable click on the SAME element are
+   * not compatible. Opening a post to edit it is the primary action; dragging to
+   * reschedule is a convenience. So the element is no longer draggable and the
+   * click is an ordinary one, which is the only mechanism here that has ever been
+   * reliable. Rescheduling stays available by asking Ethara to move a post.
+   */
   return (
     <article
-      draggable
-      onDragStart={onDragStart}
       onClick={onOpen}
-      className="group card card-hover anim-fade-up flex h-full cursor-pointer flex-col overflow-hidden"
-      style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
+      role="button"
+      tabIndex={0}
+      aria-label={`Open “${idea.title}” for editing`}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen()
+        }
+      }}
+      className="group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-[9px] border border-line-strong bg-surface py-2 pl-[11px] pr-[9px] transition-[border-color,transform,opacity,box-shadow] duration-[320ms] ease-[var(--ease-out-soft)] hover:-translate-y-0.5 hover:border-accent/60"
+      style={{
+        transformStyle: 'preserve-3d',
+        opacity: dimmed ? 0.28 : 1,
+        transform: lifted ? 'translateZ(18px)' : undefined,
+        boxShadow: lifted ? '0 18px 40px -18px rgba(0, 0, 0, 0.6)' : undefined,
+      }}
     >
-      {/* Compact keeps a thin strip of the creative so the platform look still
-          reads; standard shows the full creative; detailed gives the height to
-          the words, since that level exists for reading. */}
-      <div
-        className="relative shrink-0 overflow-hidden"
-        style={{ aspectRatio: detail === 'compact' ? '6 / 1' : detail === 'detailed' ? '4 / 1' : '1.91 / 1' }}
-      >
-        <img src={media} alt="" className="h-full w-full object-cover" />
-        <span className="absolute bottom-1 right-1 rounded-full bg-page/80 px-1.5 py-0.5 text-[9px] text-ink-3 backdrop-blur-sm">
-          {idea.media?.model ?? 'brand-svg'}
-        </span>
+      <span aria-hidden="true" className="absolute inset-y-0 left-0 w-0.5" style={{ background: bar }} />
+      <div className="flex items-center gap-1.5">
+        <PlatformIcon platform={idea.platform} size={11} />
+        <span className="mono text-[9.5px] text-ink-3">{clock(idea.scheduled_time)}</span>
+        {idea.is_new_trend ? <span className="mono text-[8.5px] tracking-[0.1em] text-magenta">NEW</span> : null}
+        <span className="mono ml-auto text-[9.5px]" style={{ color: ink }}>{idea.confidence}</span>
       </div>
-
-      <div className="flex flex-1 flex-col p-2.5">
-        <div className="flex flex-wrap items-center gap-1">
-          <Badge tone={STATUS_TONE[idea.status] ?? 'neutral'}>{STATUS_LABEL[idea.status] ?? idea.status}</Badge>
-          {idea.is_new_trend ? <Badge tone="magenta">New trend</Badge> : null}
-        </div>
-
-        {/* The full title, always. A card the operator cannot read without
-            opening is a card that fails at its one job. */}
-        <h4 className="mt-1.5 text-[12.5px] font-semibold leading-snug text-ink">{idea.title}</h4>
-
-        {detail !== 'compact' && idea.description ? (
-          <p
-            className={`mt-1 text-[10.5px] leading-relaxed text-ink-3 ${
-              detail === 'detailed' ? 'line-clamp-4' : 'line-clamp-2'
-            }`}
-          >
-            {idea.description}
-          </p>
-        ) : null}
-
-        {detail === 'detailed' ? (
-          idea.draft?.body ? (
-            <p className="mt-1.5 line-clamp-6 whitespace-pre-wrap border-l-2 border-line pl-2 text-[10.5px] leading-relaxed text-ink-2">
-              {idea.draft.body}
-            </p>
-          ) : (
-            <p className="mt-1.5 border-l-2 border-dashed border-line pl-2 text-[10.5px] italic leading-relaxed text-ink-3">
-              No caption written yet.
-            </p>
-          )
-        ) : null}
-
-        {/* Pinned to the bottom so the meta line sits at the same height on
-            every card in the row, whatever the title above it took. */}
-        <div className="mt-auto pt-2">
-          {detail !== 'compact' ? (
-            <div className="mb-1.5 flex flex-wrap items-center gap-1">
-              {idea.draft ? <Badge tone="good">Caption</Badge> : null}
-              {idea.media ? <Badge tone="accent">Image</Badge> : null}
-            </div>
-          ) : null}
-
-          <div className="flex items-center gap-1.5 border-t border-line pt-1.5 text-[10.5px] text-ink-3">
-            <PlatformIcon platform={idea.platform} size={11} />
-            <span className="truncate">{PLATFORM_LABEL[idea.platform]}</span>
-            <span className="tabular whitespace-nowrap">{idea.scheduled_time}</span>
-            <span className="tabular ml-auto text-ink-2">{idea.confidence}%</span>
-          </div>
-
-          <div
-            className="mt-1.5 flex items-center gap-1 opacity-0 transition-opacity duration-[var(--dur-fast)] focus-within:opacity-100 group-hover:opacity-100"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <IconAction label="Approve" onClick={() => void approveIdea(idea.id)}>
-              <Check size={12} />
-            </IconAction>
-            <IconAction label="Duplicate" onClick={() => duplicateIdea(idea.id)}>
-              <Copy size={12} />
-            </IconAction>
-            <IconAction label="Demote to suggestions" onClick={() => void demoteIdea(idea.id)}>
-              <ArrowDown size={12} />
-            </IconAction>
-            <IconAction label="Withdraw" danger onClick={() => void deleteIdea(idea.id)}>
-              <Trash2 size={12} />
-            </IconAction>
-          </div>
-        </div>
+      <div className="mt-1.5 text-[11.5px] font-semibold leading-snug text-ink">{idea.title}</div>
+      <div
+        className="relative mt-2 h-[54px] overflow-hidden rounded-md"
+        style={{
+          background: idea.media?.dataUri ? undefined : `linear-gradient(135deg, var(--color-surface-3) 0%, ${colour} 100%)`,
+          boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 6%, transparent)',
+        }}
+      >
+        {idea.media?.dataUri ? (
+          <img
+            src={idea.media.dataUri}
+            alt=""
+            /*
+             * NOT DRAGGABLE, AND NOT A POINTER TARGET.
+             *
+             * An `<img>` is natively draggable. Pressing on one starts an image
+             * drag, so `pointerup` never reached the card and the post did not
+             * open — which is why only the cards a person happened to click by
+             * the TEXT appeared to work. The preview is decoration; the card owns
+             * the interaction.
+             */
+            draggable={false}
+            className="pointer-events-none h-full w-full object-cover"
+          />
+        ) : (
+          <>
+            <span aria-hidden="true" className="absolute inset-0" style={{ background: 'radial-gradient(120% 90% at 100% 0%, rgba(255, 255, 255, 0.18), transparent 60%)' }} />
+            <span className="mono absolute bottom-[5px] left-[7px] text-[7.5px] tracking-[0.12em] text-white/85">
+              {idea.media?.model ? idea.media.model.toUpperCase() : 'ETHARA · NO CREATIVE YET'}
+            </span>
+          </>
+        )}
+        <span
+          className="mono absolute right-1.5 top-[5px] rounded-[3px] px-[5px] py-px text-[8px] tracking-[0.08em]"
+          style={{ color: ink, background: 'color-mix(in srgb, var(--color-page) 55%, transparent)' }}
+        >
+          {chip}
+        </span>
       </div>
     </article>
   )
 }
 
-function IconAction({
-  label,
-  onClick,
-  danger = false,
-  children,
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE QUEUE — every idea below the cut, with the rank it holds
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function Queue({
+  queued,
+  capacity,
+  weekPrimary,
+  cap,
 }: {
-  label: string
-  onClick: () => void
-  danger?: boolean
-  children: React.ReactNode
+  queued: Idea[]
+  capacity: Array<{ platform: Platform; placed: number; free: number; waiting: number }>
+  weekPrimary: Idea[]
+  cap: number
 }) {
+  const promoteIdea = useStore((s) => s.promoteIdea)
+  const deleteIdea = useStore((s) => s.deleteIdea)
+  const openReview = useStore((s) => s.openReview)
+  const [armed, setArmed] = useState<string | null>(null)
+
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      onClick={onClick}
-      className={`rounded-md border border-line p-1 transition-colors ${
-        danger ? 'text-ink-3 hover:border-critical/50 hover:text-critical-ink' : 'text-ink-3 hover:border-accent hover:text-accent-bright'
-      }`}
-    >
-      {children}
-    </button>
+    <section className="flex w-full shrink-0 flex-col bg-surface-2 xl:sticky xl:top-0 xl:h-[calc(100vh-56px)] xl:w-[400px]" aria-label="Ranked queue">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {queued.length === 0 ? (
+          <div className="px-4 py-8">
+            <p className="text-[13px] font-medium text-ink">Nothing below the cut</p>
+            <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">Every idea the agents formed is on the calendar. Run discovery and Dora will rank more.</p>
+          </div>
+        ) : null}
+        {capacity.map((c) => {
+          const rows = queued.filter((i) => i.platform === c.platform).sort((a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99))
+          if (rows.length === 0) return null
+          // The weakest placed post on this platform is the one a promotion displaces.
+          const placed = weekPrimary.filter((i) => i.platform === c.platform)
+          const weakest = placed.length >= cap ? placed.reduce((lo, i) => (i.confidence < lo.confidence ? i : lo)) : null
+          return (
+            <div key={c.platform}>
+              <div className="sticky top-0 z-[2] flex items-center gap-2 border-y border-line bg-surface-2 px-3.5 py-[9px]">
+                <PlatformIcon platform={c.platform} size={12} />
+                <span className="text-[12px] font-semibold tracking-[-0.01em] text-ink">{PLATFORM_LABEL[c.platform]}</span>
+                <span className="mono text-[9.5px] text-ink-3">{rows.length} waiting</span>
+                <span className={`mono ml-auto text-[9.5px] tracking-[0.08em] ${c.free > 0 ? 'text-serious' : 'text-ink-3'}`}>
+                  {c.free > 0 ? `${c.free} SLOT${c.free === 1 ? '' : 'S'} FREE` : 'FULL'}
+                </span>
+              </div>
+              {rows.map((idea, i) => {
+                const isArmed = armed === idea.id
+                return (
+                  <article
+                    key={idea.id}
+                    className="border-t border-line px-3.5 py-2.5 transition-colors duration-200 hover:bg-surface-3"
+                    style={{ animation: `eth-row-stream 200ms ${EASE} ${i * 40}ms both` }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="mono w-[18px] shrink-0 text-[10px] text-ink-3">#{idea.platform_rank ?? '–'}</span>
+                      <PlatformIcon platform={idea.platform} size={11} />
+                      <button type="button" onClick={() => openReview(idea.id)} className="min-w-0 flex-1 text-left text-[11.5px] font-medium leading-snug text-ink hover:text-accent-bright">
+                        {idea.title}
+                      </button>
+                      <span className="mono text-[10px] text-ink-3">{idea.confidence}%</span>
+                    </div>
+
+                    {isArmed ? (
+                      <div className={`mt-2 border-l pl-[9px] ${c.free > 0 ? 'border-good/60' : 'border-serious/60'}`} style={{ animation: `eth-row-stream 260ms ${EASE} both` }}>
+                        {c.free > 0 ? (
+                          <>
+                            <div className="mono text-[9px] tracking-[0.12em] text-good-ink">A SLOT IS FREE</div>
+                            <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">Takes the first open slot on {PLATFORM_LABEL[c.platform]}. Nothing is displaced.</div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="mono text-[9px] tracking-[0.12em] text-serious">PROMOTING THIS DISPLACES</div>
+                            <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">
+                              #{cap} <strong className="font-semibold">“{weakest?.title ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
+                            </div>
+                          </>
+                        )}
+                        {idea.status === 'suggested' ? (
+                          <div className="mono mt-1 text-[9.5px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    <div className="mt-[9px] flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!isArmed) {
+                            setArmed(idea.id)
+                            return
+                          }
+                          setArmed(null)
+                          void promoteIdea(idea.id)
+                        }}
+                        className={`rounded-[5px] border px-2.5 py-1 text-[11px] font-semibold transition-colors duration-[220ms] ${
+                          isArmed
+                            ? 'border-accent bg-accent text-on-accent hover:bg-accent-bright'
+                            : 'border-hud-strong bg-accent/12 text-accent-bright hover:border-accent'
+                        }`}
+                      >
+                        {isArmed ? 'Confirm promotion' : 'Promote'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isArmed) {
+                            setArmed(null)
+                            return
+                          }
+                          void deleteIdea(idea.id)
+                        }}
+                        className="rounded-[5px] border border-line-strong px-2.5 py-1 text-[11px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-critical/50 hover:text-critical-ink"
+                      >
+                        {isArmed ? 'Cancel' : 'Withdraw'}
+                      </button>
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 
-function SuggestionRow({ idea }: { idea: Idea }) {
-  const promoteIdea = useStore((s) => s.promoteIdea)
-  const openReview = useStore((s) => s.openReview)
+/* ═══════════════════════════════════════════════════════════════════════════
+   GROUND AND FACE
+   ═══════════════════════════════════════════════════════════════════════════ */
 
+/** A floor receding under the week, and a pool of light at its foot. Still. */
+function WeekGround() {
   return (
-    <li className="flex items-start gap-2 rounded-lg border border-line px-2 py-2 transition-colors hover:border-line-strong hover:bg-surface-2">
-      <span className="tabular mt-0.5 shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3">
-        #{idea.platform_rank}
-      </span>
+    <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
+      <div className="absolute inset-x-0 -bottom-10 h-[62%]" style={{ perspective: 700, perspectiveOrigin: '50% 0%' }}>
+        <div
+          className="absolute -bottom-1/2 -left-[30%] -right-[30%] top-0 origin-top"
+          style={{
+            transform: 'rotateX(74deg)',
+            backgroundImage: 'linear-gradient(to right, var(--color-hud) 1px, transparent 1px), linear-gradient(to bottom, var(--color-hud) 1px, transparent 1px)',
+            backgroundSize: '64px 64px',
+            maskImage: 'linear-gradient(to bottom, transparent 0%, #000 42%, transparent 96%)',
+            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, #000 42%, transparent 96%)',
+          }}
+        />
+      </div>
+      <span className="absolute -bottom-[120px] left-1/2 h-[360px] w-[900px] -translate-x-1/2 rounded-full" style={{ background: 'radial-gradient(circle, var(--color-hud), transparent 66%)' }} />
+    </div>
+  )
+}
 
-      <img
-        src={idea.media?.dataUri ?? gradientPlaceholder(idea.platform, idea.title)}
-        alt=""
-        className="mt-0.5 h-9 w-14 shrink-0 rounded object-cover"
-      />
-
-      {/* The title wraps instead of truncating, and the description comes with
-          it. Reading a suggestion should not require opening it — that was the
-          only way to see what one actually said. */}
-      <button type="button" onClick={() => openReview(idea.id)} className="min-w-0 flex-1 text-left">
-        <span className="line-clamp-2 block text-[11.5px] font-medium leading-snug text-ink">
-          {idea.title}
-        </span>
-        {idea.description ? (
-          <span className="mt-0.5 line-clamp-2 block text-[10.5px] leading-relaxed text-ink-3">
-            {idea.description}
-          </span>
-        ) : null}
-        <span className="tabular mt-1 block text-[10px] text-ink-3">
-          {localDate(idea.scheduled_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ·{' '}
-          {idea.scheduled_time} · {fmt(idea.confidence)}%
-        </span>
-      </button>
-
-      <button
-        type="button"
-        onClick={() => void promoteIdea(idea.id)}
-        title="Promote to calendar"
-        aria-label={`Promote ${idea.title} to the calendar`}
-        className="shrink-0 rounded-md border border-line p-1 text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-      >
-        <ArrowUp size={12} />
-      </button>
-    </li>
+/** The assistant's face on the Ask button: it bobs, its eyes blink, its antenna pulses. */
+function AgentFace() {
+  return (
+    <span aria-hidden="true" className="relative inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center">
+      <span className="absolute -inset-[3px] rounded-full" style={{ background: 'radial-gradient(circle, var(--color-hud-strong), transparent 70%)', animation: 'eth-agent-glow 4.5s cubic-bezier(0.37, 0, 0.63, 1) infinite' }} />
+      <svg viewBox="0 0 40 40" width={34} height={34} className="relative" style={{ animation: 'eth-agent-bob 3.6s cubic-bezier(0.37, 0, 0.63, 1) infinite' }}>
+        <defs>
+          <linearGradient id="eth-face" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="var(--color-surface-3)" />
+            <stop offset="100%" stopColor="var(--color-surface)" />
+          </linearGradient>
+        </defs>
+        <line x1={20} y1={7} x2={20} y2={3.5} stroke="var(--color-accent)" strokeWidth={1.6} strokeLinecap="round" />
+        <circle cx={20} cy={2.6} r={1.9} fill="var(--color-magenta)">
+          <animate attributeName="opacity" values="1;0.35;1" dur="2.4s" repeatCount="indefinite" />
+        </circle>
+        <rect x={6} y={8} width={28} height={26} rx={11} fill="url(#eth-face)" stroke="var(--color-accent)" strokeWidth={1.2} />
+        <rect x={9.5} y={12} width={21} height={16} rx={8} fill="var(--color-page)" />
+        <g style={{ transformOrigin: '14.5px 19px', animation: 'eth-agent-blink 5.2s linear infinite' }}>
+          <ellipse cx={14.5} cy={19} rx={2} ry={2.6} fill="var(--color-accent-bright)" />
+          <circle cx={15.1} cy={18.1} r={0.7} fill="var(--color-ink)" />
+        </g>
+        <g style={{ transformOrigin: '25.5px 19px', animation: 'eth-agent-blink 5.2s linear 0.08s infinite' }}>
+          <ellipse cx={25.5} cy={19} rx={2} ry={2.6} fill="var(--color-accent-bright)" />
+          <circle cx={26.1} cy={18.1} r={0.7} fill="var(--color-ink)" />
+        </g>
+        <path d="M15.5 24.2 Q20 27.4 24.5 24.2" fill="none" stroke="var(--color-accent-bright)" strokeWidth={1.5} strokeLinecap="round" />
+        <circle cx={11.2} cy={23} r={1.3} fill="var(--color-magenta)" opacity={0.7} />
+        <circle cx={28.8} cy={23} r={1.3} fill="var(--color-magenta)" opacity={0.7} />
+      </svg>
+    </span>
   )
 }

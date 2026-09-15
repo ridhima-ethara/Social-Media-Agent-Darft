@@ -18,7 +18,7 @@ import { similarity } from '../../../../shared/brand-voice'
 // Aliased: `IdeaRow` below is the shape a model returns for a batch of ideas,
 // which is a different thing from a stored row and must not shadow it.
 import { listIdeas, listPosts, updateIdea, type IdeaRow as StoredIdea } from '../../db/repo'
-import { textAdapter, textModelId } from '../../integrations'
+import { textAdapter, textChain, textModelIdFor, withChainFallback } from '../../integrations'
 import {
   addDays,
   clamp,
@@ -142,17 +142,17 @@ async function phraseIdeas(
   opts: { enabled: boolean; titleMaxWords: number },
 ): Promise<PhrasingOutcome> {
   const rejections: string[] = []
-  const writer = textAdapter()
+  const chain = textChain()
 
   if (!opts.enabled) {
     return { applied: 0, source: 'fixture', model: 'ethara-template-writer', rejections }
   }
-  if (!writer.isConfigured()) {
+  if (chain.length === 0) {
     return {
       applied: 0,
       source: 'fixture',
       model: 'ethara-template-writer',
-      fallbackReason: writer.unavailableReason(),
+      fallbackReason: textAdapter().unavailableReason(),
       rejections,
     }
   }
@@ -176,9 +176,12 @@ async function phraseIdeas(
     )
     .join('\n\n')
 
-  let raw: string
-  try {
-    raw = await writer.run({
+  // Every configured provider in turn, then the template writer. An empty
+  // string is the sentinel for "no provider answered": the chain's fixture
+  // cannot return this function's structured result, so the branch is here.
+  const outcome = await withChainFallback(
+    chain,
+    {
       systemInstruction: [
         'You phrase content-calendar ideas for a frontier AI research lab.',
         'Rewrite each title as a specific, declarative headline — no colons, no questions, no buzzwords, no emoji.',
@@ -189,17 +192,22 @@ async function phraseIdeas(
       prompt: brief,
       temperature: 0.3,
       maxOutputTokens: 2048,
-    })
-  } catch (error) {
+    },
+    () => '',
+  )
+
+  if (outcome.source === 'fixture') {
     return {
       applied: 0,
       source: 'fixture',
       model: 'ethara-template-writer',
       fallbackReason:
-        error instanceof Error ? error.message : 'the text model failed to phrase the ideas',
+        outcome.fallbackReason ?? 'the text model failed to phrase the ideas',
       rejections,
     }
   }
+
+  const raw = outcome.value
 
   const rows = parseIdeaRows(raw)
   if (rows === null) {
@@ -251,7 +259,7 @@ async function phraseIdeas(
   return {
     applied,
     source: applied > 0 ? 'live' : 'fixture',
-    model: applied > 0 ? textModelId() : 'ethara-template-writer',
+    model: applied > 0 ? textModelIdFor(outcome.servedBy) : 'ethara-template-writer',
     rejections,
   }
 }
@@ -474,19 +482,32 @@ registerSkill<PipelinePayload>('calendar.slot.optimize', (payload, ctx) => {
   // Never before today: a slot in a day that has gone cannot be published.
   const weekStart = planningStart()
 
-  // Deterministic spreading: day offsets walk the week, so two runs of the same
-  // corpus place the same ideas on the same days.
+  /*
+   * HOW FAR AHEAD THE CALENDAR REACHES.
+   *
+   * This was `index % 7` — a hardcoded week, which is a tunable the operator
+   * could not see (rule 2) and the reason the calendar could only ever be
+   * weekly. With `avoidWeekends` on, a 7-day horizon offers just five postable
+   * days, so every idea beyond the fifth was pushed into the same handful of
+   * slots and the cadence limits then had to fight over them.
+   */
+  const horizonDays = Math.max(1, ctx.num('planningHorizonDays', 14))
+
+  // Deterministic spreading: day offsets walk the horizon, so two runs of the
+  // same corpus place the same ideas on the same days.
   const taken = new Map<string, number[]>()
 
   ideas.forEach((idea, index) => {
     const rand = seededFor(idea.title, 4127)
-    let dayOffset = index % 7
+    let dayOffset = index % horizonDays
     let date = isoDate(addDays(weekStart, dayOffset))
 
     if (avoidWeekends) {
       let guard = 0
-      while (isWeekend(date) && guard < 7) {
-        dayOffset = (dayOffset + 1) % 7
+      // Guarded by the horizon, not by 7: on a fortnight there are more days to
+      // walk before giving up, and a guard of 7 could return a Saturday.
+      while (isWeekend(date) && guard < horizonDays) {
+        dayOffset = (dayOffset + 1) % horizonDays
         date = isoDate(addDays(weekStart, dayOffset))
         guard += 1
       }
@@ -549,6 +570,9 @@ registerSkill<PipelinePayload>('calendar.cadence.balance', (payload, ctx) => {
   const maxPerDay = ctx.num('maxPerDay', 3)
   const maxPerPlatformPerDay = ctx.num('maxPerPlatformPerDay', 1)
   const targetPerWeek = ctx.num('targetPerWeek', 3)
+  // Declared on this skill too, because a skill is pure with respect to its own
+  // config — reading the placement skill's knob would couple the two.
+  const avoidWeekends = ctx.bool('avoidWeekends', true)
 
   const ideas = payload.ideas ?? []
   if (ideas.length === 0) return {}
@@ -575,7 +599,23 @@ registerSkill<PipelinePayload>('calendar.cadence.balance', (payload, ctx) => {
       }
 
       if (guard >= 14) break
-      const next = isoDate(addDays(new Date(`${idea.scheduledDate}T12:00:00Z`), 1))
+      /*
+       * SKIP WEEKENDS ON THE WAY PAST.
+       *
+       * `calendar.slot.optimize` avoids weekends, and this then pushed straight
+       * through them: a post displaced from a full Friday landed on Saturday,
+       * silently violating the `avoidWeekends` knob that had just been honoured.
+       * The rebalancer has to respect the same rule it is rebalancing under, or
+       * the knob only holds until the first collision.
+       */
+      let next = isoDate(addDays(new Date(`${idea.scheduledDate}T12:00:00Z`), 1))
+      if (avoidWeekends) {
+        let hop = 0
+        while (isWeekend(next) && hop < 7) {
+          next = isoDate(addDays(new Date(`${next}T12:00:00Z`), 1))
+          hop += 1
+        }
+      }
       idea.scheduledDate = next
       idea.slotReasons = [
         ...idea.slotReasons,

@@ -14,16 +14,28 @@
  * complete.
  */
 
-import type { CalendarSlot, Platform, ValidationVerdict } from '../../../shared/agent-contract'
+import type {
+  AgentId,
+  CalendarSlot,
+  Platform,
+  ResolvedConfig,
+  ValidationVerdict,
+} from '../../../shared/agent-contract'
 import {
   createKeyword,
   currentWorkspaceId,
+  finishAgentRun,
   finishPipelineRun,
   insertKeywordSignal,
+  insertSkillRun,
   persistHashtagCandidates,
   persistIdeas,
+  persistScrapedItems,
   replaceTopHashtagSet,
+  startAgentRun,
   startPipelineRun,
+  upsertDraft,
+  upsertMediaAsset,
 } from '../db/repo'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -55,6 +67,13 @@ function url(row: Row, key: string): string | null {
   return typeof value === 'string' && value.trim() ? value : null
 }
 
+/** A nested object, or an empty one. Keeps `str()`/`num()` usable on it. */
+function asRow(value: unknown): Row {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Row)
+    : {}
+}
+
 /**
  * Platforms are constrained by a CHECK on the table. An unrecognised one is
  * routed to LinkedIn rather than thrown, because losing an idea over a typo in
@@ -81,6 +100,14 @@ export interface PersistedRun {
   topSet: number
   ideasCreated: number
   ideasUpdated: number
+  /** Scraped pages written. Content Intelligence renders from these. */
+  captures: number
+  /** Captions written. A calendar card without one has no post behind it. */
+  drafts: number
+  /** Creatives written. */
+  media: number
+  /** Per-agent timing rows. Agent Activity renders from these. */
+  agentRuns: number
   /** Named so an operator can see what the run did not carry, not just what it did. */
   skipped: string[]
 }
@@ -223,6 +250,174 @@ export async function persistAgentRun(output: Record<string, unknown>): Promise<
     skipped.push('No ideas were written: the run produced no placed ideas to write.')
   }
 
+  /* ── The captured corpus ────────────────────────────────────────────────── */
+  /*
+   * The Python tier's captures used to stop at the process boundary: the
+   * Scraping Agent reported "captured 16 posts" and `scraped_items` stayed
+   * empty, so Content Intelligence showed nothing after a run that had just
+   * read sixteen pages. `artefacts()` now carries them; this writes them.
+   *
+   * `metricsAvailable` is false and the count columns stay at zero because this
+   * tier captures through crawl4ai only — it has no Apify path — and a
+   * search-indexed page states no reaction count. Zero here means "not
+   * applicable", never "performed badly", exactly as on the Node side.
+   */
+  const posts = rows(output.posts)
+  let captures = 0
+  if (posts.length > 0) {
+    const items = posts.map((row) => {
+      const body = str(row, 'text')
+      const keyword = str(row, 'keyword')
+      return {
+        keywordId: keywordIdByTerm.get(keyword.toLowerCase()) ?? null,
+        externalId: str(row, 'external_id') || str(row, 'url'),
+        // The Python capture carries one body; the first line is its title.
+        title: (body.split('\n').find((l) => l.trim() !== '') ?? keyword)
+          .replace(/^#+\s*/, '')
+          .slice(0, 300),
+        snippet: body.slice(0, 4000),
+        url: str(row, 'url'),
+        sourceName: str(row, 'source_name', 'crawl4ai'),
+        sourceType: 'web',
+        authorName: str(row, 'author_name'),
+        authorHeadline: str(row, 'author_headline'),
+        authorFollowers: num(row, 'author_followers'),
+        hashtags: Array.isArray(row.hashtags) ? (row.hashtags as string[]) : [],
+        engagement: 0,
+        reactions: num(row, 'reactions'),
+        comments: num(row, 'comments'),
+        reposts: num(row, 'reposts'),
+        relevance: 0,
+        credibility: 'Medium',
+        freshness: 0,
+        isDuplicate: false,
+        validation: 'pending' as ValidationVerdict,
+        verdictReason: '',
+        captureSource: 'live' as const,
+        platform: PLATFORMS.find((p) => p === row.platform) ?? null,
+        metricsAvailable: false,
+        brandRelevance: 0,
+        postedAt: str(row, 'posted_at', now),
+      }
+    })
+    const idByExternal = await persistScrapedItems(workspaceId, run.id, items)
+    captures = idByExternal.size
+  } else {
+    skipped.push('No captures were written: the run reported no posts.')
+  }
+
+  /* ── The caption and the creative ───────────────────────────────────────── */
+  /*
+   * The Content Agent spends roughly 90 seconds writing and the Image Agent 220
+   * seconds painting. Both used to be discarded here, so the calendar card the
+   * run produced had neither a caption nor an image — five minutes of the run's
+   * ten spent on work nothing could see.
+   *
+   * Attached to the primary idea, which is the one the create stage worked on.
+   */
+  /*
+   * `written` carries only `{ id, title, created }`, so the platform and slot
+   * come from the source rows, which `persistIdeas` maps in order.
+   */
+  const primaryIndex = Math.max(
+    0,
+    ideas.findIndex((row) => row.calendar_slot === 'primary'),
+  )
+  const primary = written[primaryIndex]
+  const primaryPlatform = platform(ideas[primaryIndex]?.platform)
+  const caption = asRow(output.caption)
+  const asset = asRow(output.asset)
+  let drafts = 0
+  let media = 0
+
+  if (primary !== undefined && str(caption, 'body') !== '') {
+    await upsertDraft({
+      ideaId: primary.id,
+      platform: primaryPlatform,
+      body: str(caption, 'body'),
+      generatedBy: 'backend/agents/content_agent',
+      model: str(caption, 'model', 'backend/agents/content_agent'),
+      source: 'live',
+    })
+    drafts = 1
+  } else if (primary !== undefined) {
+    skipped.push('No caption was written: the run carried no caption body.')
+  }
+
+  if (primary !== undefined && str(asset, 'data_uri') !== '') {
+    await upsertMediaAsset({
+      ideaId: primary.id,
+      platform: primaryPlatform,
+      concept: str(asset, 'concept', 'gradient-field'),
+      canvas: str(asset, 'canvas', 'linkedin:square'),
+      width: num(asset, 'width', 1080),
+      height: num(asset, 'height', 1080),
+      altText: str(asset, 'alt_text'),
+      renderMode: 'live',
+      model: str(asset, 'renderer', 'brand-svg'),
+      prompt: str(asset, 'prompt'),
+      fallbackReason: str(asset, 'fallback_reason') || null,
+      dataUri: str(asset, 'data_uri'),
+    })
+    media = 1
+  } else if (primary !== undefined) {
+    skipped.push('No creative was written: the run carried no rendered asset.')
+  }
+
+  /* ── Per-agent timings and the resolved configuration ───────────────────── */
+  /*
+   * `agent_runs` is what Agent Activity renders, and `skill_runs.config_used` is
+   * what keeps a past run explainable after the knobs change. Neither was
+   * written, so the screen was empty and the rule was aspirational.
+   *
+   * Opened and closed in one pass: these agents have already finished, so there
+   * is no running state to represent. `config_used` lives on `skill_runs`, so
+   * each agent contributes one row there carrying the knobs it resolved.
+   */
+  const agentRuns = rows(output.agent_runs)
+  let timings = 0
+  for (const row of agentRuns) {
+    const agentId = str(row, 'agent_id')
+    if (agentId === '') continue
+
+    // The Python roster suffixes its ids with `_agent`; the registry does not.
+    const registryId = agentId.replace(/_agent$/, '') as AgentId
+    const status = str(row, 'status', 'completed') === 'failed' ? 'failed' : 'completed'
+    const durationMs = num(row, 'duration_ms')
+
+    const opened = await startAgentRun({
+      workspaceId,
+      pipelineRunId: run.id,
+      agentId: registryId,
+      trigger: 'agents',
+      turnId: null,
+      inputCount: 0,
+    })
+
+    /*
+     * A synthetic, namespaced skill id. The eight Python agents are not the 91
+     * registry skills, so borrowing a registry id here would put a row into
+     * another skill's history. `<agent>.agents.run` cannot collide with a
+     * declared id and states plainly which engine produced it.
+     */
+    await insertSkillRun({
+      workspaceId,
+      agentRunId: opened.id,
+      skillId: `${registryId}.agents.run`,
+      agentId: registryId,
+      status: status === 'failed' ? 'failed' : 'completed',
+      durationMs,
+      configUsed: asRow(row.config_used) as ResolvedConfig,
+      note: str(row, 'summary').slice(0, 500),
+    })
+
+    await finishAgentRun(opened.id, { status, durationMs, outputCount: 0 })
+    timings += 1
+  }
+  if (timings === 0) {
+    skipped.push('No per-agent timings were written: the run carried no agent_runs.')
+  }
+
   const persisted: PersistedRun = {
     runId: run.id,
     keywords: keywordIdByTerm.size,
@@ -231,6 +426,10 @@ export async function persistAgentRun(output: Record<string, unknown>): Promise<
     topSet: topHashtags.length,
     ideasCreated: written.filter((w) => w.created).length,
     ideasUpdated: written.filter((w) => !w.created).length,
+    captures,
+    drafts,
+    media,
+    agentRuns: timings,
     skipped,
   }
 

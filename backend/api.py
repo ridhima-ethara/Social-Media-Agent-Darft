@@ -126,6 +126,11 @@ def cmd_agents(_: argparse.Namespace) -> int:
                 "hands_off_to": cls.hands_off_to,
                 "folder": f"backend/agents/{cls.agent_id}/",
                 "files": ["agent.py", "prompt.md", "instructions.md", "tools.md", "schema.py"],
+                # The skills that specify this agent, as declared on the class.
+                # Reported so the UI and the audits read the same mapping the
+                # system prompt is assembled from, rather than a second copy.
+                "skills": list(cls.skills),
+                "skill_files": [f"packages/skills/{s}/SKILL.md" for s in cls.skills],
                 "knobs": [k.model_dump() for k in REGISTRY.get(cls.agent_id, [])],
             }
             for cls in ROSTER
@@ -135,7 +140,11 @@ def cmd_agents(_: argparse.Namespace) -> int:
 
 
 def cmd_last(_: argparse.Namespace) -> int:
-    path = Path("backend/data/last_run.json")
+    # Resolved from this file, not the working directory. The Node tier spawns
+    # this with cwd set to the repo root, which made `Path("backend/data/...")`
+    # work by coincidence rather than by design — and fail for anyone running the
+    # CLI directly from inside `backend/`.
+    path = Path(__file__).resolve().parent / "data" / "last_run.json"
     if not path.exists():
         emit("error", {"message": "No run has been recorded yet."})
         return 1

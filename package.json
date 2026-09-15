@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Ethara SocialAI — a twelve-agent social media operations platform with the command plane",
+  "description": "Ethara SocialAI \u2014 a twelve-agent social media operations platform with the command plane",
   "engines": {
     "node": ">=22"
   },
@@ -14,13 +14,21 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "oxlint .",
-    "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false || tsc -b",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:py": "backend/.venv/bin/pytest backend/tests -q",
     "db:up": "docker compose up -d db",
     "db:migrate": "npm --prefix server run db:migrate",
     "db:seed": "npm --prefix server run db:seed",
     "db:reset": "npm --prefix server run db:reset",
-    "setup": "npm install && npm --prefix server install && npm run db:up && node scripts/wait-for-db.mjs && npm run db:reset",
+    "db:embed": "npm --prefix server run db:embed",
+    "setup": "npm install && npm --prefix server install && (npm run db:up || echo '  \u00b7 docker compose unavailable \u2014 assuming an existing PostgreSQL, checking next') && node scripts/wait-for-db.mjs && npm run db:reset",
     "agent:check": "tsx scripts/check-agents.ts",
+    "specs:build": "tsx scripts/build-specs.ts",
+    "doctor": "tsx scripts/doctor.ts",
+    "deploy:tunnel": "bash deploy/cloudflare/tunnel.sh",
+    "deploy:pages": "npm run build && npx wrangler pages deploy dist --project-name ethara-socialai",
     "brand:check": "tsx scripts/check-brand-voice.ts",
     "brand:check:db": "tsx server/scripts/check-alignment-vocabulary.ts",
     "agent:new": "node scripts/new-agent.mjs",
@@ -55,7 +63,8 @@
     "tailwindcss": "4.3.3",
     "tsx": "4.23.13",
     "typescript": "5.9.3",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "vitest": "5.0.0"
   },
   "allowScripts": {
     "esbuild@0.28.2": true,

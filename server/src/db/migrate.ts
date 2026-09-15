@@ -96,6 +96,31 @@ async function main(): Promise<void> {
 
   if (fresh) await dropAll()
 
+  /*
+   * pgvector must be installable before the schema is applied, because the
+   * schema declares `vector(768)` columns and an HNSW index over them. Checked
+   * separately so the failure names the extension and the fix, rather than
+   * surfacing as `type "vector" does not exist` from inside a 700-line script.
+   */
+  const [available] = await query<{ installed: string | null }>(
+    `SELECT installed_version AS installed FROM pg_available_extensions WHERE name = 'vector'`,
+  )
+  if (available === undefined) {
+    console.error(
+      [
+        '  ✗ The pgvector extension is not available on this PostgreSQL server.',
+        '',
+        '    The schema declares vector(768) columns for semantic retrieval, so it',
+        '    cannot be applied without it.',
+        '',
+        '    Fix — Homebrew:  brew install pgvector && brew services restart postgresql@17',
+        '    Fix — Docker:    use the pgvector/pgvector:pg17 image instead of postgres:17-alpine',
+        '',
+      ].join('\n'),
+    )
+    process.exit(1)
+  }
+
   const sql = readFileSync(SCHEMA_PATH, 'utf8')
 
   // schema.sql is one idempotent script; pg runs a multi-statement string

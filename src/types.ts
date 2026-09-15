@@ -633,10 +633,23 @@ export interface ApiHealth {
    * `crawl4ai` when it is not. It is reported rather than inferred because "why
    * does this post have no reaction count" should be answerable from the health
    * payload instead of from the zeros on a card.
+   *
+   * `text` carries `chain` and `backup` for the same reason: text generation is
+   * an ordered list of providers, not one, so "why did the local model write
+   * this when the hosted one is configured" is answerable here rather than
+   * inferred from the model stamped on the draft.
    */
   integrations: Record<
     string,
-    { configured: boolean; reason: string; platformLanes?: 'apify' | 'crawl4ai' }
+    {
+      configured: boolean
+      reason: string
+      platformLanes?: 'apify' | 'crawl4ai'
+      /** Ordered text providers, primary first. Only present on `text`. */
+      chain?: Array<'ollama' | 'gcp'>
+      /** The provider behind the primary, or null when there is none. */
+      backup?: 'ollama' | 'gcp' | null
+    }
   >
   assistant?: { provider: string; configured: boolean; reason: string }
 }
@@ -804,6 +817,9 @@ export interface ScrapeRunState {
    * standalone run, which measures nothing and so reports nothing.
    */
   summary: Record<string, number> | null
+  /** When this run started and returned, on the client's clock. Absent until a run has started. */
+  startedAt?: number
+  endedAt?: number
 }
 
 /**

@@ -14,9 +14,12 @@ export {
   fetchJson,
   mapWithConcurrency,
   stamp,
+  withChainFallback,
   withFallback,
   withRetry,
   type AdapterReport,
+  type ChainLink,
+  type ChainOutcome,
   type FallbackOutcome,
 } from './adapter'
 
@@ -55,12 +58,25 @@ export {
   templateWriter,
   textAdapter,
   textAdapterFor,
+  textChain,
+  textChainDowngradeReason,
   textModelId,
+  textModelIdFor,
   type OllamaTextInput,
 } from './ollama'
 
 export { crawl4aiSearch, type Crawl4aiSearchInput } from './crawl4ai'
 
+export {
+  embeddingAdapter,
+  embeddingModelId,
+  embeddableText,
+  embedMany,
+  embedOne,
+  toSqlVector,
+  type EmbedInput,
+  type EmbedOutcome,
+} from './embeddings'
 export { apifySearch, rawPostEngagement } from './apify'
 
 export {

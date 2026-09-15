@@ -12,7 +12,7 @@ import { AGENTS, AGENT_BY_ID, SKILL_BY_ID } from '@shared/agent-registry'
 import { BRAND_TOPICS, checkBrandCompliance } from '@shared/brand-voice'
 import { addressOperator } from '@shared/assistant-persona'
 import { TOOL_BY_ID } from '@shared/tool-registry'
-import { API_BASE, api, detectApi, runAgentPipeline, subscribeToEvents } from './lib/api'
+import { API_BASE, api, detectApi, runAgentPipeline, subscribeToEvents, signIn, signOut, SignInRefused } from './lib/api'
 import { applyInstruction as applyInstructionLocally, writeCaption } from './lib/ai'
 import { renderBrandSvg } from './lib/image-gen'
 import {
@@ -304,7 +304,8 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
 
   /* ── Actions ───────────────────────────────────────────────────────────── */
   setPage: (page: PageId) => void
-  login: (role: OperatorRole) => void
+  /** Rejects with `SignInRefused` when the server declines; resolves standalone when it is unreachable. */
+  login: (role: OperatorRole, password?: string) => Promise<void>
   logout: () => void
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
@@ -595,7 +596,17 @@ export const useStore = create<Store>((set, get) => ({
 
   setPage: (page) => set({ page, reviewIdeaId: null }),
 
-  login: (role) => {
+  login: async (role, password = '') => {
+    // The session is the server's: an httpOnly cookie every state-changing
+    // call carries. Without it the API refuses to run the pipeline, approve
+    // or publish — which is what the operator gate is for. A refusal is
+    // surfaced to the sign-in screen; an unreachable API is not a refusal,
+    // it is standalone mode, and the product is explorable there as-is.
+    try {
+      await signIn(role, password)
+    } catch (error) {
+      if (error instanceof SignInRefused) throw error
+    }
     const user = USERS[role]
     set({
       user,
@@ -606,6 +617,9 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   logout: () => {
+    // Best effort: the cookie is the server's to clear, and a failure here
+    // only means it expires on its own.
+    void signOut().catch(() => undefined)
     stopSpeaking()
     set({
       user: null,
@@ -870,6 +884,7 @@ export const useStore = create<Store>((set, get) => ({
       scrapeRun: {
         running: true, progress: 0, currentSource: '', currentKeyword: '',
         found: 0, runId: null, captures: [], lanes: [], verdicts: [], notes: [], summary: null,
+        startedAt: Date.now(),
       },
       scrapeRunCount: get().scrapeRunCount + 1,
     })
@@ -908,6 +923,7 @@ export const useStore = create<Store>((set, get) => ({
           ...get().scrapeRun,
           running: false,
           progress: 100,
+          endedAt: Date.now(),
           summary: result ? (result.summary as Record<string, number>) : null,
         },
       })
@@ -928,7 +944,7 @@ export const useStore = create<Store>((set, get) => ({
     // holds. The count therefore comes from that corpus, and the line says so.
     const held = get().scraped.length
     set({
-      scrapeRun: { ...get().scrapeRun, running: false, progress: 100, found: held, summary: null },
+      scrapeRun: { ...get().scrapeRun, running: false, progress: 100, found: held, summary: null, endedAt: Date.now() },
     })
     get().setAgent('scraping', { status: 'completed', current_task: `${held} items held` })
     get().pushActivity({

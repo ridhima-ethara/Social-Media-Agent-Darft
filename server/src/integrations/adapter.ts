@@ -154,6 +154,79 @@ export async function withFallback<TIn, TOut>(
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   CHAINED FALLBACK — a second real implementation, not a fixture
+
+   `withFallback` degrades from ONE adapter straight to the deterministic path.
+   That is right when there is no second implementation, and wrong when there
+   is: a configured primary that fails should reach its backup before the
+   product gives up on a model altogether.
+
+   This mirrors `captureChainFor()` in `capture.ts`, which does the same for the
+   platform lanes — Apify first, crawl4ai behind it. The distinction that file
+   draws is preserved here: an adapter reached because the one before it FAILED
+   is a degradation and is reported per call; an adapter that is simply the
+   first configured one in the chain is the primary and is not.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** One link in a chain: the adapter to try, and whether it is a backup. */
+export interface ChainLink<TIn, TOut> {
+  adapter: ServiceAdapter<TIn, TOut>
+  /** True for an adapter only reached because a configured primary failed. */
+  isBackup: boolean
+}
+
+export interface ChainOutcome<T> extends FallbackOutcome<T> {
+  /** The adapter that actually answered, or `undefined` on the fixture path. */
+  servedBy?: string
+  /** True when a configured primary failed and a backup answered instead. */
+  viaBackup: boolean
+}
+
+/**
+ * Tries each link in order, then the fixture.
+ *
+ * `onFallback` fires for every link that could not serve, so a run where Gemini
+ * failed and Qwen answered records BOTH facts: the operator learns the hosted
+ * provider is broken even though the output is fine. Reporting only the final
+ * outcome would hide a failing credential behind a working backup for as long
+ * as the backup held.
+ */
+export async function withChainFallback<TIn, TOut>(
+  chain: readonly ChainLink<TIn, TOut>[],
+  input: TIn,
+  fixture: () => TOut | Promise<TOut>,
+  onFallback?: (reason: string) => void,
+): Promise<ChainOutcome<TOut>> {
+  const reasons: string[] = []
+
+  for (const link of chain) {
+    if (!link.adapter.isConfigured()) {
+      // Not reported through `onFallback`: an unconfigured provider is a
+      // standing condition of the deployment, already stated at /health and at
+      // boot. Emitting it per call would read as a failure that just happened.
+      reasons.push(link.adapter.unavailableReason())
+      continue
+    }
+
+    try {
+      const value = await link.adapter.run(input)
+      return { value, source: 'live', servedBy: link.adapter.id, viaBackup: link.isBackup }
+    } catch (error) {
+      const reason =
+        error instanceof AdapterError
+          ? error.toReason()
+          : `${link.adapter.id} failed — ${error instanceof Error ? error.message : String(error)}`
+      reasons.push(reason)
+      onFallback?.(reason)
+    }
+  }
+
+  const fallbackReason =
+    reasons.length > 0 ? reasons.join('; ') : 'no text provider is configured'
+  return { value: await fixture(), source: 'fixture', fallbackReason, viaBackup: false }
+}
+
 /**
  * Retries with exponential backoff before giving up.
  * Only the final failure propagates, so `withFallback` sees one error.

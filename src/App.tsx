@@ -24,13 +24,13 @@ import { AgentActivity } from './pages/AgentActivity'
 import { AgentStudio } from './pages/AgentStudio'
 import { RunConsole } from './pages/RunConsole'
 import { SettingsPage } from './pages/SettingsPage'
-import { AssistantConsole } from './pages/AssistantConsole'
 import { KnowledgeBase, KnowledgeDrawer } from './pages/KnowledgeBase'
 import { ReviewPanel } from './pages/ReviewPanel'
 import { PipelineTheater } from './pages/PipelineTheater'
 
 function CurrentPage() {
   const page = useStore((s) => s.page)
+  const isLeadership = useStore((s) => s.user?.role === 'leadership')
 
   switch (page) {
     case 'dashboard':
@@ -44,13 +44,13 @@ function CurrentPage() {
     case 'leadership':
       return <LeadershipReview />
     case 'orchestration':
-      return <AgentActivity />
+      // Leadership's screen. The nav does not offer it to anyone else, and
+      // this is the guard that makes that true rather than merely hidden.
+      return isLeadership ? <AgentActivity /> : <Dashboard />
     case 'studio':
       return <AgentStudio />
     case 'console':
       return <RunConsole />
-    case 'assistant':
-      return <AssistantConsole />
     case 'knowledge':
       return <KnowledgeBase />
     case 'settings':

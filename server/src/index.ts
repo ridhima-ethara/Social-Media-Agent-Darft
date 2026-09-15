@@ -72,7 +72,24 @@ async function main(): Promise<void> {
   app.use(express.json({ limit: '12mb' }))
 
   app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', config.core.corsOrigin)
+    /*
+     * CREDENTIALED CORS CANNOT USE `*`.
+     *
+     * The browser refuses `Access-Control-Allow-Credentials: true` alongside a
+     * wildcard origin, and the session is a cookie — so a wildcard here would
+     * silently break sign-in from any cross-origin caller. With `CORS_ORIGIN=*`
+     * configured, the request's own Origin is echoed back instead, which is
+     * equivalent in reach and actually works with cookies. Set CORS_ORIGIN to a
+     * specific origin for a deployment; the wildcard is a development
+     * convenience, and `Vary: Origin` keeps caches from mixing the two.
+     */
+    const configured = config.core.corsOrigin
+    const origin = configured === '*' ? req.headers.origin : configured
+    if (origin !== undefined && origin !== '') {
+      res.setHeader('Access-Control-Allow-Origin', origin)
+      res.setHeader('Access-Control-Allow-Credentials', 'true')
+      res.setHeader('Vary', 'Origin')
+    }
     res.setHeader('Access-Control-Allow-Headers', 'content-type')
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS')
     if (req.method === 'OPTIONS') {

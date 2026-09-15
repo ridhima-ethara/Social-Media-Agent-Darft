@@ -12,7 +12,7 @@ import { Brain, ChevronDown, Library, Pin, Plus, Power, RefreshCw, Search, Uploa
 import { BRAND } from '@shared/brand-voice'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
-import { Badge, Btn, EmptyState, Modal, SlideOver, formatDate, timeAgo } from '../components/ui'
+import { Select, Badge, Btn, EmptyState, Modal, SlideOver, formatDate, timeAgo } from '../components/ui'
 
 const CATEGORIES = [
   'All',
@@ -704,17 +704,12 @@ export function KnowledgeBase() {
 
           <label className="block">
             <span className="text-[11px] uppercase tracking-[0.08em] text-ink-3">Category</span>
-            <select
+            <Select
               value={category}
-              onChange={(event) => setCategory(event.target.value)}
-              className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent"
-            >
-              {CATEGORIES.filter((c) => c !== 'All').map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+              onChange={setCategory}
+              options={CATEGORIES.filter((c) => c !== 'All').map((name) => ({ value: name, label: name }))}
+              className="mt-1 w-full"
+            />
           </label>
 
           <label className="block">

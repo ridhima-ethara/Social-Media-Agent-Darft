@@ -34,6 +34,7 @@ class ScrapingAgent(Agent):
     icon = identity["icon"]
     stage = "discover"
     hands_off_to = ["validation_agent"]
+    skills = ["content-scraper"]
 
     def prepare(self, payload: dict[str, Any]) -> None:
         """

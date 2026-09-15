@@ -54,6 +54,11 @@ class ImageAgent(Agent):
     icon = identity["icon"]
     stage = "create"
     hands_off_to = ["publishing_agent"]
+    # `image-brief` specifies the two distinct briefs this agent derives — the
+    # file its own docstring and schema already cite. `visual-rendering`
+    # specifies what happens to a brief once it is painted, which this agent
+    # also owns (`render_image`, `check_visual_compliance`). Both, in that order.
+    skills = ["image-brief", "visual-rendering"]
 
     #: Entries that can legitimately change how a picture looks. A research
     #: finding does not belong here — it grounds the caption, not the canvas.

@@ -148,6 +148,34 @@ class WorkflowRun:
             "top_hashtags": self.payload.get("top_hashtags", []),
             "ranked_ideas": self.payload.get("ranked_ideas", []),
             "review_queue": self.payload.get("review_queue", []),
+            # ── The work the create stage actually did ───────────────────────
+            # These were absent, and their absence was expensive: the Content
+            # Agent spends ~90s writing a caption and the Image Agent ~220s
+            # painting a creative, and neither crossed this boundary — so a run
+            # that reported "captioned and illustrated" produced a calendar card
+            # with no caption and no image. The docstring above already said the
+            # rule; these keys are it being kept.
+            "posts": self.payload.get("posts", []),
+            "caption": self.payload.get("caption", {}),
+            "asset": self.payload.get("asset", {}),
+            # Per-agent timings, so the Agent Activity screen has something to
+            # render and `agent_runs` can record what each stage cost. Carried
+            # here rather than reconstructed from the event log, because Law 8
+            # makes the event stream a notification channel, not a data source.
+            "agent_runs": [
+                {
+                    "agent_id": r.agent_id,
+                    "status": r.status,
+                    "summary": r.summary,
+                    "duration_ms": r.duration_ms,
+                    "source": r.source.value,
+                    "tool_calls": r.tool_calls,
+                    "config_used": r.config_used,
+                    "model": r.model,
+                    "provider": r.provider,
+                }
+                for r in self.results
+            ],
             "status": "failed" if self.failed else "completed",
         }
 

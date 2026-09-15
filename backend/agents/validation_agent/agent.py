@@ -23,6 +23,7 @@ class ValidationAgent(Agent):
     icon = identity["icon"]
     stage = "assess"
     hands_off_to = ["content_agent", "calendar_agent"]
+    skills = ["content-validator"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         posts = payload.get("posts", [])

@@ -7,14 +7,34 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { CalendarDays, Check, Pause, Play, X } from 'lucide-react'
+import { Play, X } from 'lucide-react'
 import { useStore } from '../store'
 import { Logo } from '../components/logo'
-import { PipelineGraph, type GraphBucket, type GraphSource } from '../components/pipeline-graph'
-import { AssistantCore } from '../components/assistant/core'
-import { Badge, Btn, PlatformIcon, Progress, fmt, timeAgo } from '../components/ui'
+import type { GraphBucket } from '../components/pipeline-graph'
+
+import { Badge, Btn, PlatformIcon, fmt, timeAgo } from '../components/ui'
 import { PLATFORMS } from '../../shared/agent-contract'
+import { defaultSkillConfig } from '../../shared/agent-registry'
 import type { Platform, ValidationVerdict } from '../types'
+
+/**
+ * The two capture knobs this screen can reason about, read from the registry
+ * rather than restated. `historyDays` is the window inside which an
+ * already-seen page is held back; `minBrandRelevance` is the floor a captured
+ * page must clear to be admitted at all.
+ */
+const PREFILTER = defaultSkillConfig('scraping.dedupe.prefilter')
+const CAPTURE = defaultSkillConfig('scraping.linkedin.fetch')
+const HISTORY_DAYS = Number(PREFILTER.historyDays)
+const BRAND_FLOOR = Number(CAPTURE.minBrandRelevance)
+
+/** Age of an ISO timestamp in days. The one place this screen reads the clock. */
+function daysSince(iso: string): number {
+  return (Date.now() - new Date(iso).getTime()) / 86_400_000
+}
+
+/** Lanes that are mostly login-walled, and so cost time for little return. */
+const WALLED_LANES = new Set(['instagram', 'facebook'])
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE FEED
@@ -50,6 +70,8 @@ type FeedRow =
       resolvedBy?: string
       /** Set when the verdict was reached by an earlier run: relative time of that capture. */
       onRecord?: string
+      /** The measured figures the verdict rests on, e.g. "rel 71 · cred HIGH · fresh 94". */
+      evidence?: string
     }
   | {
       kind: 'scoring'
@@ -81,6 +103,18 @@ const BUCKET_META: Array<{ id: ValidationVerdict; label: string; tone: string }>
 /** The virtual clock: 50 ms ticks, so pause is exact rather than approximate. */
 const TICK_MS = 50
 
+/**
+ * How many stored pages the replay walks through.
+ *
+ * The store can hold hundreds of pages from many runs, and replaying all of
+ * them on a 50 ms clock would take minutes. So the replay works a sample —
+ * and because it does, every figure the replay prints counts the sample, and
+ * the sample is stated in the first row of the feed. Previously the hand-off
+ * note said "handing 200 items" over a feed that would only ever show 26, and
+ * the narration counted verdicts against a 200 it was never going to reach.
+ */
+const REPLAY_LIMIT = 26
+
 export function PipelineTheater() {
   const theaterOpen = useStore((s) => s.theaterOpen)
   const closeTheater = useStore((s) => s.closeTheater)
@@ -97,6 +131,10 @@ export function PipelineTheater() {
   const liveNotes = useStore((s) => s.scrapeRun.notes)
   const keywordCount = useStore((s) => s.keywords.filter((k) => k.active).length)
   const setPage = useStore((s) => s.setPage)
+  const runScraping = useStore((s) => s.runScraping)
+  const runId = useStore((s) => s.scrapeRun.runId)
+  const runStartedAt = useStore((s) => s.scrapeRun.startedAt ?? null)
+  const runEndedAt = useStore((s) => s.scrapeRun.endedAt ?? null)
 
   const [tick, setTick] = useState(0)
   const [paused, setPaused] = useState(false)
@@ -112,7 +150,21 @@ export function PipelineTheater() {
   const script = useMemo(() => {
     const rows: FeedRow[] = []
 
-    for (const item of scraped.slice(0, 26)) {
+    const sample = scraped.slice(0, REPLAY_LIMIT)
+
+    // The scope of the replay, stated before anything is replayed inside it.
+    if (scraped.length > sample.length) {
+      rows.push({
+        kind: 'note',
+        id: 'note-sample',
+        text:
+          `Replaying the ${sample.length} most recent of ${scraped.length} pages on record. ` +
+          'A live run shows every page as it lands.',
+        tone: 'ok',
+      })
+    }
+
+    for (const item of sample) {
       rows.push({
         kind: 'capture',
         id: `cap-${item.id}`,
@@ -129,18 +181,18 @@ export function PipelineTheater() {
     // The hand-off is only stated when there is something to hand off, and the
     // figures are the ones actually held. A fixed sentence here claimed a
     // capture that never happened and contradicted every counter on screen.
-    if (scraped.length > 0) {
+    if (sample.length > 0) {
       rows.push({
         kind: 'note',
         id: 'note-handoff',
         text:
-          `Sherlock finished scraping. Handing ${scraped.length} item${scraped.length === 1 ? '' : 's'} ` +
+          `Sherlock finished scraping. Handing ${sample.length} item${sample.length === 1 ? '' : 's'} ` +
           `and ${topHashtags.length} hashtag candidate${topHashtags.length === 1 ? '' : 's'} to Dexter.`,
         tone: 'ok',
       })
     }
 
-    for (const item of scraped.slice(0, 22)) {
+    for (const item of sample) {
       rows.push({
         kind: 'scoring',
         id: `score-${item.id}`,
@@ -157,6 +209,7 @@ export function PipelineTheater() {
         verdict: item.validation,
         title: item.title,
         reason: item.verdict_reason ?? '',
+        evidence: `rel ${item.relevance} · cred ${item.credibility.toUpperCase()} · fresh ${item.freshness}`,
       })
     }
 
@@ -228,6 +281,10 @@ export function PipelineTheater() {
         verdict: verdict.verdict,
         title: verdict.title,
         reason: verdict.reason,
+        evidence: [
+          verdict.relevance === null ? null : `rel ${verdict.relevance}`,
+          verdict.credibility === null ? null : `cred ${verdict.credibility.toUpperCase()}`,
+        ].filter((part): part is string => part !== null).join(' · ') || undefined,
       })
     }
     return rows
@@ -327,37 +384,254 @@ export function PipelineTheater() {
     count: rows.filter((row) => row.kind === 'verdict' && row.verdict === meta.id).length,
   }))
 
-  const sources: GraphSource[] = useMemo(() => {
-    // While a run reports, the source nodes are the keywords that run is
-    // actually working — not the keywords already stored, which is why the
-    // graph stood empty on a first run with nothing captured yet.
-    if (live) {
-      const terms = [...new Set(liveLanes.map((l) => l.keyword))].slice(0, 6)
-      return terms.map((term) => {
-        const lanes = liveLanes.filter((l) => l.keyword === term)
-        const kept = lanes.reduce((sum, l) => sum + (l.kept ?? 0), 0)
-        const working = lanes.some((l) => l.status === 'running')
-        return {
-          id: term,
-          label: term,
-          count: kept,
-          status: working ? 'working' : 'done',
-        }
+
+  /* ── What the run produced, and what it costs to change ──────────────
+     Every figure below is counted from what the run reported. Nothing here
+     is estimated, and a lever that cannot be measured is not offered. */
+
+  /** Pages that carry a verdict at all — the denominator for every share. */
+  const verdictTotal = rows.filter((r) => r.kind === 'verdict').length
+
+  /**
+   * Verdicts this run actually produced. A page held back carries the verdict
+   * an earlier run gave it, and that verdict is shown — but it is on record,
+   * not scored now, and counting it as scored is the one misreading this
+   * screen exists to prevent.
+   */
+  const scoredNow = rows.filter((r) => r.kind === 'verdict' && r.onRecord === undefined).length
+
+  /** Ideas the calendar agent placed because a new trend appeared. */
+  const newTrendCount = ideas.filter((i) => i.is_new_trend).length
+
+  /** Verdicts only a person can clear, minus the ones already cleared here. */
+  const outstanding = rows.filter(
+    (row) => row.kind === 'verdict' && row.verdict === 'needs_review' && resolved[row.entityId] === undefined,
+  )
+
+  /** True when every verdict on screen was reached by an earlier run. */
+  const onRecordOnly =
+    verdictTotal > 0 && rows.every((r) => r.kind !== 'verdict' || r.onRecord !== undefined)
+
+  /**
+   * The finding: the sentence that explains the zeros.
+   *
+   * Only shown when there is a real finding to state. A run that scored
+   * normally has no finding, and inventing one would be noise.
+   */
+  const finding = useMemo((): { sentence: string; figures: Array<{ label: string; value: number; emphasis?: boolean }> } | null => {
+    if (!live || !finished) return null
+    if (liveVerdicts.length > 0) return null
+    if (heldCount === 0) return null
+    const stamps = liveCaptures
+      .map((c) => c.held?.since)
+      .filter((since): since is string => typeof since === 'string')
+      .sort()
+    const oldest = stamps[0]
+    const newest = stamps[stamps.length - 1]
+    const spread = oldest && newest && new Date(newest).getTime() - new Date(oldest).getTime() > 60 * 60 * 1000
+    const origin = spread
+      ? ` from runs between ${timeAgo(oldest)} and ${timeAgo(newest)}`
+      : oldest ? ` from a run ${timeAgo(oldest)}` : ''
+    return {
+      sentence:
+        `Dexter had nothing new to score. All ${heldCount} page${heldCount === 1 ? '' : 's'} Sherlock kept ` +
+        `${heldCount === 1 ? 'was' : 'were'} already on record` +
+        origin +
+        `, inside the ${HISTORY_DAYS}-day look-back — so none crossed the hand-off.`,
+      figures: [
+        { label: 'Kept', value: liveCaptures.length },
+        { label: 'Held', value: heldCount, emphasis: true },
+        { label: 'New', value: handedOver },
+      ],
+    }
+  }, [live, finished, liveVerdicts.length, heldCount, liveCaptures, handedOver])
+
+  /**
+   * Settings that demonstrably shaped this run.
+   *
+   * Each lever names a registry knob and a consequence counted from the run's
+   * own rows. A lever whose consequence cannot be counted is left out rather
+   * than guessed at — an unmeasured "this might help" is exactly the kind of
+   * claim this product does not make.
+   */
+  const levers = useMemo((): Array<{ knob: string; consequence: string }> => {
+    const out: Array<{ knob: string; consequence: string }> = []
+
+    // Look-back: pages held back solely because they were seen recently.
+    if (heldCount > 0) {
+      // Pages older than half the window but still inside it: halving the
+      // window would let exactly these through again.
+      const wouldReturn = liveCaptures.filter(
+        (c) => c.held !== null && daysSince(c.held.since) > HISTORY_DAYS / 2 && daysSince(c.held.since) <= HISTORY_DAYS,
+      ).length
+      if (wouldReturn > 0) {
+        out.push({
+          knob: `Look-back window ${HISTORY_DAYS}d → ${Math.round(HISTORY_DAYS / 2)}d`,
+          consequence: `${wouldReturn} of the ${heldCount} held pages would reach Dexter again.`,
+        })
+      }
+    }
+
+    // Brand floor: pages a lane saw but did not admit.
+    const seen = liveLanes.reduce((sum, l) => sum + (l.captured ?? 0), 0)
+    const kept = liveLanes.reduce((sum, l) => sum + (l.kept ?? 0), 0)
+    if (seen > kept) {
+      out.push({
+        knob: `Minimum brand alignment ${BRAND_FLOOR}%`,
+        consequence: `${seen - kept} page${seen - kept === 1 ? '' : 's'} the lanes found ${seen - kept === 1 ? 'was' : 'were'} dropped at capture for scoring under it.`,
       })
     }
-    const names = [...new Set(scraped.map((s) => s.keyword_term ?? 'unknown'))].slice(0, 6)
-    return names.map((name, i) => {
-      const captured = rows.filter((row) => row.kind === 'capture' && row.keyword === name).length
-      return {
-        id: name,
-        label: name,
-        count: captured,
-        status: stage === 'done' || captured > 3 ? 'done' : captured > 0 ? 'working' : i === 0 ? 'working' : 'idle',
-      }
-    })
-  }, [scraped, rows, stage, live, liveLanes])
 
-  const narration = useMemo(() => {
+    // Login-walled lanes: time spent for what came back.
+    const walled = liveLanes.filter((l) => WALLED_LANES.has(l.platform))
+    const walledEmpty = walled.filter((l) => l.status === 'warn').length
+    if (walled.length > 0 && walledEmpty > 0) {
+      out.push({
+        knob: 'Turn off the login-walled lanes',
+        consequence:
+          `${walled.length} of ${liveLanes.length} crawls ran on Instagram and Facebook, and ` +
+          `${walledEmpty} came back empty.`,
+      })
+    }
+
+    return out
+  }, [heldCount, liveCaptures, liveLanes])
+
+  /**
+   * The pipeline as stations, in the order the orchestrator runs them.
+   *
+   * The figure under each is the one that station actually produced, so a
+   * station that did nothing says so rather than showing a zero that reads
+   * as a failure.
+   */
+  /** The oldest held capture's own timestamp — the run the on-record verdicts came from. */
+  const heldSince = liveCaptures
+    .map((c) => c.held?.since)
+    .filter((since): since is string => typeof since === 'string')
+    .sort()[0]
+
+  /**
+   * The pipeline as five stations, in the order the orchestrator runs them,
+   * from the keyword set to the calendar. The figure under each is the one
+   * that station actually produced, so a station that did nothing says so
+   * rather than showing a zero that reads as a failure.
+   */
+  const stations = useMemo((): Station[] => {
+    const captured = rows.filter((r) => r.kind === 'capture').length
+    const emptyLanes = liveLanes.filter((l) => l.status === 'warn').length
+    const keywords = live ? new Set(liveLanes.map((l) => l.keyword)).size : keywordCount
+    const gateHeld = heldCount > 0 && scoredNow === 0
+    const count = (id: ValidationVerdict): number => buckets.find((b) => b.id === id)?.count ?? 0
+
+    return [
+      {
+        id: 'source',
+        tag: 'SOURCE',
+        name: `${keywords} keyword${keywords === 1 ? '' : 's'}`,
+        sub: liveLanes.length > 0 ? `${liveLanes.length} lanes opened` : 'resolved by weight',
+        figure: liveLanes.length > 0 ? 'resolved by weight' : 'on record',
+        caption:
+          `${keywords} active keyword${keywords === 1 ? '' : 's'} resolved by weight` +
+          (liveLanes.length > 0 ? `, opening ${liveLanes.length} keyword-and-lane crawls.` : '.'),
+        status: keywords > 0 ? 'done' : 'idle',
+      },
+      {
+        id: 'scraping',
+        tag: '01',
+        name: 'Sherlock',
+        sub: 'Scraping Agent',
+        figure: liveLanes.length > 0 ? `${captured} kept · ${emptyLanes} empty` : `${captured} kept`,
+        caption:
+          `The Scraping Agent read every lane and kept ${captured} page${captured === 1 ? '' : 's'}` +
+          (emptyLanes > 0 ? `. ${emptyLanes} lane${emptyLanes === 1 ? '' : 's'} came back empty.` : '.'),
+        status: stage === 'scrape' ? 'working' : captured > 0 || finished ? 'done' : 'idle',
+      },
+      {
+        id: 'validation',
+        tag: '02',
+        name: 'Dexter',
+        sub: 'Validation Agent',
+        figure: scoredNow > 0 ? `${scoredNow} scored` : gateHeld ? '0 new to score' : stage === 'validate' ? 'scoring' : 'nothing to score',
+        caption:
+          scoredNow > 0
+            ? `The Validation Agent gave exactly one verdict to each of ${scoredNow} page${scoredNow === 1 ? '' : 's'}, and each verdict names its evidence.`
+            : gateHeld
+              ? `Nothing crossed the hand-off: all ${heldCount} kept page${heldCount === 1 ? ' was' : 's were'} already on record, so the Validation Agent was handed nothing new.`
+              : 'The Validation Agent has not been handed anything yet.',
+        status: stage === 'validate' ? 'working' : gateHeld && finished ? 'attention' : scoredNow > 0 ? 'done' : 'idle',
+      },
+      {
+        id: 'buckets',
+        tag: onRecordOnly ? 'ON RECORD' : 'THIS RUN',
+        name: verdictTotal > 0 ? `${count('validated')} · ${count('needs_review')} · ${count('duplicate')} · ${count('rejected')}` : '— · — · — · —',
+        sub: 'by verdict',
+        figure: verdictTotal === 0 ? 'no verdicts yet' : onRecordOnly ? (heldSince ? `from the run ${timeAgo(heldSince)}` : 'from an earlier run') : 'scored this run',
+        caption:
+          verdictTotal === 0
+            ? 'No page has a verdict yet.'
+            : onRecordOnly
+              ? `${verdictTotal} verdict${verdictTotal === 1 ? '' : 's'} on record from an earlier run: ${count('validated')} validated, ${count('needs_review')} need review, ${count('duplicate')} duplicate, ${count('rejected')} rejected. None was re-scored.`
+              : `${verdictTotal} verdict${verdictTotal === 1 ? '' : 's'}: ${count('validated')} validated, ${count('needs_review')} need review, ${count('duplicate')} duplicate, ${count('rejected')} rejected.`,
+        status: verdictTotal === 0 ? 'idle' : onRecordOnly ? 'record' : 'done',
+      },
+      {
+        id: 'calendar',
+        tag: '03',
+        name: 'Dora',
+        sub: 'Calendar Agent',
+        figure: newTrendCount > 0 ? `${newTrendCount} placed` : 'nothing to place',
+        caption:
+          newTrendCount > 0
+            ? `The Calendar Agent placed ${newTrendCount} new trend${newTrendCount === 1 ? '' : 's'} into the week.`
+            : 'The Calendar Agent had no new trend to place this run.',
+        status: stage === 'done' ? (newTrendCount > 0 ? 'done' : 'idle') : 'idle',
+      },
+    ]
+  }, [rows, liveLanes, live, keywordCount, stage, finished, scoredNow, heldCount, newTrendCount, buckets, verdictTotal, onRecordOnly, heldSince])
+
+  /**
+   * The four rails between the stations, each in the state its hand-off is
+   * in. A packet rides a rail only while work is actually crossing it; the
+   * gate marker sits on the rail where every packet was turned back.
+   */
+  const rails = useMemo((): RailKind[] => {
+    const gateHeld = heldCount > 0 && scoredNow === 0
+    return [
+      stage === 'scrape' ? 'working' : stations[1]?.status === 'done' ? 'done' : 'idle',
+      stage === 'validate' ? 'working' : scoredNow > 0 ? 'done' : gateHeld && finished ? 'held' : 'idle',
+      scoredNow > 0 ? 'done' : 'idle',
+      newTrendCount > 0 ? 'done' : 'idle',
+    ]
+  }, [stage, stations, scoredNow, heldCount, finished, newTrendCount])
+
+  /**
+   * The station the scene is showing.
+   *
+   * While the run plays, the scene follows it. Stepping or clicking a station
+   * pauses the run and pins that station; pressing Play in the strip releases
+   * the pin. Pausing by any other route (Space, the header button) keeps the
+   * last pin, so pausing returns you to where you were looking — nothing is
+   * synchronised through an effect, the index is simply derived.
+   */
+  const [pinnedStation, setPinnedStation] = useState<number | null>(null)
+
+  // The run's clock. Its start and end are the store's facts; while it runs,
+  // one tick a second keeps the figure moving. Nothing is set during render.
+  const [now, setNow] = useState(0)
+  useEffect(() => {
+    if (!scrapeRunning) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [scrapeRunning])
+  const runSeconds =
+    runStartedAt === null ? null : Math.max(0, Math.round(((runEndedAt ?? now) - runStartedAt) / 1000))
+
+  // Where the run is: the working station, or where the story ended.
+  const autoStation = stage === 'scrape' ? 1 : stage === 'validate' ? 2 : heldCount > 0 && scoredNow === 0 ? 2 : newTrendCount > 0 ? 4 : 3
+  const stationIndex =
+    paused && pinnedStation !== null ? Math.min(pinnedStation, stations.length - 1) : autoStation
+
+  const runNarration = useMemo(() => {
     if (stage === 'scrape') {
       const captured = rows.filter((r) => r.kind === 'capture').length
       if (live) {
@@ -376,14 +650,15 @@ export function PipelineTheater() {
         )
       }
       return (
-        `Sherlock: ${captured} post${captured === 1 ? '' : 's'} captured across ` +
+        `Sherlock: ${captured} post${captured === 1 ? '' : 's'} shown from ` +
         `${keywordCount} active keyword${keywordCount === 1 ? '' : 's'}.`
       )
     }
     if (stage === 'validate') {
       const verdicts = rows.filter((r) => r.kind === 'verdict').length
       const review = buckets.find((b) => b.id === 'needs_review')?.count ?? 0
-      const total = live ? liveCaptures.length : scraped.length
+      // What this feed can actually reach, so the count is able to finish.
+      const total = live ? liveCaptures.length : Math.min(scraped.length, REPLAY_LIMIT)
       // Rule 6: a zero must name its cause. Everything captured being already
       // held is a finding about the run, not a failure of the validation agent.
       if (live && verdicts === 0) {
@@ -407,8 +682,15 @@ export function PipelineTheater() {
         `${review} heading for review.`
       )
     }
-    return `Pipeline complete. Five keywords are trending and ${topHashtags.length} hashtags are queued for research.`
-  }, [stage, rows, buckets, scraped.length, topHashtags.length, live, liveLanes, liveCaptures.length, liveNotes, keywordCount, heldCount, handedOver])
+    const trendingNow = signals.filter((sig) => sig.is_trending).length
+    const trendWord = `${trendingNow} keyword${trendingNow === 1 ? '' : 's'}`
+    // A run that held everything back changed nothing; what is trending was
+    // decided by earlier runs, and the sentence says so.
+    return heldCount > 0 && liveVerdicts.length === 0
+      ? `Run complete. Nothing new reached scoring; ${trendWord} remain trending from earlier runs and ${topHashtags.length} hashtags are queued for research.`
+      : `Pipeline complete. ${trendWord} ${trendingNow === 1 ? 'is' : 'are'} trending and ${topHashtags.length} hashtags are queued for research.`
+  }, [stage, rows, buckets, scraped.length, topHashtags.length, live, liveLanes, liveCaptures.length, liveNotes, keywordCount, heldCount, handedOver, signals, liveVerdicts.length])
+
 
   /**
    * Leaving the theater for a screen. The run is the server's and keeps going
@@ -438,190 +720,766 @@ export function PipelineTheater() {
   return (
     <div className="fixed inset-0 z-[92] flex flex-col bg-page" role="dialog" aria-modal="true" aria-label="Pipeline run">
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <header className="glass flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-5 py-3">
+      <header className="flex h-[54px] shrink-0 items-center gap-3.5 border-b border-line bg-surface px-[18px]">
         <Logo size={26} />
-        <div className="min-w-0">
-          <h2 className="display text-[15px]">
-            {stage === 'scrape'
+        <h1 className="truncate text-[14.5px] font-semibold tracking-[-0.02em] text-ink">
+          {finding
+            ? 'Nothing new reached scoring'
+            : stage === 'scrape'
               ? live
-                ? `Capturing across ${new Set(liveLanes.map((l) => l.platform)).size} lane${
-                    new Set(liveLanes.map((l) => l.platform)).size === 1 ? '' : 's'
-                  }`
+                ? `Capturing across ${new Set(liveLanes.map((l) => l.platform)).size} lane${new Set(liveLanes.map((l) => l.platform)).size === 1 ? '' : 's'}`
                 : `Scraping ${keywordCount} active keyword${keywordCount === 1 ? '' : 's'}`
               : stage === 'validate'
                 ? live || !caughtUp
                   ? 'Dexter at work'
                   : 'Sherlock is still capturing live'
                 : 'Pipeline run complete'}
-          </h2>
-          <p className="text-[11px] text-ink-3">
-            {stage === 'scrape'
-              ? 'Every post is captured with its author, engagement and hashtags before anything is scored.'
-              : stage === 'validate'
-                ? live || !caughtUp
-                  ? 'Every candidate gets exactly one verdict, and every verdict names its evidence.'
-                  : 'The feed has caught up with the store. Nothing is declared complete until the run returns.'
-                : 'Dora placed the strongest trends into the week.'}
-          </p>
-        </div>
+        </h1>
+        {/* The run's own identity and clock — or, replaying, the scope of the replay. */}
+        <span className="mono shrink-0 text-[10px] tracking-[0.08em] text-ink-3">
+          {live && runId
+            ? `RUN ${runId.slice(-4).toUpperCase()}${runSeconds === null ? '' : ` · ${formatSeconds(runSeconds)}`}`
+            : live
+              ? runSeconds === null ? 'LIVE RUN' : `LIVE RUN · ${formatSeconds(runSeconds)}`
+              : `REPLAY · ${Math.min(scraped.length, REPLAY_LIMIT)} PAGES ON RECORD`}
+        </span>
 
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          <span className="hidden items-center gap-1.5 text-[11px] text-ink-3 lg:flex">
-            {['1 · Scrape', '2 · Validate', '3 · Plan'].map((step, i) => {
-              const active = (stage === 'scrape' && i === 0) || (stage === 'validate' && i === 1) || (stage === 'done' && i === 2)
-              return (
-                <span key={step} className="flex items-center gap-1.5">
-                  <span className={active ? 'text-accent-bright' : ''}>{step}</span>
-                  {i < 2 ? <span className="text-ink-3">→</span> : null}
-                </span>
-              )
-            })}
-          </span>
-
-          <Btn variant="subtle" onClick={() => leaveFor('calendar')}>
-            <CalendarDays size={13} /> Weekly Calendar
+        <div className="mono ml-auto flex items-center gap-2.5 text-[10px] tracking-[0.08em]">
+          {/* Each stage with what it produced; the amber one is where a person is needed. */}
+          {[
+            { label: 'SCRAPE', value: rows.filter((r) => r.kind === 'capture').length, state: stations[1]?.status ?? 'idle' },
+            { label: 'VALIDATE', value: scoredNow, state: stations[2]?.status ?? 'idle' },
+            { label: 'PLAN', value: newTrendCount, state: stations[4]?.status ?? 'idle' },
+          ].map((step, i) => (
+            <span key={step.label} className="inline-flex items-center gap-2.5">
+              {i > 0 ? <span className="text-line-strong" aria-hidden="true">→</span> : null}
+              <span className={`inline-flex items-center gap-1.5 ${step.state === 'idle' ? 'text-ink-3' : 'text-ink'}`}>
+                {step.state === 'attention' ? (
+                  <Breathe tone="var(--color-serious)" />
+                ) : step.state === 'working' ? (
+                  <WorkArc size={9} />
+                ) : (
+                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: step.state === 'done' ? 'var(--color-good)' : 'var(--color-line-strong)' }} aria-hidden="true" />
+                )}
+                {step.label}{step.state === 'idle' && step.value === 0 ? '' : ` ${step.value}`}
+              </span>
+            </span>
+          ))}
+          <span className="mx-0.5 h-[22px] w-px shrink-0 bg-line-strong" aria-hidden="true" />
+          <Btn
+            variant="primary"
+            disabled={scrapeRunning}
+            onClick={() => void runScraping()}
+            className="!py-[6px] !text-[12px] font-semibold"
+          >
+            {scrapeRunning ? <WorkArc size={12} /> : <Play size={12} />}
+            {scrapeRunning ? 'Running' : 'Re-run'}
           </Btn>
-
-          <Btn variant="ghost" onClick={() => setPaused(!paused)}>
-            {paused ? <Play size={13} /> : <Pause size={13} />}
-            {paused ? 'Resume' : 'Pause'}
-          </Btn>
-
           <button
             type="button"
             onClick={closeTheater}
             aria-label="Close"
-            className="rounded-lg border border-line p-1.5 text-ink-3 transition-colors hover:text-ink"
+            className="rounded-md p-1 text-ink-3 transition-colors hover:text-ink"
           >
             <X size={15} />
           </button>
         </div>
       </header>
 
-      {paused ? (
-        <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-5 py-1.5 text-[11px] text-warn">
-          Paused. Every pending step is held exactly where it is — resume and the spacing continues
-          from the same point.
+      {/* ── The finding, above everything ───────────────────────────────
+          The zeros are the symptom; this sentence is the cause. */}
+      {finding ? (
+        <div
+          className="flex shrink-0 items-start gap-4 border-b border-line bg-surface-2 px-[18px] py-[13px]"
+          style={{ animation: 'eth-rise 520ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
+        >
+          <span className="relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center" aria-hidden="true">
+            <span className="absolute inset-0 rounded-full bg-serious opacity-35" style={{ animation: 'eth-attention-breathe 4s ease-in-out infinite' }} />
+            <span className="relative h-1.5 w-1.5 rounded-full bg-serious" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="mono text-[9.5px] uppercase tracking-[0.14em] text-serious">The finding · not a failure</p>
+            <p className="mt-[5px] max-w-[94ch] text-[14px] leading-[1.5] text-ink"><strong className="font-semibold">{finding.sentence}</strong></p>
+          </div>
+          <div className="flex shrink-0 gap-px overflow-hidden rounded-lg border border-line-strong bg-line-strong">
+            {finding.figures.map((figure) => (
+              <div key={figure.label} className="bg-page px-3.5 py-[7px] text-center">
+                <p className={`mono text-[19px] font-medium leading-[1.1] ${figure.emphasis ? 'text-serious' : figure.value === 0 ? 'text-ink-3' : 'text-ink'}`}>
+                  {figure.value}
+                </p>
+                <p className="mono text-[9px] tracking-[0.1em] text-ink-3">{figure.label.toUpperCase()}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {paused && !finished ? (
+        <div className="mono flex shrink-0 items-center gap-2 border-b border-warn/40 bg-warn/10 px-[18px] py-1.5 text-[10px] uppercase tracking-[0.08em] text-warn">
+          <Breathe tone="var(--color-warn)" />
+          Paused · every pending step is held exactly where it is
         </div>
       ) : null}
 
       {/* ── Body ────────────────────────────────────────────────────────── */}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <section className="flex min-h-0 flex-1 flex-col border-b border-line p-4 lg:border-b-0 lg:border-r">
-          <div className="min-h-0 flex-1">
-            <PipelineGraph
-              sources={sources}
-              buckets={buckets}
-              scrapingStatus={stage === 'scrape' ? 'working' : 'done'}
-              validationStatus={stage === 'validate' ? 'working' : stage === 'done' ? 'done' : 'idle'}
-              validationLabel={
-                live && finished && liveVerdicts.length === 0
-                  ? heldCount > 0
-                    ? 'On record'
-                    : 'Nothing to score'
-                  : undefined
-              }
-              handoffLabel={
-                live
-                  ? // Only once the hold-back has been reported; before that the
-                    // count would be every capture and then fall, which is not
-                    // information, it is noise.
-                    heldCount > 0 || liveVerdicts.length > 0 || finished
-                    ? heldCount > 0
-                      ? `${handedOver} new · ${heldCount} on record`
-                      : `${handedOver} new to score`
-                    : undefined
-                  : stage === 'scrape'
-                    ? undefined
-                    : `${rows.filter((r) => r.kind === 'capture').length} to score`
-              }
-              paused={paused}
-              activeFilter={filter}
-              onFilter={setFilter}
-            />
-          </div>
 
-          <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-ink-3">
-            {BUCKET_META.map((meta) => (
-              <span key={meta.id} className="flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full" style={{ background: meta.tone }} aria-hidden="true" />
-                {meta.label}
-              </span>
-            ))}
-            {live && finished && liveVerdicts.length === 0 && heldCount > 0 ? (
-              <span className="basis-full text-ink-2">
-                All {heldCount} captured page{heldCount === 1 ? '' : 's'} {heldCount === 1 ? 'was' : 'were'} already on record
-                from a recent run, so nothing new reached Dexter. The buckets show the verdicts those pages already carry,
-                each marked in the feed with when it was first captured.
-              </span>
-            ) : null}
-            <span className="ml-auto">Click a source or a bucket to filter the feed.</span>
-          </div>
+        {/* ── LEFT · the run, end to end ─────────────────────────────── */}
+        <section className="flex min-h-0 flex-1 flex-col border-b border-line px-[18px] py-3.5 lg:border-b-0 lg:border-r">
+          <header className="flex shrink-0 items-center gap-2.5">
+            <h2 className="text-[14px] font-semibold tracking-[-0.015em] text-ink">The run, end to end</h2>
+            <span className="mono text-[10px] text-ink-3">STATION {stationIndex + 1} OF {stations.length}</span>
+            <div className="ml-auto flex items-center gap-0.5 rounded-md border border-line-strong p-0.5">
+              <button
+                type="button"
+                onClick={() => { setPaused(true); setPinnedStation(Math.max(0, stationIndex - 1)) }}
+                disabled={stationIndex === 0}
+                aria-label="Previous station"
+                className="mono rounded-[4px] px-2 py-[3px] text-[11px] text-ink-3 transition-colors hover:text-ink disabled:opacity-40"
+              >
+                ◀
+              </button>
+              <button
+                type="button"
+                onClick={() => { if (paused) setPinnedStation(null); setPaused(!paused) }}
+                className={`mono rounded-[4px] px-3 py-[3px] text-[10px] uppercase tracking-[0.1em] transition-colors ${
+                  paused ? 'bg-accent text-on-accent' : 'text-ink-2 hover:text-ink'
+                }`}
+              >
+                {paused ? 'Play' : 'Pause'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setPaused(true); setPinnedStation(Math.min(stations.length - 1, stationIndex + 1)) }}
+                disabled={stationIndex >= stations.length - 1}
+                aria-label="Next station"
+                className="mono rounded-[4px] px-2 py-[3px] text-[11px] text-ink-3 transition-colors hover:text-ink disabled:opacity-40"
+              >
+                ▶
+              </button>
+            </div>
+          </header>
 
-          {/* Command narration strip. */}
-          <div className="glass mt-3 flex items-center gap-2.5 rounded-xl px-3 py-2">
-            <AssistantCore state={stage === 'done' ? 'dormant' : 'working'} size={26} />
-            <p className="text-[12px] leading-relaxed text-ink-2">{narration}</p>
+          <RunStage
+            stations={stations}
+            rails={rails}
+            selected={stationIndex}
+            paused={paused}
+            onSelect={(i) => { setPaused(true); setPinnedStation(i) }}
+          />
+
+          {/* What the selected station did, in one sentence. The live station
+              speaks in the run's own words. */}
+          <div className="mt-2 min-h-[44px] shrink-0 rounded-lg border border-line-strong bg-surface-2 px-3 py-[9px]">
+            <p
+              className="mono text-[9px] uppercase tracking-[0.13em]"
+              style={{ color: STATION_TONE[stations[stationIndex]?.status ?? 'idle'] }}
+            >
+              {stations[stationIndex]?.tag === '01' || stations[stationIndex]?.tag === '02' || stations[stationIndex]?.tag === '03'
+                ? stations[stationIndex]?.name.toUpperCase()
+                : stations[stationIndex]?.tag}
+              {' · '}
+              {STATION_WORD[stations[stationIndex]?.status ?? 'idle']}
+            </p>
+            <p className="mt-[3px] text-[11.5px] leading-[1.5] text-ink-2">
+              {stationIndex === autoStation && !finished ? runNarration : stations[stationIndex]?.caption}
+            </p>
           </div>
         </section>
 
-        <section ref={feedRef} className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-4">
+        {/* ── RIGHT · what it produced, and what you still owe ────────── */}
+        <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto px-[18px] py-3.5 lg:w-[470px]">
           {filter ? (
             <button
               type="button"
               onClick={() => setFilter(null)}
-              className="mb-1 inline-flex items-center gap-1.5 rounded-full border border-magenta/40 bg-magenta/10 px-2.5 py-1 text-[11px] text-magenta-ink"
+              className="mono inline-flex shrink-0 items-center gap-1.5 self-start rounded-full border border-hud-strong bg-accent/12 px-2.5 py-1 text-[10px] uppercase tracking-[0.08em] text-accent-bright transition-colors hover:border-accent"
             >
-              Filtered by {filter} <X size={11} />
+              Filtered · {filter} <X size={11} />
             </button>
           ) : null}
 
-          {filtered.map((row) => (
-            <FeedItem key={row.id} row={row} resolved={resolved} onResolve={resolveInline} />
-          ))}
+          {/* ── The buckets, named for what they actually are ────────── */}
+          <section
+            className="shrink-0 overflow-hidden rounded-[10px] border border-line-strong bg-surface"
+            style={{ animation: 'eth-rise 520ms cubic-bezier(0.22, 1, 0.36, 1) 120ms both' }}
+          >
+            <header className="flex items-baseline gap-2 px-3.5 pb-2.5 pt-3">
+              <h3 className="text-[13.5px] font-semibold tracking-[-0.015em] text-ink">
+                {onRecordOnly ? 'On record' : 'This run'}
+              </h3>
+              <span className="mono text-[9.5px] text-ink-3">
+                {verdictTotal} {verdictTotal === 1 ? 'page' : 'pages'}
+                {onRecordOnly ? ' · earlier run' : ''}
+              </span>
+            </header>
+            {/* The four shares as one bar, each segment filling from the left. */}
+            {verdictTotal > 0 ? (
+              <div className="mx-3.5 mb-3 flex h-1.5 gap-0.5 overflow-hidden rounded-[3px]" aria-hidden="true">
+                {BUCKET_META.map((meta, i) => {
+                  const count = buckets.find((b) => b.id === meta.id)?.count ?? 0
+                  return count > 0 ? (
+                    <span
+                      key={meta.id}
+                      className="block origin-left"
+                      style={{ flex: count, background: meta.tone, animation: `eth-seg 720ms cubic-bezier(0.16, 1, 0.3, 1) ${260 + i * 110}ms both` }}
+                    />
+                  ) : null
+                })}
+              </div>
+            ) : null}
+            <div className="flex flex-col">
+              {BUCKET_META.map((meta, i) => {
+                const count = buckets.find((b) => b.id === meta.id)?.count ?? 0
+                const share = verdictTotal === 0 ? 0 : Math.round((count / verdictTotal) * 100)
+                const yours = meta.id === 'needs_review' && count > 0
+                return (
+                  <button
+                    key={meta.id}
+                    type="button"
+                    onClick={() => setFilter(filter === meta.id ? null : meta.id)}
+                    disabled={count === 0}
+                    className={`flex items-center gap-2.5 border-t border-line px-3.5 py-2 text-left transition-colors first:border-t-0 ${
+                      count === 0 ? 'opacity-55' : 'hover:bg-surface-2'
+                    } ${filter === meta.id ? 'bg-accent/8' : ''}`}
+                  >
+                    {yours ? <Breathe tone={meta.tone} /> : (
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: count > 0 ? meta.tone : 'var(--color-line-strong)' }} aria-hidden="true" />
+                    )}
+                    <span className="text-[12px] text-ink-2">{meta.label}</span>
+                    {yours ? (
+                      <span className="mono rounded-[3px] border border-warn/50 px-1.5 py-px text-[8.5px] uppercase tracking-[0.08em] text-warn">Yours</span>
+                    ) : null}
+                    <span className="ml-auto block h-[3px] w-16 overflow-hidden rounded-[2px] bg-surface-3">
+                      <span
+                        className="block h-full"
+                        style={{ width: `${share}%`, background: meta.tone, transformOrigin: 'left', animation: `eth-seg 620ms cubic-bezier(0.16, 1, 0.3, 1) ${i * 80}ms both` }}
+                      />
+                    </span>
+                    <span
+                      className="mono w-7 shrink-0 text-right text-[14px]"
+                      style={{ color: count > 0 ? meta.tone : 'var(--color-ink-3)', animation: `eth-num-in 420ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 60}ms both` }}
+                    >
+                      {count}
+                    </span>
+                    <span className="mono w-8 shrink-0 text-right text-[9.5px] text-ink-3">{share}%</span>
+                  </button>
+                )
+              })}
+            </div>
+          </section>
 
-          {finished ? (
-            <CompletionPanel
-              trending={trending.map((t) => ({ term: t.term, score: t.trend_score, rank: t.rank ?? 0 }))}
-              topHashtags={topHashtags.map((h) => ({ tag: h.display_tag, score: h.hashtag_score }))}
-              buckets={buckets}
-              needsReview={rows.filter((r) => r.kind === 'verdict' && r.verdict === 'needs_review')}
-              newTrendIdeas={newTrendIdeas.map((i) => ({
-                id: i.id,
-                title: i.title,
-                platform: i.platform,
-                slot: i.calendar_slot,
-                rank: i.platform_rank,
-              }))}
-              resolved={resolved}
-              onResolve={resolveInline}
-              onFilter={setFilter}
-              onNavigate={leaveFor}
-              onClose={closeTheater}
-            />
+          {/* ── The ones only a person can clear ─────────────────────── */}
+          {outstanding.length > 0 ? (
+            <section
+              className="shrink-0 overflow-hidden rounded-[10px] border border-warn/55 bg-surface"
+              style={{ animation: 'eth-rise 560ms cubic-bezier(0.22, 1, 0.36, 1) 320ms both' }}
+            >
+              <header className="flex items-center gap-2 border-b border-warn/35 px-3.5 py-2.5">
+                <Breathe tone="var(--color-warn)" />
+                <h3 className="text-[13.5px] font-semibold tracking-[-0.015em] text-ink">
+                  {outstanding.length} still need{outstanding.length === 1 ? 's' : ''} a verdict from you
+                </h3>
+              </header>
+              <ul className="flex flex-col">
+                {outstanding.slice(0, 6).map((row) =>
+                  row.kind === 'verdict' ? (
+                    <li key={row.id} className="border-t border-line px-3.5 py-2.5 first:border-t-0">
+                      <div className="flex items-center gap-2">
+                        <span className="mono rounded-[3px] bg-warn/12 px-1.5 py-px text-[8.5px] uppercase tracking-[0.08em] text-warn">Needs review</span>
+                        {row.onRecord ? (
+                          <span className="mono text-[9px] uppercase tracking-[0.08em] text-ink-3">captured {row.onRecord}</span>
+                        ) : null}
+                      </div>
+                      <p className="mt-1.5 text-[12.5px] font-medium leading-[1.4] text-ink">{row.title}</p>
+                      {row.reason || row.evidence ? (
+                        <div className="mt-[7px] border-l border-serious/60 pl-[9px]">
+                          {row.reason ? <p className="text-[11.5px] leading-[1.5] text-ink-2">{row.reason}</p> : null}
+                          {row.evidence ? <p className="mono mt-1 text-[9.5px] text-ink-3">{row.evidence}</p> : null}
+                        </div>
+                      ) : null}
+                      <div className="mt-2 flex items-center gap-2">
+                        <Btn variant="primary" onClick={() => resolveInline(row.entityId, 'validated')}>Validate</Btn>
+                        <Btn variant="ghost" onClick={() => resolveInline(row.entityId, 'rejected')}>Reject</Btn>
+                      </div>
+                    </li>
+                  ) : null,
+                )}
+              </ul>
+            </section>
           ) : null}
-        </section>
+
+          {/* ── The knobs that produced this outcome ─────────────────── */}
+          <section
+            className="shrink-0 rounded-[10px] border border-line-strong bg-surface px-3.5 py-3"
+            style={{ animation: 'eth-rise 560ms cubic-bezier(0.22, 1, 0.36, 1) 480ms both' }}
+          >
+            <p className="mono text-[9px] uppercase tracking-[0.14em] text-ink-3">What would change the outcome</p>
+            {levers.length === 0 ? (
+              <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">
+                This run reported nothing that a settings change would have altered. Every lever here is
+                measured against what actually happened, so none is offered until there is something to
+                measure.
+              </p>
+            ) : (
+              <ol className="mt-[9px] flex flex-col gap-2">
+                {levers.map((lever, i) => (
+                  <li key={lever.knob}>
+                    <button
+                      type="button"
+                      onClick={() => { closeTheater(); setPage('studio') }}
+                      title="Open this knob in Agent Studio"
+                      className="flex w-full items-start gap-[9px] rounded-[7px] border border-line-strong bg-page px-2.5 py-2 text-left transition-colors hover:border-accent"
+                    >
+                      <span className="mono mt-px shrink-0 text-[9.5px] text-accent-bright">{String(i + 1).padStart(2, '0')}</span>
+                      <span className="min-w-0">
+                        <span className="block text-[12px] font-medium text-ink">{lever.knob}</span>
+                        <span className="block text-[11px] leading-[1.5] text-ink-3">{lever.consequence}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+            {levers.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => { closeTheater(); setPage('studio') }}
+                className="mono mt-2.5 inline-flex items-center gap-1.5 rounded-[5px] border border-line-strong px-2 py-1 text-[9.5px] uppercase tracking-[0.08em] text-ink-2 transition-colors hover:border-accent hover:text-ink"
+              >
+                Open Agent Studio
+              </button>
+            ) : null}
+
+          </section>
+
+          {/* ── The feed: every row the run reported, in order ───────── */}
+          <section ref={feedRef} className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
+            <p className="mono sticky top-0 z-10 bg-page/95 py-1 text-[9px] uppercase tracking-[0.14em] text-ink-3 backdrop-blur-sm">
+              The run, row by row
+            </p>
+            {filtered.map((row) => (
+              <FeedItem key={row.id} row={row} resolved={resolved} onResolve={resolveInline} />
+            ))}
+
+            {finished ? (
+              <CompletionPanel
+                trending={trending.map((t) => ({ term: t.term, score: t.trend_score, rank: t.rank ?? 0 }))}
+                topHashtags={topHashtags.map((h) => ({ tag: h.display_tag, score: h.hashtag_score }))}
+                buckets={buckets}
+                needsReview={rows.filter((r) => r.kind === 'verdict' && r.verdict === 'needs_review')}
+                newTrendIdeas={newTrendIdeas.map((i) => ({
+                  id: i.id,
+                  title: i.title,
+                  platform: i.platform,
+                  slot: i.calendar_slot,
+                  rank: i.platform_rank,
+                }))}
+                resolved={resolved}
+                onResolve={resolveInline}
+                onFilter={setFilter}
+                onNavigate={leaveFor}
+                onClose={closeTheater}
+              />
+            ) : null}
+          </section>
+        </aside>
       </div>
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
-      <footer className="glass shrink-0 border-t border-line px-5 py-2.5">
-        <Progress value={stage === 'scrape' ? (progress / 100) * 45 : 45 + (progress / 100) * 55} />
-        <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-ink-3">
-          <span className="tabular font-medium text-ink-2">{progress}%</span>
+      <footer className="shrink-0 border-t border-line bg-surface px-5 py-2.5">
+        <RunBar progress={progress} stage={stage} paused={paused} />
+        <div className="mono mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9.5px] uppercase tracking-[0.08em] text-ink-3">
+          <span className="text-ink-2">{progress}%</span>
+          <span aria-hidden="true">·</span>
           <span>
-            {rows.filter((r) => r.kind === 'capture').length} captured ·{' '}
-            {rows.filter((r) => r.kind === 'verdict').length} scored ·{' '}
-            {buckets.find((b) => b.id === 'needs_review')?.count ?? 0} for review
+            <span className="text-ink-2">{rows.filter((r) => r.kind === 'capture').length}</span> captured
+          </span>
+          <span aria-hidden="true">·</span>
+          <span>
+            <span className="text-ink-2">{scoredNow}</span> scored
+          </span>
+          {verdictTotal > scoredNow ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span><span className="text-ink-2">{verdictTotal - scoredNow}</span> on record</span>
+            </>
+          ) : null}
+          <span aria-hidden="true">·</span>
+          <span className={(buckets.find((b) => b.id === 'needs_review')?.count ?? 0) > 0 ? 'text-warn' : undefined}>
+            <span className={(buckets.find((b) => b.id === 'needs_review')?.count ?? 0) > 0 ? '' : 'text-ink-2'}>
+              {buckets.find((b) => b.id === 'needs_review')?.count ?? 0}
+            </span>{' '}
+            for review
           </span>
           {finished && runSummary ? (
-            <span className="tabular text-ink-2">
-              This run · {runSummary.postsScraped ?? 0} captured live · {runSummary.duplicate ?? 0} already held ·{' '}
-              {runSummary.trending ?? 0} trending · {runSummary.ideas ?? 0} ideas placed
-            </span>
+            <>
+              <span aria-hidden="true">·</span>
+              {/* The server's own tally, under the names of what it counts:
+                  pages that reached scoring, and the scoring stage's duplicate
+                  bucket — not captures, and not the prefilter's holds. */}
+              <span className="text-ink-2">
+                server tally · {runSummary.postsScraped ?? 0} reached scoring · {runSummary.duplicate ?? 0} duplicate at scoring ·{' '}
+                {runSummary.trending ?? 0} trending · {runSummary.ideas ?? 0} ideas placed
+              </span>
+            </>
           ) : null}
-          <span className="ml-auto rounded-full border border-line px-2 py-0.5">Space · pause</span>
+          <span className="ml-auto rounded-[3px] border border-line px-1.5 py-px">space · pause</span>
         </div>
       </footer>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE STAGE
+
+   Five stations on a rail, in depth. Depth comes from position and scale,
+   never skew; the camera breathes over 84 seconds and nothing else about the
+   scene moves unless a process is moving. Packets ride a rail only while
+   work is crossing it. The gate marker sits on the rail where every packet
+   was turned back.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+type StationStatus = 'idle' | 'working' | 'done' | 'attention' | 'record'
+type RailKind = 'idle' | 'working' | 'done' | 'held'
+
+interface Station {
+  id: string
+  /** The small mono tag: SOURCE, 01, 02, ON RECORD, 03. */
+  tag: string
+  name: string
+  sub: string
+  /** The one figure this station produced, in its own colour. */
+  figure: string
+  caption: string
+  status: StationStatus
+}
+
+const STATION_TONE: Record<StationStatus, string> = {
+  idle: 'var(--color-ink-3)',
+  working: 'var(--color-accent-bright)',
+  done: 'var(--color-good)',
+  attention: 'var(--color-serious)',
+  record: 'var(--color-ink-3)',
+}
+const STATION_WORD: Record<StationStatus, string> = {
+  idle: 'NOT REACHED',
+  working: 'WORKING',
+  done: 'SETTLED',
+  attention: 'HELD AT THE GATE',
+  record: 'ON RECORD',
+}
+const RAIL_TONE: Record<RailKind, string> = {
+  idle: 'var(--color-line-strong)',
+  working: 'var(--color-accent)',
+  done: 'var(--color-good)',
+  held: 'var(--color-serious)',
+}
+
+/** Where each station stands, from the frame: x, depth, and the turn toward the camera. */
+const STATION_POSE = [
+  { x: -424, z: -44, ry: 5.3 },
+  { x: -212, z: 22, ry: 2.6 },
+  { x: 0, z: 58, ry: 0 },
+  { x: 212, z: 22, ry: -2.6 },
+  { x: 424, z: -44, ry: -5.3 },
+] as const
+const RAIL_POSE = [
+  { x: -424, z: -44, ry: -17.29, len: 222 },
+  { x: -212, z: 22, ry: -9.64, len: 215 },
+  { x: 0, z: 58, ry: 9.64, len: 215 },
+  { x: 212, z: 22, ry: 17.29, len: 222 },
+] as const
+
+function formatSeconds(total: number): string {
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return m > 0 ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`
+}
+
+function RunStage({
+  stations,
+  rails,
+  selected,
+  paused,
+  onSelect,
+}: {
+  stations: Station[]
+  rails: RailKind[]
+  selected: number
+  paused: boolean
+  onSelect: (index: number) => void
+}) {
+  const reduced = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const play = paused || reduced ? 'paused' : 'running'
+  return (
+    <div className="relative mt-2 min-h-0 flex-1 overflow-hidden rounded-[10px] bg-page">
+      {/* light from above, and the edges held */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+        <span
+          className="absolute left-1/2 top-[-30%] h-[620px] w-[1100px] -translate-x-1/2 rounded-full"
+          style={{ background: 'radial-gradient(circle, color-mix(in srgb, var(--color-accent) 14%, transparent), transparent 64%)' }}
+        />
+        <span className="absolute inset-0" style={{ background: 'radial-gradient(110% 90% at 50% 40%, transparent 50%, color-mix(in srgb, var(--color-page) 92%, transparent) 100%)' }} />
+      </div>
+
+      {/* Under `preserve-3d`, a card at negative depth sits behind its parent's
+          own plane, so the parent wins every hit test. Nothing here takes the
+          pointer except the cards themselves. */}
+      <div className="absolute inset-0" style={{ perspective: 1150, perspectiveOrigin: '50% 50%', pointerEvents: 'none' }}>
+        <div
+          className="absolute left-1/2 top-1/2 h-0 w-0"
+          style={{
+            transformStyle: 'preserve-3d',
+            transform: 'translate(-50%, -50%) translateY(6px) scale(0.86) rotateY(-1.4deg) rotateX(20deg)',
+            animation: 'eth-cam5 84s cubic-bezier(0.4, 0, 0.2, 1) infinite',
+            animationPlayState: reduced ? 'paused' : 'running',
+            willChange: 'transform',
+          }}
+        >
+          {/* the floor */}
+          <div
+            aria-hidden="true"
+            className="absolute left-1/2 top-1/2 h-[800px] w-[1400px] -ml-[700px] -mt-[400px]"
+            style={{
+              transformOrigin: '50% 50%',
+              transform: 'translate3d(0, 64px, 0) rotateX(88deg)',
+              backgroundImage:
+                'linear-gradient(to right, color-mix(in srgb, var(--color-accent) 13%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--color-accent) 13%, transparent) 1px, transparent 1px)',
+              backgroundSize: '48px 48px',
+              WebkitMaskImage: 'radial-gradient(48% 52% at 50% 50%, #000 20%, transparent 100%)',
+              maskImage: 'radial-gradient(48% 52% at 50% 50%, #000 20%, transparent 100%)',
+            }}
+          />
+          <div
+            aria-hidden="true"
+            className="absolute left-1/2 top-1/2 h-px w-[1400px] -ml-[700px]"
+            style={{
+              transform: 'translate3d(0, 64px, 0) rotateX(88deg)',
+              background: 'linear-gradient(to right, transparent, color-mix(in srgb, var(--color-accent) 45%, transparent) 50%, transparent)',
+            }}
+          />
+
+          {/* the pool of light under the selected station */}
+          <div
+            aria-hidden="true"
+            className="absolute left-1/2 top-1/2 h-[280px] w-[360px] -ml-[180px] -mt-[140px] rounded-full"
+            style={{
+              transform: `translate3d(${STATION_POSE[selected]?.x ?? 0}px, 60px, ${STATION_POSE[selected]?.z ?? 0}px) rotateX(88deg)`,
+              transition: 'transform 520ms cubic-bezier(0.34, 1.3, 0.64, 1)',
+              background: 'radial-gradient(circle, color-mix(in srgb, var(--color-accent) 22%, transparent), transparent 62%)',
+              animation: 'eth-pool 6s cubic-bezier(0.4, 0, 0.2, 1) infinite',
+              animationPlayState: play,
+            }}
+          />
+
+          {/* the rails */}
+          {RAIL_POSE.map((pose, i) => {
+            const kind = rails[i] ?? 'idle'
+            return (
+              <div
+                key={i}
+                aria-hidden="true"
+                className="absolute left-1/2 top-1/2 h-px"
+                style={{
+                  width: pose.len,
+                  ['--len' as string]: `${pose.len}px`,
+                  transformOrigin: '0 50%',
+                  transform: `translate3d(${pose.x}px, 0, ${pose.z}px) rotateY(${pose.ry}deg)`,
+                  background: RAIL_TONE[kind],
+                  opacity: kind === 'idle' ? 0.35 : 0.7,
+                  transition: 'opacity 320ms ease, background-color 320ms ease',
+                }}
+              >
+                <span
+                  className="absolute right-[-1px] top-[-3px] h-0 w-0 border-y-[3.5px] border-l-[6px] border-y-transparent"
+                  style={{ borderLeftColor: RAIL_TONE[kind] }}
+                />
+                {/* information moving: two packets, half a beat apart */}
+                {kind === 'working'
+                  ? [0, 0.9].map((delay) => (
+                      <span
+                        key={delay}
+                        className="absolute left-0 top-[-2.5px] h-1.5 w-1.5 rounded-full bg-accent-bright"
+                        style={{
+                          boxShadow: '0 0 8px 1px var(--color-accent-bright)',
+                          opacity: 0,
+                          animation: `eth-pkt3 1.8s cubic-bezier(0.45, 0, 0.55, 1) ${delay}s infinite`,
+                          animationPlayState: play,
+                        }}
+                      />
+                    ))
+                  : null}
+                {/* turned back at the gate */}
+                {kind === 'held' ? (
+                  <>
+                    <span className="absolute left-1/2 top-[-16px] h-8 w-px bg-serious opacity-70" />
+                    <span
+                      className="absolute left-1/2 top-[-3px] h-[7px] w-[7px] -ml-[3.5px] rounded-full bg-serious"
+                      style={{ boxShadow: '0 0 8px 1px var(--color-serious)', animation: 'eth-pkt-stop 2.6s cubic-bezier(0.33, 1, 0.68, 1) infinite', animationPlayState: play }}
+                    />
+                  </>
+                ) : null}
+              </div>
+            )
+          })}
+
+          {/* what comes after this theater */}
+          <div
+            aria-hidden="true"
+            className="mono absolute left-1/2 top-1/2 whitespace-nowrap text-[9px] tracking-[0.14em] text-ink-3"
+            style={{ transform: 'translate3d(424px, -66px, -44px) translateX(-50%)' }}
+          >
+            THEN → CREATE
+          </div>
+
+          {/* the stations */}
+          {stations.map((station, i) => {
+            const pose = STATION_POSE[i]
+            if (!pose) return null
+            const active = i === selected
+            const tone = STATION_TONE[station.status]
+            const dim = station.status === 'idle' || station.status === 'record'
+            return (
+              <div
+                key={station.id}
+                role="button"
+                tabIndex={0}
+                aria-pressed={active}
+                aria-label={`${station.name} · ${station.figure}`}
+                onClick={() => onSelect(i)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    onSelect(i)
+                  }
+                }}
+                className="absolute left-1/2 top-1/2 h-[92px] w-[160px] -ml-[80px] -mt-[46px] cursor-pointer outline-none"
+                style={{
+                  pointerEvents: 'auto',
+                  transformStyle: 'preserve-3d',
+                  transform: `translate3d(${pose.x}px, ${active ? -10 : 0}px, ${pose.z}px) rotateY(${pose.ry}deg)`,
+                  transition: 'transform 520ms cubic-bezier(0.34, 1.3, 0.64, 1), opacity 420ms ease',
+                  opacity: dim && !active ? 0.82 : 1,
+                }}
+              >
+                <div
+                  className={`absolute inset-0 overflow-hidden rounded-[10px] border bg-surface px-[13px] py-[11px] transition-[border-color,box-shadow] duration-[320ms] ${
+                    active ? 'border-accent' : 'border-line-strong'
+                  }`}
+                  style={{ boxShadow: `0 1px 0 color-mix(in srgb, var(--color-ink) 5%, transparent) inset, 0 18px 40px -20px color-mix(in srgb, var(--color-page) 70%, black)${active ? ', 0 0 0 1px var(--color-accent)' : ''}` }}
+                >
+                  <span className="absolute inset-x-0 top-0 h-[2px]" style={{ background: tone, opacity: dim ? 0.35 : 1, transition: 'opacity 320ms ease' }} aria-hidden="true" />
+                  <div className="flex items-center gap-[7px]">
+                    <span className="mono text-[9px] tracking-[0.14em]" style={{ color: tone }}>{station.tag}</span>
+                    <span className="ml-auto flex h-3 w-3 items-center justify-center">
+                      {station.status === 'working' && !paused ? (
+                        <WorkArc size={12} />
+                      ) : station.status === 'attention' ? (
+                        <Breathe tone={tone} />
+                      ) : (
+                        <span className="h-[5px] w-[5px] rounded-full" style={{ background: tone, opacity: dim ? 0.5 : 1 }} aria-hidden="true" />
+                      )}
+                    </span>
+                  </div>
+                  <p className="mt-[7px] truncate text-[13.5px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink">{station.name}</p>
+                  <p className="mono mt-0.5 truncate text-[9.5px] text-ink-3">{station.sub}</p>
+                  <p className="mono absolute inset-x-[13px] bottom-[9px] truncate text-[9.5px]" style={{ color: tone }}>{station.figure}</p>
+                </div>
+                <div className="absolute inset-x-0 top-full h-2 rounded-b-[10px] opacity-50" style={{ background: 'linear-gradient(to bottom, color-mix(in srgb, black 70%, transparent), transparent)' }} aria-hidden="true" />
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE MOTION VOCABULARY
+
+   Four of the eight named motions appear on this screen, and each means
+   exactly one thing: an agent is working (work arc), information is moving
+   (signal travel), a decision landed (commit), a human is required (attention
+   breathe). Nothing else on this screen loops.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** An agent is working. The only looping motion allowed on a busy agent. */
+function WorkArc({ size = 13 }: { size?: number }) {
+  return (
+    <span
+      className="block shrink-0 rounded-full border-[1.5px] border-accent border-t-transparent"
+      style={{ width: size, height: size, animation: 'eth-work-arc 1.5s linear infinite' }}
+      aria-hidden="true"
+    />
+  )
+}
+
+/** A decision landed. One stroke, drawn once, never looped. */
+function Commit({ size = 12, tone = 'currentColor' }: { size?: number; tone?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="shrink-0" aria-hidden="true">
+      <path
+        d="M4 12.5 L9.5 18 L20 6"
+        stroke={tone}
+        strokeWidth="2.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ strokeDasharray: 26, animation: 'eth-commit-check 420ms cubic-bezier(0.16, 1, 0.3, 1) both' }}
+      />
+    </svg>
+  )
+}
+
+/** A human is required here. */
+function Breathe({ tone }: { tone: string }) {
+  return (
+    <span
+      className="block h-1.5 w-1.5 shrink-0 rounded-full"
+      style={{ background: tone, animation: 'eth-attention-breathe 2.6s var(--ease-in-out-soft) infinite' }}
+      aria-hidden="true"
+    />
+  )
+}
+
+/**
+ * The run, as two phases rather than one number.
+ *
+ * A single bar hid the fact that the first 45% is Sherlock capturing and the
+ * rest is Dexter scoring — so a bar sitting at 40% read as "nearly half done"
+ * when no page had been scored at all. Each phase fills on its own, and the
+ * signal rides only the phase that is actually carrying work.
+ */
+function RunBar({ progress, stage, paused }: { progress: number; stage: 'scrape' | 'validate' | 'done'; paused: boolean }) {
+  const scrapePct = stage === 'scrape' ? progress : 100
+  const validatePct = stage === 'scrape' ? 0 : stage === 'done' ? 100 : progress
+  const phases = [
+    { id: 'scrape', label: 'Capture', basis: 45, pct: scrapePct, live: stage === 'scrape' },
+    { id: 'validate', label: 'Score', basis: 55, pct: validatePct, live: stage === 'validate' },
+  ]
+  return (
+    <div className="flex items-center gap-1">
+      {phases.map((phase) => (
+        <span
+          key={phase.id}
+          className="relative block h-1.5 overflow-hidden rounded-[3px] bg-surface-3"
+          style={{ flexGrow: phase.basis, flexBasis: 0 }}
+          title={`${phase.label} · ${Math.round(phase.pct)}%`}
+        >
+          <span
+            className="absolute inset-y-0 left-0 rounded-[3px] bg-accent"
+            style={{ width: `${Math.max(0, Math.min(100, phase.pct))}%`, transition: 'width 420ms cubic-bezier(0.16, 1, 0.3, 1)' }}
+          />
+          {phase.live && !paused ? (
+            <span
+              className="absolute top-1/2 h-[3px] w-[3px] -translate-y-1/2 rounded-full bg-accent-bright"
+              style={{ animation: 'eth-signal 1.8s linear infinite' }}
+            />
+          ) : null}
+        </span>
+      ))}
     </div>
   )
 }
@@ -647,11 +1505,16 @@ function FeedItem({
   resolved: Record<string, string>
   onResolve: (entityId: string, verdict: ValidationVerdict) => void
 }) {
+  // New data arrived: every row enters with the same motion, so the feed reads
+  // as one stream rather than five kinds of thing appearing five ways.
+  const enter = { animation: 'eth-row-stream 420ms cubic-bezier(0.16, 1, 0.3, 1) both' }
+
   if (row.kind === 'note') {
     return (
       <div
-        className={`anim-stream-in rounded-lg border px-3 py-2 text-[11.5px] leading-relaxed ${
-          row.tone === 'warn' ? 'border-warn/40 bg-warn/10 text-warn' : 'border-line bg-surface-2 text-ink-2'
+        style={enter}
+        className={`rounded-[10px] border px-3 py-2 text-[11.5px] leading-relaxed ${
+          row.tone === 'warn' ? 'border-warn/40 bg-warn/10 text-warn' : 'border-line-strong bg-surface-2 text-ink-2'
         }`}
       >
         {row.text}
@@ -659,71 +1522,99 @@ function FeedItem({
     )
   }
 
-  if (row.kind === 'capture') {
-    return (
-      <div
-        className={`anim-stream-in flex flex-wrap items-center gap-2 rounded-lg border border-line px-3 py-1.5 ${
-          row.held ? 'opacity-70' : ''
-        }`}
-      >
-        <span className="rounded-full border border-line px-2 py-0.5 text-[10px] text-ink-3">{row.keyword}</span>
-        {row.platform === null ? (
-          <span className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3">Open web</span>
-        ) : (
-          <PlatformIcon platform={row.platform} size={12} />
-        )}
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2">{row.title}</span>
-        <span
-          className="tabular text-[11px] text-ink-3"
-          title={row.engagement === null ? 'The source stated no engagement figures' : undefined}
-        >
-          {row.engagement === null ? 'N/A' : fmt(row.engagement)}
-        </span>
-        {row.held ? (
-          <span
-            className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3"
-            title={row.held.originalTitle ? `On record as “${row.held.originalTitle}”` : undefined}
-          >
-            Already held · captured {timeAgo(row.held.since)}
-          </span>
-        ) : (
-          <span className="tabular rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3">
-            Rel {row.relevance}%
-          </span>
-        )}
-      </div>
-    )
-  }
-
+  /* ── A lane: one keyword being read on one platform ──────────────────── */
   if (row.kind === 'lane') {
     const laneLabel = row.platform === 'open-web' ? 'Open web' : row.platform
     const tone =
       row.status === 'warn'
         ? 'border-warn/40 bg-warn/8'
         : row.status === 'running'
-          ? 'border-accent/35 bg-accent/6'
-          : 'border-line'
+          ? 'border-hud-strong bg-accent/8'
+          : 'border-line-strong'
     return (
-      <div className={`anim-stream-in flex flex-wrap items-center gap-2 rounded-lg border px-3 py-1.5 ${tone}`}>
-        <span className="rounded-full border border-line px-2 py-0.5 text-[10px] capitalize text-ink-3">
+      <div style={enter} className={`flex flex-wrap items-center gap-2 rounded-[10px] border px-3 py-1.5 ${tone}`}>
+        <span className="flex h-[13px] w-[13px] shrink-0 items-center justify-center">
+          {row.status === 'running' ? (
+            <WorkArc size={13} />
+          ) : row.status === 'warn' ? (
+            <span className="h-1.5 w-1.5 rounded-full bg-warn" aria-hidden="true" />
+          ) : (
+            <span className="text-good-ink">
+              <Commit size={13} />
+            </span>
+          )}
+        </span>
+        <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3">
           {laneLabel}
         </span>
         <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2">{row.keyword}</span>
         {row.status === 'running' ? (
-          <span className="text-[11px] text-accent-bright">capturing…</span>
+          <span className="mono text-[9.5px] uppercase tracking-[0.08em] text-accent-bright">capturing</span>
         ) : row.status === 'warn' ? (
-          <span className="truncate text-[11px] text-warn" title={row.reason ?? undefined}>
+          <span className="mono truncate text-[9.5px] uppercase tracking-[0.08em] text-warn" title={row.reason ?? undefined}>
             nothing captured{row.reason === null ? '' : ` · ${row.reason}`}
           </span>
         ) : (
-          <span className="tabular text-[11px] text-ink-3">
-            {row.kept ?? 0} kept{row.captured === null ? '' : ` of ${row.captured}`}
+          <span className="mono text-[10px] text-ink-3">
+            <span className="text-ink-2">{row.kept ?? 0}</span> kept
+            {row.captured === null ? '' : ` of ${row.captured}`}
           </span>
         )}
       </div>
     )
   }
 
+  /* ── A capture: one page that came back from a lane ──────────────────── */
+  if (row.kind === 'capture') {
+    return (
+      <div
+        style={enter}
+        className={`flex flex-wrap items-center gap-2 rounded-[10px] border px-3 py-1.5 ${
+          row.held ? 'border-line bg-surface opacity-70' : 'border-line-strong'
+        }`}
+      >
+        <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3">
+          {row.keyword}
+        </span>
+        <span className="flex h-3 w-3 shrink-0 items-center justify-center">
+          {row.platform === null ? (
+            <span className="mono text-[8px] uppercase tracking-[0.06em] text-ink-3" title="Read from the open web, not a platform lane">
+              web
+            </span>
+          ) : (
+            <PlatformIcon platform={row.platform} size={12} />
+          )}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2" title={row.title}>
+          {row.title}
+        </span>
+        <span className="mono shrink-0 text-[10px] text-ink-3" title={row.source}>
+          {row.engagement === null ? 'N/A' : fmt(row.engagement)}
+        </span>
+        {row.held ? (
+          <span
+            className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3"
+            title={row.held.originalTitle ? `On record as “${row.held.originalTitle}”` : undefined}
+          >
+            held · {timeAgo(row.held.since)}
+          </span>
+        ) : (
+          /* Confidence fill: the relevance the scraper measured, drawn. */
+          <span className="flex shrink-0 items-center gap-1.5" title={`Relevance ${row.relevance}%`}>
+            <span className="block h-[3px] w-9 overflow-hidden rounded-[2px] bg-surface-3">
+              <span
+                className="block h-full bg-accent"
+                style={{ width: `${Math.max(0, Math.min(100, row.relevance))}%`, transformOrigin: 'left', animation: 'eth-seg 560ms cubic-bezier(0.16, 1, 0.3, 1) both' }}
+              />
+            </span>
+            <span className="mono w-7 text-right text-[10px] text-ink-3">{row.relevance}</span>
+          </span>
+        )}
+      </div>
+    )
+  }
+
+  /* ── Scoring: the four measures, filling ─────────────────────────────── */
   if (row.kind === 'scoring') {
     const bars = [
       { label: 'Credibility', value: row.credibility },
@@ -732,22 +1623,29 @@ function FeedItem({
       { label: 'Unique', value: row.unique },
     ]
     return (
-      <div className="anim-stream-in rounded-lg border border-accent/35 bg-accent/6 px-3 py-2">
-        <p className="truncate text-[11.5px] text-ink-2">scoring… {row.title}</p>
-        <div className="mt-1.5 space-y-1">
+      <div style={enter} className="rounded-[10px] border border-hud-strong bg-accent/6 px-3 py-2">
+        <div className="flex items-center gap-2">
+          <WorkArc size={11} />
+          <span className="mono shrink-0 text-[9px] uppercase tracking-[0.1em] text-accent-bright">scoring</span>
+          <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{row.title}</span>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
           {bars.map((bar, i) => (
             <div key={bar.label} className="flex items-center gap-2">
-              <span className="w-16 shrink-0 text-[10px] text-ink-3">{bar.label}</span>
-              <span className="h-1 flex-1 overflow-hidden rounded-full bg-surface-3">
+              <span className="mono w-[52px] shrink-0 text-[9px] uppercase tracking-[0.06em] text-ink-3">
+                {bar.label.slice(0, 4)}
+              </span>
+              <span className="block h-[3px] flex-1 overflow-hidden rounded-[2px] bg-surface-3">
                 <span
-                  className="block h-full rounded-full bg-accent"
+                  className="block h-full bg-accent"
                   style={{
-                    width: `${bar.value}%`,
-                    transition: `width var(--dur-slow) var(--ease-out-expo) ${i * 90}ms`,
+                    width: `${Math.max(0, Math.min(100, bar.value))}%`,
+                    transformOrigin: 'left',
+                    animation: `eth-seg 620ms cubic-bezier(0.16, 1, 0.3, 1) ${i * 90}ms both`,
                   }}
                 />
               </span>
-              <span className="tabular w-8 text-right text-[10px] text-ink-3">{bar.value}</span>
+              <span className="mono w-6 shrink-0 text-right text-[10px] text-ink-3">{bar.value}</span>
             </div>
           ))}
         </div>
@@ -755,39 +1653,59 @@ function FeedItem({
     )
   }
 
+  /* ── A verdict: the decision, and what it rests on ───────────────────── */
   const style = VERDICT_STYLE[row.verdict]
   const decision = resolved[row.entityId]
+  const needsHuman = row.verdict === 'needs_review' && decision === undefined
 
   return (
-    <div className="anim-stream-in rounded-lg border px-3 py-2" style={{ borderColor: `color-mix(in srgb, ${style.tone} 40%, transparent)` }}>
+    <div
+      style={{ ...enter, borderColor: `color-mix(in srgb, ${style.tone} 40%, transparent)` }}
+      className="rounded-[10px] border px-3 py-2"
+    >
       <div className="flex flex-wrap items-center gap-2">
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: style.tone }} aria-hidden="true" />
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2">{row.title}</span>
+        <span className="flex h-3 w-3 shrink-0 items-center justify-center" style={{ color: style.tone }}>
+          {needsHuman ? (
+            <Breathe tone={style.tone} />
+          ) : row.onRecord ? (
+            <span className="h-1.5 w-1.5 rounded-full" style={{ background: style.tone }} aria-hidden="true" />
+          ) : (
+            <Commit size={12} tone={style.tone} />
+          )}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2" title={row.title}>
+          {row.title}
+        </span>
         <span
-          className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+          className="mono shrink-0 rounded-[3px] px-1.5 py-px text-[9px] uppercase tracking-[0.08em]"
           style={{ color: style.tone, background: `color-mix(in srgb, ${style.tone} 12%, transparent)` }}
         >
           {style.label}
         </span>
         {row.onRecord ? (
           <span
-            className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-ink-3"
+            className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3"
             title="Reached by an earlier run. Not re-scored this run."
           >
-            On record · captured {row.onRecord}
+            on record · {row.onRecord}
           </span>
         ) : null}
       </div>
 
-      {row.reason ? <p className="mt-1 text-[11px] leading-relaxed text-ink-3">{row.reason}</p> : null}
+      {/* Rule 6: every automated decision names the evidence behind it. */}
+      {row.reason ? (
+        <p className="mt-1 border-l pl-2.5 text-[11px] leading-relaxed text-ink-3" style={{ borderColor: `color-mix(in srgb, ${style.tone} 45%, transparent)` }}>
+          {row.reason}
+        </p>
+      ) : null}
 
       {row.verdict === 'needs_review' ? (
         decision ? (
-          <p className="mt-1.5 flex items-center gap-1 text-[11px] text-good-ink">
-            <Check size={11} /> {decision} by you
+          <p className="mono mt-1.5 flex items-center gap-1.5 text-[9.5px] uppercase tracking-[0.08em] text-good-ink">
+            <Commit size={12} tone="var(--color-good)" /> {decision} by you
           </p>
         ) : (
-          <div className="mt-1.5 flex items-center gap-2">
+          <div className="mt-2 flex items-center gap-2">
             <Btn variant="primary" onClick={() => onResolve(row.entityId, 'validated')}>
               Approve
             </Btn>
@@ -831,27 +1749,35 @@ function CompletionPanel({
   const outstanding = needsReview.filter((row) => row.kind === 'verdict' && !resolved[row.entityId])
 
   return (
-    <section className="anim-fade-up card mt-3 p-4">
-      <h3 className="display text-sm">Pipeline run complete</h3>
-      <p className="mt-0.5 text-[12px] text-ink-3">
-        Dora placed the strongest trends into the week.
+    <section
+      className="mt-3 rounded-[10px] border border-line-strong bg-surface-2 p-4"
+      style={{ animation: 'eth-rise 460ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-good-ink">
+          <Commit size={15} tone="var(--color-good)" />
+        </span>
+        <h3 className="text-[13.5px] font-semibold tracking-[-0.01em] text-ink">Pipeline run complete</h3>
+      </div>
+      <p className="mt-0.5 text-[12px] leading-relaxed text-ink-3">
+        {newTrendIdeas.length > 0 ? 'Dora placed the strongest trends into the week.' : 'No new trend to place this run.'}
       </p>
 
       <div className="mt-3">
-        <p className="text-[11px] uppercase tracking-[0.09em] text-ink-3">Top 5 keywords</p>
+        <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">Top 5 keywords</p>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {trending.map((item) => (
-            <span key={item.term} className="flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[11px]">
-              <span className="tabular text-ink-3">{item.rank}</span>
+            <span key={item.term} className="flex items-center gap-1.5 rounded-full border border-hud-strong bg-accent/10 px-2.5 py-1 text-[11px]">
+              <span className="mono text-[9.5px] text-ink-3">{item.rank}</span>
               <span className="font-medium text-ink">{item.term}</span>
-              <span className="tabular text-accent-bright">{item.score}</span>
+              <span className="mono text-[10px] text-accent-bright">{item.score}</span>
             </span>
           ))}
         </div>
       </div>
 
       <div className="mt-3">
-        <p className="text-[11px] uppercase tracking-[0.09em] text-ink-3">
+        <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">
           Top {topHashtags.length} hashtags · consolidated
         </p>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -869,19 +1795,20 @@ function CompletionPanel({
             key={bucket.id}
             type="button"
             onClick={() => onFilter(bucket.id)}
-            className="rounded-lg border border-line bg-surface-2 px-2.5 py-2 text-left transition-colors hover:border-line-strong"
+            className="rounded-md border border-line-strong bg-surface px-2.5 py-2 text-left transition-colors hover:border-accent"
           >
-            <p className="tabular text-lg font-semibold" style={{ color: bucket.tone }}>
+            <p className="mono text-[19px] leading-none" style={{ color: bucket.tone }}>
               {bucket.count}
             </p>
-            <p className="text-[10.5px] text-ink-3">{bucket.label}</p>
+            <p className="mono mt-1 text-[9px] uppercase tracking-[0.08em] text-ink-3">{bucket.label}</p>
           </button>
         ))}
       </div>
 
       {outstanding.length > 0 ? (
-        <div className="mt-3 rounded-xl border border-warn/40 bg-warn/8 p-3">
-          <p className="text-[12px] font-medium text-warn">
+        <div className="mt-3 rounded-[10px] border border-warn/40 bg-warn/8 p-3">
+          <p className="flex items-center gap-2 text-[12px] font-medium text-warn">
+            <Breathe tone="var(--color-warn)" />
             {outstanding.length} item{outstanding.length === 1 ? '' : 's'} still need a verdict
           </p>
           <ul className="mt-2 space-y-1.5">
@@ -904,10 +1831,10 @@ function CompletionPanel({
 
       {newTrendIdeas.length > 0 ? (
         <div className="mt-3">
-          <p className="text-[11px] uppercase tracking-[0.09em] text-ink-3">New trends added to the calendar</p>
+          <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">New trends added to the calendar</p>
           <ul className="mt-1.5 space-y-1">
             {newTrendIdeas.map((idea) => (
-              <li key={idea.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-line px-2.5 py-1.5">
+              <li key={idea.id} className="flex flex-wrap items-center gap-2 rounded-md border border-line-strong px-2.5 py-1.5">
                 <PlatformIcon platform={idea.platform} size={12} />
                 <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{idea.title}</span>
                 <Badge tone={idea.slot === 'primary' ? 'good' : 'neutral'}>

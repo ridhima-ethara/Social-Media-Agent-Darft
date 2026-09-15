@@ -40,6 +40,7 @@ class LearningAgent(Agent):
     icon = identity["icon"]
     stage = "learn"
     hands_off_to = []
+    skills = ["knowledge-base"]
 
     _candidates: list[dict[str, Any]] = []
     _known: list[dict[str, Any]] = []

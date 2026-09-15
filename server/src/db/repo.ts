@@ -23,6 +23,13 @@ import type {
   ValidationVerdict,
 } from '../../../shared/agent-contract'
 import { config } from '../config'
+import {
+  embedMany,
+  embedOne,
+  embeddableText,
+  embeddingModelId,
+  toSqlVector,
+} from '../integrations/embeddings'
 import { query, queryOne } from './pool'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1221,11 +1228,24 @@ export async function insertKnowledgeEntry(e: {
   buildId: string | null
   tags: string[]
 }): Promise<{ id: string } | null> {
+  /*
+   * EMBEDDED ON WRITE, BUT NEVER AT THE COST OF THE WRITE.
+   *
+   * `embedOne` does not throw — an unreachable embedder yields `null`, the row
+   * lands with a NULL embedding, and `npm run db:embed` picks it up later. The
+   * alternative, letting an embedding failure reject the insert, would lose a
+   * cited finding because a model was restarting. Retrieval degrades; the
+   * corpus does not.
+   */
+  const { vector } = await embedOne(embeddableText(e.title, e.content), 'document')
+
   return queryOne<{ id: string }>(
     `INSERT INTO knowledge_entries
        (workspace_id, title, category, content, source, sources, hashtag_id,
-        confidence, evidence_count, active, origin, build_id, tags)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12)
+        confidence, evidence_count, active, origin, build_id, tags,
+        embedding, embedding_model, embedded_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,
+        $13::vector, $14, CASE WHEN $13 IS NULL THEN NULL ELSE now() END)
      RETURNING id`,
     [
       e.workspaceId,
@@ -1240,6 +1260,8 @@ export async function insertKnowledgeEntry(e: {
       e.origin,
       e.buildId,
       e.tags,
+      vector === null ? null : toSqlVector(vector),
+      vector === null ? null : embeddingModelId(),
     ],
   )
 }
@@ -1939,7 +1961,23 @@ export async function persistScrapedItems(
   const sourceRows = await listSources(workspaceId)
   const sourceIdByName = new Map(sourceRows.map((s) => [s.name, s.id]))
 
-  for (const item of items) {
+  /*
+   * ONE BATCHED EMBED FOR THE WHOLE CAPTURE, BEFORE THE INSERT LOOP.
+   *
+   * A crawl returns tens of items at once; embedding them one-per-INSERT would
+   * make the round trips serial and dominate the stage's wall clock. `embedMany`
+   * batches and never rejects, so an unreachable embedder yields a column of
+   * nulls rather than losing the capture — the rows still land, `db:embed`
+   * reaches them later, and retrieval is lexical until it does.
+   */
+  const embedded = await embedMany(
+    items.map((item) => embeddableText(item.title, item.snippet ?? '')),
+    'document',
+  )
+  const modelId = embeddingModelId()
+
+  for (const [index, item] of items.entries()) {
+    const vector = embedded.vectors[index] ?? null
     const row = await queryOne<{ id: string }>(
       `INSERT INTO scraped_items (
          workspace_id, source_id, keyword_id, run_id, external_id, title, snippet, url,
@@ -1948,7 +1986,8 @@ export async function persistScrapedItems(
          relevance, credibility, freshness, is_duplicate,
          validation, verdict_reason, capture_source,
          platform, metrics_available, brand_relevance,
-         posted_at, validated_at
+         posted_at, validated_at,
+         embedding, embedding_model, embedded_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8,
          $9, $10, $11, $12, $13,
@@ -1957,7 +1996,8 @@ export async function persistScrapedItems(
          $23, $24, $25,
          $26, $27, $28,
          $29,
-         CASE WHEN $23 = 'pending' THEN NULL ELSE now() END
+         CASE WHEN $23 = 'pending' THEN NULL ELSE now() END,
+         $30::vector, $31, CASE WHEN $30 IS NULL THEN NULL ELSE now() END
        )
        ON CONFLICT (workspace_id, external_id) DO UPDATE SET
          run_id = EXCLUDED.run_id,
@@ -1975,7 +2015,14 @@ export async function persistScrapedItems(
          platform = EXCLUDED.platform,
          metrics_available = EXCLUDED.metrics_available,
          brand_relevance = EXCLUDED.brand_relevance,
-         validated_at = CASE WHEN EXCLUDED.validation = 'pending' THEN NULL ELSE now() END
+         validated_at = CASE WHEN EXCLUDED.validation = 'pending' THEN NULL ELSE now() END,
+         -- A re-capture keeps the vector it already has when this pass could not
+         -- produce one. COALESCE rather than overwrite: losing an embedding
+         -- because the daemon blinked would silently drop the row out of every
+         -- semantic result while leaving it visible everywhere else.
+         embedding = COALESCE(EXCLUDED.embedding, scraped_items.embedding),
+         embedding_model = COALESCE(EXCLUDED.embedding_model, scraped_items.embedding_model),
+         embedded_at = COALESCE(EXCLUDED.embedded_at, scraped_items.embedded_at)
        RETURNING id`,
       [
         workspaceId,
@@ -2007,6 +2054,8 @@ export async function persistScrapedItems(
         item.metricsAvailable,
         item.brandRelevance,
         item.postedAt,
+        vector === null ? null : toSqlVector(vector),
+        vector === null ? null : modelId,
       ],
     )
     if (row) idByExternal.set(item.externalId, row.id)
@@ -2362,4 +2411,262 @@ export async function publishedCaptions(
     [workspaceId, platform, limit],
   )
   return rows.map((r) => r.content)
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SEMANTIC RETRIEVAL — HYBRID, DEGRADING TO LEXICAL
+
+   Two scorers over one corpus, because they fail in opposite directions.
+
+   LEXICAL matches the words actually written. It is exact, explainable — you
+   can name which terms matched — and it cannot see a paraphrase. Measured
+   against this corpus it also SATURATES: dozens of entries score a perfect
+   1.0 on a five-word query, so its ranking among them is arbitrary.
+
+   VECTOR matches meaning. It finds "reinforcement learning from human feedback"
+   from "RLHF", ranks continuously so ties are rare, and it cannot tell you why
+   in words a person can check.
+
+   So both run, and the LEXICAL overlap is what supplies the operator-facing
+   reason (rule 6: every automated decision carries a plain-language reason
+   naming its evidence). A cosine of 0.71 is not a reason; "matched on
+   'rubric', 'reward'" is.
+
+   WHAT THIS DELIBERATELY DOES NOT TOUCH. `similarity()` in `shared/brand-voice`
+   still governs every THRESHOLD — caption ≤0.70, image ≤0.85, dedupe 0.72 —
+   because those numbers are product invariants that `verify.ts` asserts and the
+   seed data is built around. Cosine lives on a different scale, and letting it
+   near a threshold would silently change what that threshold means. Vectors
+   improve RECALL here and nothing else.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface SemanticHit {
+  row: KnowledgeEntryRow
+  /** 0–1. Cosine similarity, or 0 when this hit came from the lexical side. */
+  vectorScore: number
+  /** 0–1. Share of the query's content words present in title or body. */
+  lexicalScore: number
+  /** The blend the ranking used. */
+  score: number
+  /** Which scorer(s) surfaced it — for the reason, and for honesty. */
+  matchedBy: 'vector' | 'lexical' | 'both'
+  /** The query words this entry actually contains. The human-checkable part. */
+  matchedTerms: string[]
+}
+
+export interface SemanticSearchOutcome {
+  hits: SemanticHit[]
+  /** `hybrid` when vectors were used, `lexical` when they could not be. */
+  mode: 'hybrid' | 'lexical'
+  /** Why it is lexical-only, when it is. Shown on the card, never swallowed. */
+  degradedReason?: string
+}
+
+/** The query's content words — the same rule the lexical scorer has always used. */
+function contentWords(queryText: string): string[] {
+  return [...new Set(queryText.toLowerCase().match(/[a-z0-9]{4,}/g) ?? [])]
+}
+
+/**
+ * Searches the Knowledge Base by meaning and by wording at once.
+ *
+ * Always returns rows if any match either way. When the embedder is
+ * unreachable this is exactly the previous lexical behaviour plus a stated
+ * reason, so no caller has to branch on whether vectors are available.
+ */
+export async function searchKnowledgeSemantic(
+  workspaceId: string,
+  queryText: string,
+  opts: {
+    limit?: number
+    activeOnly?: boolean
+    categories?: string[]
+    /** Weight given to the vector score, 0–1. The rest goes to lexical. */
+    vectorWeight?: number
+  } = {},
+): Promise<SemanticSearchOutcome> {
+  const limit = Math.max(1, opts.limit ?? 8)
+  const activeOnly = opts.activeOnly ?? true
+  const vectorWeight = Math.min(1, Math.max(0, opts.vectorWeight ?? 0.6))
+  const words = contentWords(queryText)
+
+  const filters: string[] = ['ke.workspace_id = $1']
+  const params: Array<string | number | string[]> = [workspaceId]
+  if (activeOnly) filters.push('ke.active = true')
+  if (opts.categories && opts.categories.length > 0) {
+    params.push(opts.categories)
+    filters.push(`ke.category = ANY($${params.length}::text[])`)
+  }
+  const where = filters.join(' AND ')
+
+  const { vector, reason } = await embedOne(queryText, 'query')
+
+  /*
+   * Over-fetch from each side before blending. Taking `limit` from the vector
+   * side alone would let a strong lexical match that the embedder ranked 12th
+   * be dropped before the blend could ever see it.
+   */
+  const pool = limit * 4
+
+  const rows = vector === null
+    ? await query<KnowledgeEntryRow>(
+        `SELECT ke.* FROM knowledge_entries ke WHERE ${where}
+         ORDER BY ke.evidence_count DESC, ke.created_at DESC
+         LIMIT ${pool}`,
+        params,
+      )
+    : await query<KnowledgeEntryRow & { vector_score: string | null }>(
+        `WITH scored AS (
+           SELECT ke.*,
+                  CASE WHEN ke.embedding IS NULL THEN NULL
+                       ELSE 1 - (ke.embedding <=> $${params.length + 1}::vector)
+                  END AS vector_score
+             FROM knowledge_entries ke
+            WHERE ${where}
+         )
+         SELECT * FROM scored
+          ORDER BY vector_score DESC NULLS LAST, evidence_count DESC
+          LIMIT ${pool}`,
+        [...params, toSqlVector(vector)],
+      )
+
+  const hits: SemanticHit[] = []
+  for (const row of rows) {
+    const haystack = `${row.title} ${row.content}`.toLowerCase()
+    const matchedTerms = words.filter((w) => haystack.includes(w))
+    const lexicalScore = words.length === 0 ? 0 : matchedTerms.length / words.length
+
+    const rawVector = (row as { vector_score?: string | null }).vector_score
+    const vectorScore = rawVector === null || rawVector === undefined ? 0 : Number(rawVector)
+
+    // Nothing matched either way — not a result, just a row that was fetched.
+    if (vectorScore <= 0 && lexicalScore <= 0) continue
+
+    const matchedBy: SemanticHit['matchedBy'] =
+      vectorScore > 0 && lexicalScore > 0 ? 'both' : vectorScore > 0 ? 'vector' : 'lexical'
+
+    hits.push({
+      row,
+      vectorScore,
+      lexicalScore,
+      score: vector === null
+        ? lexicalScore
+        : vectorScore * vectorWeight + lexicalScore * (1 - vectorWeight),
+      matchedBy,
+      matchedTerms,
+    })
+  }
+
+  hits.sort((a, b) => b.score - a.score)
+
+  const outcome: SemanticSearchOutcome = {
+    hits: hits.slice(0, limit),
+    mode: vector === null ? 'lexical' : 'hybrid',
+  }
+  if (vector === null && reason !== undefined) outcome.degradedReason = reason
+  return outcome
+}
+
+/**
+ * The plain-language reason a hit was returned.
+ *
+ * Built from the LEXICAL side wherever it can be, because that is the part a
+ * person can verify by reading the entry. The cosine is reported as corroboration
+ * and never as the whole explanation.
+ */
+export function describeSemanticHit(hit: SemanticHit): string {
+  const terms = hit.matchedTerms.slice(0, 4)
+  if (hit.matchedBy === 'lexical') {
+    return `matched on ${terms.map((t) => `“${t}”`).join(', ')}`
+  }
+  if (hit.matchedBy === 'vector') {
+    return `no query term appears in it, but it is semantically close (${hit.vectorScore.toFixed(2)} cosine)`
+  }
+  return `matched on ${terms.map((t) => `“${t}”`).join(', ')}, and is semantically close (${hit.vectorScore.toFixed(2)} cosine)`
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BACKFILL — embedding rows that predate the embedder
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface BackfillProgress {
+  table: 'knowledge_entries' | 'scraped_items'
+  found: number
+  embedded: number
+  failed: number
+  reason?: string
+}
+
+/**
+ * Embeds one batch of rows that have no vector, or whose vector came from a
+ * different model. Returns what it did so the caller can loop until `found` is 0.
+ *
+ * Resumable by construction: the work queue is "rows where embedding IS NULL",
+ * so an interrupted backfill simply leaves fewer rows next time. There is no
+ * cursor to lose.
+ */
+export async function backfillEmbeddings(
+  table: 'knowledge_entries' | 'scraped_items',
+  batchSize = 32,
+): Promise<BackfillProgress> {
+  const model = embeddingModelId()
+  const bodyColumn = table === 'knowledge_entries' ? 'content' : 'snippet'
+
+  const rows = await query<{ id: string; title: string; body: string | null }>(
+    `SELECT id, title, ${bodyColumn} AS body
+       FROM ${table}
+      WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM $1
+      LIMIT ${Math.max(1, batchSize)}`,
+    [model],
+  )
+
+  if (rows.length === 0) return { table, found: 0, embedded: 0, failed: 0 }
+
+  const outcome = await embedMany(
+    rows.map((r) => embeddableText(r.title, r.body ?? '')),
+    'document',
+  )
+
+  let embedded = 0
+  let failed = 0
+  for (const [index, row] of rows.entries()) {
+    const vector = outcome.vectors[index] ?? null
+    if (vector === null) {
+      failed += 1
+      continue
+    }
+    await query(
+      `UPDATE ${table}
+          SET embedding = $2::vector, embedding_model = $3, embedded_at = now()
+        WHERE id = $1`,
+      [row.id, toSqlVector(vector), model],
+    )
+    embedded += 1
+  }
+
+  const progress: BackfillProgress = { table, found: rows.length, embedded, failed }
+  if (outcome.reason !== undefined) progress.reason = outcome.reason
+  return progress
+}
+
+/** How much of each table is embedded. Reported at /api/health. */
+export async function embeddingCoverage(): Promise<
+  Array<{ table: string; total: number; embedded: number; models: string[] }>
+> {
+  const out: Array<{ table: string; total: number; embedded: number; models: string[] }> = []
+  for (const table of ['knowledge_entries', 'scraped_items'] as const) {
+    const [row] = await query<{ total: string; embedded: string; models: string[] | null }>(
+      `SELECT count(*)::text AS total,
+              count(embedding)::text AS embedded,
+              array_remove(array_agg(DISTINCT embedding_model), NULL) AS models
+         FROM ${table}`,
+    )
+    out.push({
+      table,
+      total: Number(row?.total ?? 0),
+      embedded: Number(row?.embedded ?? 0),
+      models: row?.models ?? [],
+    })
+  }
+  return out
 }

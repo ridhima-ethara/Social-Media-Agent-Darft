@@ -4,13 +4,41 @@
  * Pixel-faithful mini mockups driven by the live caption text and the rendered
  * media. Used in the review panel, the leadership queue and the publish
  * confirmation — so what Leadership approves is what the audience sees.
+ *
+ * Two rules keep these honest:
+ *
+ * 1. They fold the caption where the platform folds it. A 2,000-character
+ *    draft is not what the feed shows; the feed shows the first few lines and
+ *    a "…more". The fold is a button, so a reviewer can open it the way a
+ *    reader would.
+ * 2. They carry no engagement figures. A draft has never been published, so
+ *    there is nothing to count — and a mock "312 likes" is exactly the kind
+ *    of invented evidence this product does not show.
+ *
+ * The hex values are the platforms' own (LinkedIn blue, X black) rather than
+ * our tokens, because these are pictures of someone else's surface.
  */
 
+import { useState } from 'react'
 import { Bookmark, Heart, MessageCircle, Repeat2, Send, Share2, ThumbsUp, MoreHorizontal, ChevronRight, Globe } from 'lucide-react'
 import { gradientPlaceholder } from '../lib/image-gen'
-import { fmt } from './ui'
 import { Logo } from './logo'
 import type { Platform } from '../types'
+
+/** The crop the feed shows the creative in. The canvas itself is not changed. */
+export type PreviewCrop = '1.91:1' | '1:1' | '4:5'
+export const PREVIEW_CROPS: PreviewCrop[] = ['1.91:1', '1:1', '4:5']
+const CROP_RATIO: Record<PreviewCrop, string> = { '1.91:1': '1.91 / 1', '1:1': '1 / 1', '4:5': '4 / 5' }
+/** What each platform's feed crops to when nothing is chosen. */
+export const DEFAULT_CROP: Record<Platform, PreviewCrop> = {
+  linkedin: '1.91:1',
+  facebook: '1.91:1',
+  instagram: '4:5',
+  x: '1.91:1',
+}
+
+/** Where each feed folds a caption, in characters, before "…more". */
+const FOLD_AT: Record<Platform, number> = { linkedin: 210, facebook: 400, instagram: 125, x: 280 }
 
 /** Splits a caption so hashtags can be tinted the way each platform tints them. */
 function withTintedTags(text: string, tint: string) {
@@ -25,68 +53,110 @@ function withTintedTags(text: string, tint: string) {
   )
 }
 
-export function GradientMedia({
+/** Cuts at the last whitespace before the limit, so a word is never split. */
+function foldAt(text: string, limit: number): { shown: string; folded: boolean } {
+  if (text.length <= limit) return { shown: text, folded: false }
+  const cut = text.lastIndexOf(' ', limit)
+  return { shown: text.slice(0, cut > limit * 0.6 ? cut : limit).trimEnd(), folded: true }
+}
+
+/**
+ * The caption as the feed shows it: folded, with the platform's own word for
+ * opening it. Opening is a real toggle, so a reviewer can read the whole
+ * thing and then see the fold again.
+ */
+function FoldedCaption({
+  body,
   platform,
+  tint,
+  more,
+  className,
+}: {
+  body: string
+  platform: Platform
+  tint: string
+  more: string
+  className: string
+}) {
+  const [open, setOpen] = useState(false)
+  const { shown, folded } = foldAt(body, FOLD_AT[platform])
+  const text = open || !folded ? body : shown
+  return (
+    <p className={`whitespace-pre-wrap ${className}`}>
+      {withTintedTags(text, tint)}
+      {folded ? (
+        <>
+          {open ? ' ' : '… '}
+          <button
+            type="button"
+            onClick={() => setOpen(!open)}
+            className="font-medium opacity-70 transition-opacity hover:opacity-100"
+            style={{ color: 'inherit' }}
+          >
+            {open ? 'less' : more}
+          </button>
+        </>
+      ) : null}
+    </p>
+  )
+}
+
+function Media({
+  platform,
+  media,
   seed,
+  crop,
   className = '',
 }: {
   platform: Platform
+  media?: string | null
   seed: string
+  crop: PreviewCrop
   className?: string
 }) {
   return (
     <img
-      src={gradientPlaceholder(platform, seed)}
+      src={media ?? gradientPlaceholder(platform, seed)}
       alt=""
-      aria-hidden="true"
-      className={`w-full object-cover ${className}`}
+      aria-hidden={media ? undefined : true}
+      className={`w-full ${className}`}
+      style={{ aspectRatio: CROP_RATIO[crop], objectFit: 'cover' }}
     />
   )
+}
+
+export function GradientMedia({ platform, seed, className = '' }: { platform: Platform; seed: string; className?: string }) {
+  return <img src={gradientPlaceholder(platform, seed)} alt="" aria-hidden="true" className={`w-full object-cover ${className}`} />
+}
+
+interface PreviewProps {
+  body: string
+  media?: string | null
+  crop?: PreviewCrop
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    LINKEDIN
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export function LinkedInPreview({ body, media }: { body: string; media?: string | null }) {
+export function LinkedInPreview({ body, media, crop = DEFAULT_CROP.linkedin }: PreviewProps) {
   return (
     <article className="overflow-hidden rounded-xl border border-line bg-white text-[#1b1930] shadow-sm">
       <header className="flex items-start gap-2.5 px-3.5 pt-3.5">
         <Logo size={44} className="shrink-0" />
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-semibold leading-tight">Ethara AI</p>
-          <p className="truncate text-[11px] leading-tight text-[#5c5a70]">
-            Reinforcement Learning as a Service · 14,807 followers
-          </p>
+          <p className="truncate text-[11px] leading-tight text-[#5c5a70]">Reinforcement Learning as a Service</p>
           <p className="flex items-center gap-1 text-[11px] leading-tight text-[#5c5a70]">
-            Just now <Globe size={10} aria-label="Public post" />
+            Now · <Globe size={10} aria-label="Anyone" />
           </p>
         </div>
         <MoreHorizontal size={16} className="shrink-0 text-[#5c5a70]" aria-hidden="true" />
       </header>
 
-      <p className="whitespace-pre-wrap px-3.5 py-3 text-[13px] leading-relaxed">
-        {withTintedTags(body, '#0a66c2')}
-      </p>
+      <FoldedCaption body={body} platform="linkedin" tint="#0a66c2" more="more" className="px-3.5 py-3 text-[13px] leading-relaxed" />
 
-      {media ? (
-        <img src={media} alt="" className="w-full" style={{ aspectRatio: '1200 / 627', objectFit: 'cover' }} />
-      ) : (
-        <GradientMedia platform="linkedin" seed={body.slice(0, 24)} />
-      )}
-
-      <div className="flex items-center gap-1.5 px-3.5 py-2 text-[11px] text-[#5c5a70]">
-        <span className="flex -space-x-1">
-          <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#0a66c2] text-white">
-            <ThumbsUp size={9} fill="currentColor" />
-          </span>
-          <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#c0392b] text-white">
-            <Heart size={9} fill="currentColor" />
-          </span>
-        </span>
-        <span className="tabular">312</span>
-        <span className="ml-auto tabular">28 comments · 41 reposts</span>
-      </div>
+      <Media platform="linkedin" media={media} seed={body.slice(0, 24)} crop={crop} />
 
       <div className="grid grid-cols-4 border-t border-[#e6e6ec] text-[11px] font-medium text-[#5c5a70]">
         {[
@@ -109,9 +179,7 @@ export function LinkedInPreview({ body, media }: { body: string; media?: string 
    INSTAGRAM
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export function InstagramPreview({ body, media }: { body: string; media?: string | null }) {
-  const caption = body.length > 220 ? `${body.slice(0, 220)}… more` : body
-
+export function InstagramPreview({ body, media, crop = DEFAULT_CROP.instagram }: PreviewProps) {
   return (
     <article className="overflow-hidden rounded-xl border border-line bg-white text-[#1b1930] shadow-sm">
       <header className="flex items-center gap-2.5 px-3 py-2.5">
@@ -126,21 +194,13 @@ export function InstagramPreview({ body, media }: { body: string; media?: string
       </header>
 
       <div className="relative">
-        {media ? (
-          <img src={media} alt="" className="w-full" style={{ aspectRatio: '4 / 5', objectFit: 'cover' }} />
-        ) : (
-          <GradientMedia platform="instagram" seed={body.slice(0, 24)} />
-        )}
+        <Media platform="instagram" media={media} seed={body.slice(0, 24)} crop={crop} />
         <span className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white">
           <ChevronRight size={14} aria-hidden="true" />
         </span>
         <span className="absolute bottom-2 left-1/2 flex -translate-x-1/2 gap-1">
           {[0, 1, 2, 3, 4].map((dot) => (
-            <span
-              key={dot}
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ background: dot === 0 ? '#ffffff' : 'rgba(255,255,255,0.45)' }}
-            />
+            <span key={dot} className="h-1.5 w-1.5 rounded-full" style={{ background: dot === 0 ? '#ffffff' : 'rgba(255,255,255,0.45)' }} />
           ))}
         </span>
       </div>
@@ -152,11 +212,10 @@ export function InstagramPreview({ body, media }: { body: string; media?: string
         <Bookmark size={19} className="ml-auto" aria-hidden="true" />
       </div>
 
-      <p className="tabular px-3 pt-2 text-[12px] font-semibold">312 likes</p>
-      <p className="whitespace-pre-wrap px-3 pb-3 pt-1 text-[12px] leading-relaxed">
+      <div className="px-3 pb-3 pt-2 text-[12px] leading-relaxed">
         <span className="font-semibold">ethara.ai </span>
-        {withTintedTags(caption, '#00376b')}
-      </p>
+        <FoldedCaption body={body} platform="instagram" tint="#00376b" more="more" className="inline" />
+      </div>
     </article>
   )
 }
@@ -165,7 +224,7 @@ export function InstagramPreview({ body, media }: { body: string; media?: string
    X
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export function XPreview({ body, media }: { body: string; media?: string | null }) {
+export function XPreview({ body, media, crop = DEFAULT_CROP.x }: PreviewProps) {
   return (
     <article className="overflow-hidden rounded-xl border border-line bg-black text-white shadow-sm">
       <div className="flex gap-2.5 p-3.5">
@@ -178,36 +237,17 @@ export function XPreview({ body, media }: { body: string; media?: string | null 
             </svg>
             <span className="text-[12px] text-[#71767b]">@ethara_ai · now</span>
           </p>
-          <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed">
-            {withTintedTags(body, '#1d9bf0')}
-          </p>
+          <FoldedCaption body={body} platform="x" tint="#1d9bf0" more="Show more" className="mt-1 text-[13px] leading-relaxed" />
 
           {media ? (
-            <img
-              src={media}
-              alt=""
-              className="mt-2.5 w-full rounded-xl border border-[#2f3336]"
-              style={{ aspectRatio: '16 / 9', objectFit: 'cover' }}
-            />
+            <Media platform="x" media={media} seed={body.slice(0, 24)} crop={crop} className="mt-2.5 rounded-xl border border-[#2f3336]" />
           ) : null}
 
-          <div className="mt-2.5 flex items-center justify-between pr-6 text-[11px] text-[#71767b]">
-            <span className="flex items-center gap-1.5">
-              <MessageCircle size={14} aria-hidden="true" />
-              <span className="tabular">19</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Repeat2 size={14} aria-hidden="true" />
-              <span className="tabular">78</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Heart size={14} aria-hidden="true" />
-              <span className="tabular">224</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Share2 size={14} aria-hidden="true" />
-              <span className="tabular">{fmt(5_640)}</span>
-            </span>
+          <div className="mt-2.5 flex items-center justify-between pr-6 text-[#71767b]">
+            <MessageCircle size={14} aria-hidden="true" />
+            <Repeat2 size={14} aria-hidden="true" />
+            <Heart size={14} aria-hidden="true" />
+            <Share2 size={14} aria-hidden="true" />
           </div>
         </div>
       </div>
@@ -219,7 +259,7 @@ export function XPreview({ body, media }: { body: string; media?: string | null 
    FACEBOOK
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export function FacebookPreview({ body, media }: { body: string; media?: string | null }) {
+export function FacebookPreview({ body, media, crop = DEFAULT_CROP.facebook }: PreviewProps) {
   return (
     <article className="overflow-hidden rounded-xl border border-line bg-white text-[#1b1930] shadow-sm">
       <header className="flex items-start gap-2.5 px-3.5 pt-3.5">
@@ -227,34 +267,15 @@ export function FacebookPreview({ body, media }: { body: string; media?: string 
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-semibold leading-tight">Ethara AI</p>
           <p className="flex items-center gap-1 text-[11px] leading-tight text-[#5c5a70]">
-            Just now <Globe size={10} aria-label="Public post" />
+            Just now · <Globe size={10} aria-label="Public post" />
           </p>
         </div>
         <MoreHorizontal size={16} className="shrink-0 text-[#5c5a70]" aria-hidden="true" />
       </header>
 
-      <p className="whitespace-pre-wrap px-3.5 py-3 text-[13px] leading-relaxed">
-        {withTintedTags(body, '#1877f2')}
-      </p>
+      <FoldedCaption body={body} platform="facebook" tint="#1877f2" more="See more" className="px-3.5 py-3 text-[13px] leading-relaxed" />
 
-      {media ? (
-        <img src={media} alt="" className="w-full" style={{ aspectRatio: '1200 / 630', objectFit: 'cover' }} />
-      ) : (
-        <GradientMedia platform="facebook" seed={body.slice(0, 24)} />
-      )}
-
-      <div className="flex items-center gap-1.5 px-3.5 py-2 text-[11px] text-[#5c5a70]">
-        <span className="flex -space-x-1">
-          <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#1877f2] text-white">
-            <ThumbsUp size={9} fill="currentColor" />
-          </span>
-          <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#f33e58] text-white">
-            <Heart size={9} fill="currentColor" />
-          </span>
-        </span>
-        <span className="tabular">184</span>
-        <span className="ml-auto tabular">21 comments · 9 shares</span>
-      </div>
+      <Media platform="facebook" media={media} seed={body.slice(0, 24)} crop={crop} />
 
       <div className="grid grid-cols-3 border-t border-[#e6e6ec] text-[11px] font-medium text-[#5c5a70]">
         {[
@@ -273,17 +294,9 @@ export function FacebookPreview({ body, media }: { body: string; media?: string 
 }
 
 /** Renders the preview for whichever platform an idea targets. */
-export function PlatformPreview({
-  platform,
-  body,
-  media,
-}: {
-  platform: Platform
-  body: string
-  media?: string | null
-}) {
-  if (platform === 'instagram') return <InstagramPreview body={body} media={media} />
-  if (platform === 'x') return <XPreview body={body} media={media} />
-  if (platform === 'facebook') return <FacebookPreview body={body} media={media} />
-  return <LinkedInPreview body={body} media={media} />
+export function PlatformPreview({ platform, body, media, crop }: { platform: Platform } & PreviewProps) {
+  if (platform === 'instagram') return <InstagramPreview body={body} media={media} crop={crop} />
+  if (platform === 'x') return <XPreview body={body} media={media} crop={crop} />
+  if (platform === 'facebook') return <FacebookPreview body={body} media={media} crop={crop} />
+  return <LinkedInPreview body={body} media={media} crop={crop} />
 }

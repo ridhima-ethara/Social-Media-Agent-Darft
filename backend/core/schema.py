@@ -214,3 +214,21 @@ class AgentResult(BaseModel):
     fallback_reason: str | None = None
     duration_ms: int = 0
     error: str | None = None
+
+    #: The fully resolved knobs this agent ran with.
+    #:
+    #: Carried on the result so it can be written to `agent_runs.config_used`,
+    #: which is what keeps a past run explainable after the knobs change. Without
+    #: it, a run recorded in the database says what happened but not what it was
+    #: configured to do — and those are different questions.
+    config_used: dict[str, Any] = Field(default_factory=dict)
+
+    #: Which binding actually answered, and its model id. Stamped rather than
+    #: inferred: on a chained run the binding that answered is not necessarily
+    #: the preferred one.
+    provider: str = "deterministic"
+    model: str = "ethara-deterministic-pipeline"
+
+    #: The primary's failure when a backup answered instead. `None` on the
+    #: ordinary path, which needs no explanation.
+    degraded_from: str | None = None

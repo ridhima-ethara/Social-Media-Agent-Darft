@@ -11,12 +11,12 @@ import {
   Brain,
   CalendarDays,
   ChevronLeft,
-  Command,
   Gauge,
   LayoutDashboard,
   LogOut,
   Network,
   ScrollText,
+  Search,
   Send,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -29,7 +29,6 @@ import { Logo, Wordmark } from './logo'
 import { ThemeToggle } from './theme-toggle'
 import { AssistantBar } from './assistant/bar'
 import { AssistantRail } from './assistant/rail'
-import { AssistantHud, LiveBackground } from './assistant/hud'
 import type { AgentId, PageId } from '../types'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -64,24 +63,64 @@ interface NavItem {
   badge?: 'leadership'
 }
 
-const MARKETING_NAV: NavItem[] = [
-  { page: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { page: 'calendar', label: 'Weekly Calendar', icon: CalendarDays },
-  { page: 'published', label: 'Published Posts', icon: Send },
-  { page: 'orchestration', label: 'Agent Orchestration', icon: Network },
-  { page: 'intelligence', label: 'Content Intelligence', icon: Gauge },
-  { page: 'studio', label: 'Agent Studio', icon: Sliders },
-  { page: 'console', label: 'Run Console', icon: ScrollText },
-  { page: 'assistant', label: 'Command Console', icon: Command },
-  { page: 'settings', label: 'Settings', icon: SettingsIcon },
+/**
+ * The nav is grouped by what the operator is doing, not by where a screen
+ * happens to live in the code: command the system, watch the pipeline, do the
+ * work, control the machine.
+ */
+interface NavGroup {
+  label: string
+  items: NavItem[]
+}
+
+/**
+ * Agent Orchestration is Leadership's screen, not Marketing's: it is where the
+ * roster and the hand-offs are inspected, which is an oversight question
+ * rather than a production one. Marketing watches the same work through the
+ * pipeline theater and Content Intelligence.
+ */
+const MARKETING_NAV: NavGroup[] = [
+  {
+    label: 'Command',
+    items: [{ page: 'dashboard', label: 'Dashboard', icon: LayoutDashboard }],
+  },
+  {
+    label: 'Pipeline',
+    items: [{ page: 'intelligence', label: 'Content Intelligence', icon: Gauge }],
+  },
+  {
+    label: 'Work',
+    items: [
+      { page: 'calendar', label: 'Weekly Calendar', icon: CalendarDays },
+      { page: 'published', label: 'Published Posts', icon: Send },
+    ],
+  },
+  {
+    label: 'Control',
+    items: [
+      { page: 'studio', label: 'Agent Studio', icon: Sliders },
+      { page: 'console', label: 'Run Console', icon: ScrollText },
+      { page: 'settings', label: 'Settings', icon: SettingsIcon },
+    ],
+  },
 ]
 
-const LEADERSHIP_NAV: NavItem[] = [
-  { page: 'leadership', label: 'Final Approval', icon: ShieldCheck, badge: 'leadership' },
-  { page: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { page: 'published', label: 'Published Posts', icon: Send },
-  { page: 'orchestration', label: 'Agent Orchestration', icon: Network },
-  { page: 'assistant', label: 'Command Console', icon: Command },
+const LEADERSHIP_NAV: NavGroup[] = [
+  {
+    label: 'Work',
+    items: [
+      { page: 'leadership', label: 'Final Approval', icon: ShieldCheck, badge: 'leadership' },
+      { page: 'published', label: 'Published Posts', icon: Send },
+    ],
+  },
+  {
+    label: 'Command',
+    items: [{ page: 'dashboard', label: 'Dashboard', icon: LayoutDashboard }],
+  },
+  {
+    label: 'Pipeline',
+    items: [{ page: 'orchestration', label: 'Agent Orchestration', icon: Network }],
+  },
 ]
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -97,6 +136,7 @@ function Sidebar() {
   const agents = useStore((s) => s.agents)
   const ideas = useStore((s) => s.ideas)
   const reviewQueue = useStore((s) => s.reviewQueue)
+  const openBar = useStore((s) => s.openBar)
 
   const nav = user?.role === 'leadership' ? LEADERSHIP_NAV : MARKETING_NAV
   const awaitingLeadership = ideas.filter((i) => i.status === 'pending_leadership').length
@@ -140,8 +180,33 @@ function Sidebar() {
         </div>
       ) : null}
 
+      {/* The command bar is the way to ask for anything, so it sits above the
+          nav rather than behind a keybinding nobody is told about. */}
+      <button
+        type="button"
+        onClick={() => openBar()}
+        title={collapsed ? 'Ask or command · ⌘K' : undefined}
+        className="mx-2 mb-2 flex items-center gap-2 rounded-md border border-line-strong bg-surface px-2.5 py-[7px] text-left text-[12px] text-ink-2 transition-colors duration-[var(--dur-fast)] hover:border-accent/60 hover:text-ink"
+      >
+        <Search size={13} className="shrink-0 text-magenta" aria-hidden="true" />
+        {!collapsed ? (
+          <>
+            <span className="flex-1 truncate">Ask or command…</span>
+            <span className="mono rounded-[3px] border border-line-strong px-1 text-[9.5px] text-ink-3">⌘K</span>
+          </>
+        ) : null}
+      </button>
+
       <ul className="flex-1 space-y-0.5 overflow-y-auto px-2">
-        {nav.map((item) => {
+        {nav.flatMap((group) => [
+          <li key={`h-${group.label}`} aria-hidden={collapsed}>
+            {collapsed ? (
+              <span className="mx-auto my-2 block h-px w-4 bg-line" />
+            ) : (
+              <span className="mono block px-2 pb-1.5 pt-3 text-[9px] uppercase tracking-[0.16em] text-ink-3">{group.label}</span>
+            )}
+          </li>,
+          ...group.items.map((item) => {
           const active = page === item.page
           return (
             <li key={item.page}>
@@ -175,7 +240,8 @@ function Sidebar() {
               </button>
             </li>
           )
-        })}
+          }),
+        ])}
       </ul>
 
       <div className="border-t border-line px-3 py-2.5">
@@ -216,27 +282,28 @@ function Header() {
     <header className="glass relative z-20 flex h-14 shrink-0 items-center justify-end gap-2 border-b border-line px-4">
       <ThemeToggle />
 
-      <Badge tone="magenta">{apiMode === 'connected' ? `${publishMode.toUpperCase()} MODE` : 'STANDALONE'}</Badge>
+      {/* The mode, as a fact rather than a highlight. */}
+      <span className="mono rounded-md border border-line-strong px-2 py-[4px] text-[9.5px] uppercase tracking-[0.1em] text-ink-2">
+        {apiMode === 'connected' ? `${publishMode} mode` : 'standalone'}
+      </span>
 
       <button
         type="button"
         onClick={openKnowledge}
         title="Open the Knowledge Base"
-        className="relative flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink"
+        className="flex items-center gap-1.5 rounded-md border border-line-strong px-2 py-[4px] text-ink-2 transition-colors hover:border-accent hover:text-ink"
       >
-        <span className="relative flex h-5 w-5 items-center justify-center rounded-full border border-accent/50">
-          <Brain size={11} className="text-accent-bright" aria-hidden="true" />
-          <span className="anim-ping-slow absolute inset-0 rounded-full border border-accent" aria-hidden="true" />
-        </span>
-        <span className="tabular">{knowledge.filter((k) => k.active).length}</span>
+        <Brain size={12} className="text-accent-bright" aria-hidden="true" />
+        {/* A count is a machine figure; nothing here loops, because nothing here is running. */}
+        <span className="mono text-[11px]">{knowledge.filter((k) => k.active).length}</span>
+        <span className="mono hidden text-[9px] uppercase tracking-[0.1em] text-ink-3 xl:inline">knowledge</span>
       </button>
 
       <span className="mx-1 h-5 w-px bg-line" aria-hidden="true" />
 
       <div className="flex items-center gap-2">
         <span
-          className="flex h-7 w-7 items-center justify-center rounded-full text-[12px] font-semibold text-on-accent"
-          style={{ background: 'linear-gradient(135deg, var(--color-accent), var(--color-magenta))' }}
+          className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-[12px] font-semibold text-on-accent"
           aria-hidden="true"
         >
           {user?.initial}
@@ -250,7 +317,7 @@ function Header() {
           onClick={logout}
           aria-label="Sign out"
           title="Sign out"
-          className="rounded-lg border border-line p-1.5 text-ink-3 transition-colors hover:border-critical/50 hover:text-critical-ink"
+          className="rounded-md border border-line-strong p-1.5 text-ink-3 transition-colors hover:border-critical/50 hover:text-critical-ink"
         >
           <LogOut size={15} />
         </button>
@@ -266,6 +333,10 @@ function Header() {
 export function AgentChips({ agents }: { agents: AgentId[] }) {
   const states = useStore((s) => s.agents)
   const setPage = useStore((s) => s.setPage)
+  // Orchestration is Leadership's screen. For everyone else the chip still
+  // reports what the agent is doing, but it does not offer a door that is
+  // not there — a click that goes nowhere is worse than no click.
+  const canOpenOrchestration = useStore((s) => s.user?.role === 'leadership')
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -284,17 +355,28 @@ export function AgentChips({ agents }: { agents: AgentId[] }) {
                   ? 'bg-warn'
                   : 'bg-ink-3'
 
-        return (
+        const label = (
+          <>
+            <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden="true" />
+            {spec?.name.replace(' Agent', '') ?? agentId}
+          </>
+        )
+        const shell = 'flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-[10.5px] text-ink-3'
+
+        return canOpenOrchestration ? (
           <button
             key={agentId}
             type="button"
             onClick={() => setPage('orchestration')}
             title={state?.current_task ?? spec?.role}
-            className="flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-[10.5px] text-ink-3 transition-colors hover:border-line-strong hover:text-ink-2"
+            className={`${shell} transition-colors hover:border-line-strong hover:text-ink-2`}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden="true" />
-            {spec?.name.replace(' Agent', '') ?? agentId}
+            {label}
           </button>
+        ) : (
+          <span key={agentId} title={state?.current_task ?? spec?.role} className={shell}>
+            {label}
+          </span>
         )
       })}
     </div>
@@ -378,9 +460,10 @@ export function Shell({ children }: { children: ReactNode }) {
 
   return (
     <div className="relative flex h-screen w-screen overflow-hidden bg-page text-ink">
-      <LiveBackground />
-      <AssistantHud />
-
+      {/* The drifting orbs, panning grid, corner brackets and scan line used to
+          sit behind every screen. They moved without a referent and competed
+          with the data in front of them, so the ground is now the page colour
+          and the only things that move are live processes. */}
       <Sidebar />
 
       <div className="relative z-10 flex min-w-0 flex-1 flex-col">
@@ -394,8 +477,10 @@ export function Shell({ children }: { children: ReactNode }) {
           </div>
         ) : null}
 
-        <main className="stage-3d flex-1 overflow-y-auto overflow-x-hidden px-6 py-5">
-          <div key={page} className="anim-page-enter-3d">{children}</div>
+        {/* Bottom padding lives on the page, not the scroller, so a sticky
+            strip along the bottom of a page can sit flush with the edge. */}
+        <main className="stage-3d flex-1 overflow-y-auto overflow-x-hidden px-6 pt-5">
+          <div key={page} className="anim-page-enter-3d pb-5">{children}</div>
         </main>
       </div>
 

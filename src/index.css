@@ -94,8 +94,10 @@
    BASE
    ═══════════════════════════════════════════════════════════════════════════ */
 
-* {
-  border-color: var(--color-line);
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
 }
 
 html,
@@ -187,38 +189,6 @@ body {
   border: 1px solid var(--color-line);
 }
 
-@utility bg-live {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-@utility hud-bracket {
-  position: absolute;
-  width: 46px;
-  height: 46px;
-  border-color: var(--color-hud-strong);
-  pointer-events: none;
-}
-
-@utility scanline {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--color-hud-strong) 18%,
-    var(--color-magenta) 50%,
-    var(--color-hud-strong) 82%,
-    transparent
-  );
-  opacity: 0.5;
-  pointer-events: none;
-}
-
 @utility mono {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -307,62 +277,6 @@ body {
   }
 }
 
-@keyframes drift-a {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(38px, -26px, 0) scale(1.06);
-  }
-}
-
-@keyframes drift-b {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0) scale(1.04);
-  }
-  50% {
-    transform: translate3d(-32px, 24px, 0) scale(1);
-  }
-}
-
-@keyframes drift-c {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(22px, 30px, 0) scale(1.08);
-  }
-}
-
-@keyframes grid-pan {
-  from {
-    transform: translate3d(0, 0, 0);
-  }
-  to {
-    transform: translate3d(40px, 40px, 0);
-  }
-}
-
-@keyframes scan-line {
-  0% {
-    transform: translateY(0);
-    opacity: 0;
-  }
-  8% {
-    opacity: 0.55;
-  }
-  92% {
-    opacity: 0.55;
-  }
-  100% {
-    transform: translateY(100vh);
-    opacity: 0;
-  }
-}
-
 @keyframes scan-sweep {
   0% {
     transform: translateY(-100%);
@@ -377,27 +291,6 @@ body {
   100% {
     transform: translateY(220%);
     opacity: 0;
-  }
-}
-
-@keyframes glow-pulse {
-  0%,
-  100% {
-    opacity: 0.42;
-  }
-  50% {
-    opacity: 0.9;
-  }
-}
-
-@keyframes hud-bracket-draw {
-  from {
-    opacity: 0;
-    transform: scale(0.82);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
   }
 }
 
@@ -453,29 +346,6 @@ body {
    Social-media grammar rather than HUD grammar: a story ring that turns, and
    broadcast pulses that swell and fade. Both are plain keyframes, so the
    reduced-motion block at the end of this file neutralises them. */
-
-@keyframes boot-story-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes boot-broadcast {
-  0% {
-    transform: scale(0.84);
-    opacity: 0;
-  }
-  22% {
-    opacity: 0.42;
-  }
-  100% {
-    transform: scale(1.42);
-    opacity: 0;
-  }
-}
 
 @keyframes ring-spin {
   from {
@@ -691,229 +561,8 @@ body {
   }
 }
 
-@keyframes auth-settle {
-  from {
-    opacity: 0;
-    transform: translateY(16px) scale(0.985);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes auth-orbit-in {
-  from {
-    opacity: 0;
-    transform: scale(0.6);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@keyframes auth-orbit-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes auth-orbit-spin-reverse {
-  from {
-    transform: rotate(360deg);
-  }
-  to {
-    transform: rotate(0deg);
-  }
-}
-
-@keyframes auth-letter {
-  from {
-    opacity: 0;
-    transform: translateY(12px);
-    filter: blur(5px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }
-}
-
-@keyframes auth-letter-ai {
-  from {
-    opacity: 0;
-    transform: scale(0.7);
-    filter: blur(6px);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-    filter: blur(0);
-  }
-}
-
-@keyframes auth-dot-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.25);
-  }
-}
-
-@keyframes auth-reveal {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes auth-field {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes auth-card-rise {
-  from {
-    opacity: 0;
-    transform: translateY(22px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes auth-card-beam {
-  0% {
-    transform: translateX(-120%);
-    opacity: 0;
-  }
-  40% {
-    opacity: 0.8;
-  }
-  100% {
-    transform: translateX(120%);
-    opacity: 0;
-  }
-}
-
-@keyframes auth-particle-rise {
-  0% {
-    transform: translateY(0) scale(0.7);
-    opacity: 0;
-  }
-  15% {
-    opacity: 0.65;
-  }
-  85% {
-    opacity: 0.5;
-  }
-  100% {
-    transform: translateY(-190px) scale(1.15);
-    opacity: 0;
-  }
-}
-
-@keyframes auth-mark-float {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-4px);
-  }
-}
-
 /* The halo breathes; it does not pulse. Half the travel, a third of the
    contrast, twice the period — a thing that is alive rather than alarmed. */
-@keyframes auth-halo {
-  0%,
-  100% {
-    opacity: 0.34;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.5;
-    transform: scale(1.03);
-  }
-}
-
-@keyframes auth-glow-drift {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0);
-    opacity: 0.55;
-  }
-  50% {
-    transform: translate3d(14px, -10px, 0);
-    opacity: 0.7;
-  }
-}
-
-@keyframes auth-grid-pan {
-  from {
-    transform: translate3d(0, 0, 0);
-  }
-  to {
-    transform: translate3d(46px, 46px, 0);
-  }
-}
-
-@keyframes auth-signal-drift {
-  0% {
-    transform: translateX(-14%);
-    opacity: 0;
-  }
-  20% {
-    opacity: 0.5;
-  }
-  80% {
-    opacity: 0.5;
-  }
-  100% {
-    transform: translateX(14%);
-    opacity: 0;
-  }
-}
-
-@keyframes auth-accent-sweep {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(100%);
-  }
-}
-
-@keyframes auth-gradient {
-  0%,
-  100% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-}
-
 @keyframes auth-spin {
   from {
     transform: rotate(0deg);
@@ -923,99 +572,390 @@ body {
   }
 }
 
-/* ── Boot / welcome ───────────────────────────────────────────────────────── */
+/* ── Dashboard · motion as vocabulary ────────────────────────────────────
+   Each behaviour has one meaning. An agent is working (arc); information is
+   moving (signal); a human is required (breathe); new data arrived (row
+   stream); the workflow progressed (spine sweep). Nothing else loops. */
 
-@keyframes boot-line {
+@keyframes eth-work-arc {
   from {
-    opacity: 0;
-    transform: translateX(-8px);
+    transform: rotate(0deg);
   }
   to {
-    opacity: 1;
-    transform: translateX(0);
+    transform: rotate(360deg);
   }
 }
 
-@keyframes boot-stage-in {
-  from {
-    opacity: 0;
-    transform: translateY(14px) scale(0.9);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes boot-ring {
-  from {
-    transform: scale(0.5);
-    opacity: 0.9;
-  }
-  to {
-    transform: scale(1.7);
-    opacity: 0;
-  }
-}
-
-@keyframes boot-spark {
-  from {
-    offset-distance: 0%;
-    opacity: 0;
-  }
-  15% {
-    opacity: 1;
-  }
-  85% {
-    opacity: 1;
-  }
-  to {
-    offset-distance: 100%;
-    opacity: 0;
-  }
-}
-
-/* A stage lighting: a pop that settles, not a twitch. */
-@keyframes boot-stage-light {
+@keyframes eth-signal {
   0% {
+    left: 0%;
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    left: 100%;
+    opacity: 0;
+  }
+}
+
+@keyframes eth-attention-breathe {
+  0%,
+  100% {
+    opacity: 0.4;
     transform: scale(1);
   }
-  45% {
-    transform: scale(1.16);
-  }
-  100% {
-    transform: scale(1.03);
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
   }
 }
 
-/* The emblem settling into place at the top of the assembly beat. */
-@keyframes boot-settle {
+@keyframes eth-row-stream {
   from {
-    transform: scale(0.72);
-    opacity: 0.9;
+    opacity: 0;
+    transform: translateY(6px);
+    filter: blur(3px);
   }
   to {
-    transform: scale(1.9);
-    opacity: 0;
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
   }
 }
 
-/* One slow highlight crossing the primary action, most of the cycle at rest. */
-@keyframes boot-sheen {
-  0%,
-  58% {
-    transform: translateX(-140%) skewX(-18deg);
-    opacity: 0;
-  }
-  66% {
-    opacity: 0.7;
+@keyframes eth-spine-sweep {
+  0% {
+    transform: translateX(-100%);
   }
   100% {
-    transform: translateX(260%) skewX(-18deg);
+    transform: translateX(320%);
+  }
+}
+
+@keyframes eth-feed {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+    filter: blur(3px);
+  }
+  9% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.26;
+  }
+}
+
+@keyframes eth-glint {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes eth-pool {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: translate(-50%, -50%) scale(1.14);
+  }
+}
+
+@keyframes eth-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* A decision landed: one stroke draw, fired once on the verdict. */
+@keyframes eth-commit-check {
+  from {
+    stroke-dashoffset: 26;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* The scene breathes very slowly around its own axis — a camera, not a spin. */
+@keyframes eth-cam3 {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) translateY(16px) scale(0.74) rotateY(-3.2deg);
+  }
+  50% {
+    transform: translate(-50%, -50%) translateY(16px) scale(0.74) rotateY(3.2deg);
+  }
+}
+
+@keyframes eth-draw {
+  from {
+    stroke-dashoffset: var(--len, 1200);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* ── Weekly calendar ─────────────────────────────────────────────────────
+   Capacity pips fill from the left; the Ask button's face bobs, blinks and
+   glows; the assistant popover settles in from the button it hangs under. */
+
+@keyframes eth-seg {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes eth-pop {
+  from {
+    opacity: 0;
+    transform: perspective(1200px) translateY(-8px) rotateX(-8deg) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(1200px) translateY(0) rotateX(0) scale(1);
+  }
+}
+
+@keyframes eth-agent-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.12);
+  }
+}
+
+@keyframes eth-agent-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1.5px);
+  }
+}
+
+@keyframes eth-agent-glow {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+/* ── Boot · pre-flight ───────────────────────────────────────────────────
+   Each stage lands on the arc from behind and below, into a rest transform
+   the element sets on itself — depth from position and scale, never skew. */
+
+@keyframes eth-stage-in {
+  from {
+    opacity: 0;
+    transform: var(--from);
+  }
+  to {
+    opacity: var(--op, 1);
+    transform: var(--rest);
+  }
+}
+
+@keyframes eth-lbloom-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(60px, -30px, 0) scale(1.1);
+  }
+}
+
+@keyframes eth-lbloom-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.06);
+  }
+  50% {
+    transform: translate3d(-50px, 26px, 0) scale(1);
+  }
+}
+
+@keyframes eth-lbeam {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* ── Sign-in · depth grid ─────────────────────────────────────────────────
+   The mark settles, the wordmark tracks in, the rule draws, the fields rise.
+   Then the floor pans, the horizon breathes, and nothing on the form moves. */
+
+@keyframes eth-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes eth-mark-settle {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes eth-mark-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.07);
+  }
+}
+
+@keyframes eth-mark-ring {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+/* One lens pass across the mark, then most of the cycle at rest. */
+@keyframes eth-mark-sheen {
+  0% {
+    transform: translateX(-160%) skewX(-16deg);
+    opacity: 0;
+  }
+  6% {
+    opacity: 0.5;
+  }
+  16% {
+    opacity: 0.5;
+  }
+  24% {
+    transform: translateX(160%) skewX(-16deg);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(160%) skewX(-16deg);
     opacity: 0;
   }
 }
 
+@keyframes eth-track-in {
+  from {
+    letter-spacing: 0.12em;
+    opacity: 0;
+    filter: blur(5px);
+  }
+  to {
+    letter-spacing: -0.03em;
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes eth-rule-draw {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes eth-floorpan {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 120px;
+  }
+}
+
+@keyframes eth-floorpan-slow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 60px;
+  }
+}
+
+@keyframes eth-horizon {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+  50% {
+    opacity: 0.78;
+  }
+}
+
+@keyframes eth-bloom {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 0.52;
+    transform: translate(-50%, -50%) scale(1.06);
+  }
+}
+
+/* ── Boot / welcome ───────────────────────────────────────────────────────── */
+
+/* A stage lighting: a pop that settles, not a twitch. */
+/* The emblem settling into place at the top of the assembly beat. */
+/* One slow highlight crossing the primary action, most of the cycle at rest. */
 @keyframes boot-leave {
   from {
     opacity: 1;
@@ -1274,24 +1214,8 @@ body {
 .anim-pulse-dot {
   animation: pulse-dot 1.4s var(--ease-in-out-soft) infinite;
 }
-.boot-cta {
-  position: relative;
-  overflow: hidden;
-}
-.boot-cta::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 38%;
-  pointer-events: none;
-  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-accent) 24%, transparent), transparent);
-  animation: boot-sheen 5.4s var(--ease-in-out-soft) 1.4s infinite;
-}
 .anim-ping-slow {
   animation: ping-slow 2.2s var(--ease-out-soft) infinite;
-}
-.anim-glow {
-  animation: glow-pulse 2.2s var(--ease-in-out-soft) infinite;
 }
 .anim-shimmer {
   background: linear-gradient(
@@ -1520,38 +1444,8 @@ body {
 
 /* ── Ambient HUD ──────────────────────────────────────────────────────────── */
 
-.assistant-hud .hud-bracket {
-  animation:
-    hud-bracket-draw 720ms var(--ease-out-expo) both,
-    glow-pulse 8s var(--ease-in-out-soft) infinite 720ms;
-}
 
-.assistant-hud .hud-grid {
-  animation: grid-pan 60s linear infinite;
-  will-change: transform;
-}
 
-.assistant-hud .hud-scan {
-  animation: scan-line 12s var(--ease-in-out-soft) infinite;
-  will-change: transform;
-}
-
-.drift-a {
-  animation: drift-a 32s var(--ease-in-out-soft) infinite;
-  will-change: transform;
-}
-.drift-b {
-  animation: drift-b 38s var(--ease-in-out-soft) infinite;
-  will-change: transform;
-}
-.drift-c {
-  animation: drift-c 26s var(--ease-in-out-soft) infinite;
-  will-change: transform;
-}
-.grid-pan {
-  animation: grid-pan 60s linear infinite;
-  will-change: transform;
-}
 
 /* ── Pipeline graph edges ─────────────────────────────────────────────────── */
 
@@ -1864,17 +1758,87 @@ body {
     transform: none !important;
   }
 
-  .assistant-hud,
-  .scanline,
-  .bg-live {
-    display: none !important;
-  }
-
+  
   .orch-complete,
   .orch-complete-glow,
   .orch-hud {
     animation: none !important;
     opacity: 1 !important;
     transform: none !important;
+  }
+}
+
+/* ── Pipeline theater · the run, end to end ───────────────────────────────
+   A camera that breathes very slowly (never a spin), packets riding a rail
+   (information moving), a packet turned back at the gate (held), a figure
+   settling in, a column arriving. Each loops only while its process does. */
+
+@keyframes eth-cam5 {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) translateY(6px) scale(0.86) rotateY(-1.4deg) rotateX(20deg);
+  }
+  50% {
+    transform: translate(-50%, -50%) translateY(6px) scale(0.86) rotateY(1.4deg) rotateX(20deg);
+  }
+}
+
+@keyframes eth-pkt3 {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(var(--len, 200px));
+    opacity: 0;
+  }
+}
+
+@keyframes eth-pkt-stop {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  62% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.9);
+  }
+}
+
+@keyframes eth-col-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes eth-num-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

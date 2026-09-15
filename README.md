@@ -16,7 +16,7 @@ API server stopped. That is a design constraint, not a demo trick.
 ```bash
 git clone <this repo> && cd main-sma
 npm run setup          # installs both tiers, starts Postgres, migrates and seeds
-npm run dev:full       # API on :4000, web app on :5173
+npm run dev:full       # API on :4001, web app on :5173
 ```
 
 `npm run setup` runs `docker compose up -d db`, waits for the health check, then migrates and seeds.
@@ -29,7 +29,7 @@ npm install
 npm run dev
 ```
 
-It hydrates from the bundled dataset, says so in a banner, and Ethara answers on the in-bundle
+Every screen renders empty and says why in its own copy, and Ethara answers on the in-bundle
 deterministic parser.
 
 ---
@@ -55,15 +55,19 @@ deterministic parser.
 | Command | What it does |
 |---|---|
 | `npm run dev` | The web app on `:5173` |
-| `npm run dev:server` | The API on `:4000` |
+| `npm run dev:server` | The API on `:4001` |
 | `npm run dev:full` | Both, with interleaved logs |
 | `npm run build` | Typecheck, then production build |
 | `npm run typecheck` | `tsc -b` across web and shared |
+| `npm test` | vitest — the config invariants and the single-home checks |
+| `npm run test:py` | pytest — the Python tier's knob-rejection rules |
 | `npm run lint` | oxlint |
+| `npm run doctor` | The preflight diagnostic — answers "why won't this run?" before anything starts |
 | `npm run agent:check` | The registry audit — every skill declared, every knob described, every tool handled |
 | `npm run specs:build` | Regenerates `specs/` from the registry |
 | `npm run verify` | Typecheck + lint + the acceptance script |
 | `npm run db:migrate` / `db:seed` / `db:reset` | Schema and seed data |
+| `npm run db:embed` | Embeds any row written while the embedder was unreachable |
 
 ---
 
@@ -105,7 +109,7 @@ The eight operator-facing specialist names are standardized without changing the
 | Minnie | Image Agent | `image` |
 | Jerry | Analytics Agent | `analytics` |
 
-Four platforms ship — LinkedIn, Instagram, X and Facebook (see `docs/decisions/ADR-006`). Four
+Four platforms ship — LinkedIn, Instagram, X and Facebook (see `docs/decisions/ADR-006-facebook-in-scope.md`). Four
 numbers hold the shape of it: top **5** trending keywords, top **5** hashtags each, a
 consolidated top **25**, and top **5** calendar slots per platform. All four are adjustable knobs in
 Agent Studio.
@@ -125,11 +129,18 @@ Copy `server/.env.example` to `server/.env`. Every key may be left blank.
 | `OLLAMA_BASE_URL` (with `AGENT_MODEL_PROVIDER=ollama`) | Captions, calendar copy and analytics prose come from the deterministic template writer instead of `qwen3.5:latest` |
 | `MFLUX_PYTHON` | Ollama refuses image generation over HTTP, so nothing tries mflux; creatives render locally with the brand SVG renderer instead of FLUX.2 Klein |
 | `ASSISTANT_MODEL_PROVIDER` | Ethara runs on the built-in grammar parser — blunter, fully working |
+| `EMBEDDINGS_ENABLED=false` (or no `OLLAMA_BASE_URL`) | Retrieval runs on the lexical scorer alone. Rows still store — they keep a `NULL` vector until `npm run db:embed` reaches them — so nothing is lost, only paraphrase recall |
 
-`GCP_API_KEY` is the hosted alternative to the two Ollama keys above — `TEXT_MODEL_PROVIDER=auto`
-prefers whichever local model is configured over it, and `AGENT_MODEL_PROVIDER` never silently
-falls back from one vendor to another: an unreachable named provider degrades straight to the
-deterministic path and stamps the reason on the output.
+`GCP_API_KEY` is the hosted alternative to the two Ollama keys above. Text generation is a **chain**,
+primary first, exactly as a platform capture lane is Apify then crawl4ai: `TEXT_MODEL_PROVIDER=gcp`
+runs Gemini with the local Qwen behind it, `=ollama` runs Qwen with Gemini behind it, and `=auto`
+prefers whichever local model is configured and keeps the hosted one as the backup. The backup is
+entered only when the primary is configured *and* fails — with one provider configured the chain is
+one link and a failure goes straight to the deterministic writer. Whichever provider answered is
+stamped on the artefact, and a run that fell through to the backup records what it stood in for, so a
+rotated credential cannot hide behind a working fallback. `/api/health` reports the resolved chain.
+`AGENT_MODEL_PROVIDER` governs the Python tier the same way, over its own two bindings (Ollama and
+Claude — that tier has no Gemini client).
 
 Every fallback is **labelled in the UI**, on the card it affected. The mode is always visible: the
 health endpoint reports the database, the publish mode and the command plane provider, and the header, the
@@ -190,8 +201,49 @@ Every trending keyword and hashtag carries the URLs to open it, and the stronges
 it. They show on Content Intelligence, come back from `GET /api/trends`, and export as CSV from
 `GET /api/trends.csv`.
 
-### Two execution paths, honestly
+### Retrieval — pgvector beside the rows, not a second database
 
+Every scraped page and every Knowledge Base entry is stored **with a 768-dimension
+vector**, in the same PostgreSQL the rest of the product uses. `nomic-embed-text` produces them over
+the Ollama daemon that already serves Qwen, so semantic retrieval adds no service, no key and no
+egress.
+
+It is a column, not a separate vector store, and that is the whole point. Every retrieval must filter
+on metadata the row already carries — `active`, `category`, `confidence`, `workspace_id` — and a
+standalone index cannot do that without holding a copy that drifts. `Brain.recall()` refusing an
+inactive entry is what makes *"switch an entry off and generation changes"* true rather than
+decorative, so the vector has to live beside the flag that governs it.
+
+**Retrieval is hybrid, because the two scorers fail in opposite directions.** Lexical matching is
+exact and explainable but cannot see a paraphrase, and measured against this corpus it *saturates* —
+dozens of entries score a perfect 1.0 on a five-word query, so its ranking among them is arbitrary.
+Vector matching finds "reinforcement learning from human feedback" from "RLHF" and ranks continuously,
+but cannot tell you why in words. So both run, and **the lexical overlap supplies the operator-facing
+reason**: a cosine of 0.71 is not a reason, `matched on "rubric", "reward"` is.
+
+What this deliberately does not do is touch a threshold. `similarity()` in `shared/brand-voice.ts`
+still governs caption ≤ 0.70, image ≤ 0.85 and dedupe at 0.72, because those are product invariants
+`npm run verify` asserts and the seed data is built around. Cosine lives on a different scale, and
+letting it near one of those numbers would silently change what the number means. Vectors improve
+**recall** and nothing else.
+
+```bash
+ollama pull nomic-embed-text     # 768 dims, Apache-2.0, ~275MB
+npm run db:embed                 # embeds anything written while the embedder was down
+```
+
+Rows are embedded **on write** — at capture for a scraped page, at insert for a knowledge entry — and
+a failure there never costs the row: an unreachable embedder yields a `NULL` vector, the row lands
+anyway, and `db:embed` picks it up later. `pgvector` needs a literal width for its HNSW index, so the
+column is fixed at `vector(768)` and the model that produced each vector is recorded beside it —
+comparing one model's vector against another's returns a confident number that means nothing, so a
+change of embedder is a detectable condition rather than a silent corruption. `/api/health` reports
+the embedder and how much of each table is actually embedded.
+
+Needs the extension: `brew install pgvector`, or the `pgvector/pgvector:pg17` image instead of
+`postgres:17-alpine`.
+
+### Two execution paths, honestly
 `npm run dev:full` runs `server/src/orchestrator.ts` — the 12-agent, registry-driven pipeline
 the UI talks to by default. There is a second, separate engine: `backend/`, a Python 3.14
 tier with its own 8-agent roster (`backend/agents/__init__.py`) and its own sequencer
@@ -226,7 +278,7 @@ has to be built for live publishing and analytics.
 
 | Failure | Behaviour |
 |---|---|
-| API server down | The UI falls back to `src/data/demo.ts`. Every screen renders; Ethara runs on the in-bundle parser and labels itself standalone |
+| API server down | The UI falls back to `src/data/empty.ts` — deliberately empty, not a bundled dataset, because a plausible dashboard nothing measured would be fabricated evidence. Every screen renders and says what to do about it; Ethara runs on the in-bundle parser and labels itself standalone |
 | PostgreSQL down | The API **refuses to start** and prints the fix. Silently serving fabricated data would be worse than failing loudly |
 | A service key absent | Fixture path, stamped with a `fallbackReason` shown on the relevant card |
 | Image model unreachable | `brand-svg` renders locally; the asset card says why |

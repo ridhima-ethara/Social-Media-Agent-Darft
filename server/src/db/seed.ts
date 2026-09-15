@@ -23,6 +23,7 @@ import { BRAND, brandCorpusAsKnowledge, brandRulesAsKnowledge } from '../../../s
 import { SEED_KEYWORDS } from '../../../shared/keywords'
 
 import { config } from '../config'
+import { embedMany, embeddableText, embeddingModelId, toSqlVector } from '../integrations/embeddings'
 import { closePool, query, queryOne } from './pool'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -236,15 +237,48 @@ async function seedBrandKnowledge(workspaceId: string): Promise<void> {
     ...brandCorpusAsKnowledge().map((r) => ({ ...r, source: 'Brand corpus' })),
   ]
 
-  for (const row of rows) {
+  /*
+   * Embedded here, in one batch, rather than left for `db:embed`.
+   *
+   * The brand rules and corpus are what the Scraping Agent scores against on the
+   * very first run, before any research build exists — so if they seeded without
+   * vectors, the first run's retrieval would be lexical no matter how the
+   * embedder was configured. `embedMany` never rejects, so an absent embedder
+   * still seeds a complete corpus; the rows simply carry NULL until `db:embed`.
+   */
+  const embedded = await embedMany(
+    rows.map((row) => embeddableText(row.title, row.content)),
+    'document',
+  )
+  const modelId = embeddingModelId()
+
+  for (const [index, row] of rows.entries()) {
+    const vector = embedded.vectors[index] ?? null
     await query(
       `INSERT INTO knowledge_entries
          (workspace_id, title, category, content, source, sources, confidence,
-          evidence_count, active, origin, tags)
-       VALUES ($1,$2,$3,$4,$5,'[]'::jsonb,$6,1,true,'brand',$7)`,
-      [workspaceId, row.title, row.category, row.content, row.source, row.confidence, row.tags],
+          evidence_count, active, origin, tags,
+          embedding, embedding_model, embedded_at)
+       VALUES ($1,$2,$3,$4,$5,'[]'::jsonb,$6,1,true,'brand',$7,
+          $8::vector, $9, CASE WHEN $8 IS NULL THEN NULL ELSE now() END)`,
+      [
+        workspaceId,
+        row.title,
+        row.category,
+        row.content,
+        row.source,
+        row.confidence,
+        row.tags,
+        vector === null ? null : toSqlVector(vector),
+        vector === null ? null : modelId,
+      ],
     )
     tally('knowledge_entries')
+  }
+
+  if (embedded.reason !== undefined) {
+    console.log(`  · knowledge seeded without vectors — ${embedded.reason}`)
+    console.log('    run `npm run db:embed` once an embedder is reachable')
   }
 }
 

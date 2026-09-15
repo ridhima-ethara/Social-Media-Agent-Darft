@@ -30,7 +30,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+from .models import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_TEXT_MODEL, resolved
+
+MODEL = resolved("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
 MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "4096"))
 
 # ── Ollama ──────────────────────────────────────────────────────────────────
@@ -38,7 +40,7 @@ MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "4096"))
 # `_ollama_configured()` answer True on a machine with no daemon, and the agent
 # would report a live model while silently running the fallback.
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "qwen3:14b")
+OLLAMA_MODEL = resolved("OLLAMA_TEXT_MODEL", DEFAULT_OLLAMA_TEXT_MODEL)
 OLLAMA_TIMEOUT_S = int(os.environ.get("OLLAMA_TIMEOUT_MS", "180000")) // 1000
 OLLAMA_CONTEXT_TOKENS = int(os.environ.get("OLLAMA_CONTEXT_TOKENS", "16384"))
 
@@ -95,6 +97,17 @@ class Reasoning:
     used_model: bool = False
     fallback_reason: str | None = None
 
+    #: Which binding actually answered, and its model id. Set by `run_loop`
+    #: rather than inferred by callers: on a chained run the binding that
+    #: answered is not necessarily the preferred one, and an artefact stamped
+    #: with the preference would name a model that did not write it.
+    provider: str = "deterministic"
+    model: str = "ethara-deterministic-pipeline"
+
+    #: The primary's failure, when a backup answered instead. `None` when the
+    #: preferred binding served — the ordinary case, which needs no explanation.
+    degraded_from: str | None = None
+
 
 def _anthropic_configured() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -111,22 +124,54 @@ def active_provider() -> str:
     Returned rather than inferred by callers, because "which model produced
     this" is the first question asked about any agent output.
     """
+    chain = provider_chain()
+    return chain[0] if chain else "deterministic"
+
+
+def provider_chain() -> list[str]:
+    """
+    THE ORDERED BINDINGS, PRIMARY FIRST.
+
+    `active_provider()` answers "which binding owns reasoning", which is the
+    right question when one is configured and the wrong one when the primary is
+    configured but failing. A hosted endpoint gets rate-limited, has its
+    credential rotated or returns a 500; a local daemon gets stopped. On any of
+    those days a run that the other binding could have served instead collapsed
+    to the deterministic pipeline, because the binding had already been decided.
+
+    So reasoning is a chain, mirroring `captureChainFor()` on the Node side and
+    `textChain()` in `server/src/integrations/ollama.ts`: try the preferred
+    binding, then the other one behind it, then the deterministic pipeline.
+
+    `AGENT_MODEL_PROVIDER=deterministic` returns an empty chain — it is a
+    positive choice for the deterministic pipeline, not a failure to reach a
+    model, so nothing is attempted.
+    """
     if PROVIDER == "deterministic":
-        return "deterministic"
+        return []
+
     if PROVIDER == "ollama":
-        return "ollama" if _ollama_configured() else "deterministic"
-    if PROVIDER == "anthropic":
-        return "anthropic" if _anthropic_configured() else "deterministic"
-    if _ollama_configured():
-        return "ollama"
-    if _anthropic_configured():
-        return "anthropic"
-    return "deterministic"
+        preferred, backup = "ollama", "anthropic"
+    elif PROVIDER == "anthropic":
+        preferred, backup = "anthropic", "ollama"
+    else:
+        # `auto` prefers the local model: it costs nothing per call and keeps
+        # scraped evidence on the machine that scraped it.
+        preferred, backup = "ollama", "anthropic"
+
+    configured = {"ollama": _ollama_configured(), "anthropic": _anthropic_configured()}
+
+    chain = [name for name in (preferred, backup) if configured[name]]
+    return chain
 
 
 def active_model() -> str:
     """The model id of the active binding, for the artefact stamp."""
-    provider = active_provider()
+    return model_for(active_provider())
+
+
+def model_for(provider: str) -> str:
+    """The model id behind a named binding, for stamping a chained result."""
     if provider == "ollama":
         return OLLAMA_MODEL
     if provider == "anthropic":
@@ -160,14 +205,57 @@ def run_loop(
 
     Every tool result is fed back verbatim. The model never sees a tool it does
     not hold — the allowlist is enforced here, not merely described in a prompt.
-    """
-    provider = active_provider()
 
-    if provider == "ollama":
-        return _run_ollama(system, task, tools, max_turns)
-    if provider == "anthropic":
-        return _run_anthropic(system, task, tools, max_turns)
-    return _deterministic(tools, unavailable_reason())
+    Each configured binding is tried in turn. A binding that raises is a
+    degradation, not the end of the run: the reason is recorded on the Reasoning
+    that finally answers, so an operator learns the primary is broken even
+    though the output is fine. Hiding that behind a working backup would let a
+    rotated credential go unnoticed for as long as the backup held.
+    """
+    chain = provider_chain()
+    if not chain:
+        return _deterministic(tools, unavailable_reason())
+
+    failures: list[str] = []
+    last_fallback: Reasoning | None = None
+
+    for provider in chain:
+        try:
+            if provider == "ollama":
+                reasoning = _run_ollama(system, task, tools, max_turns)
+            else:
+                reasoning = _run_anthropic(system, task, tools, max_turns)
+        except Exception as error:  # noqa: BLE001 — every binding failure is a degradation
+            failures.append(f"{provider} ({model_for(provider)}) failed — {error}")
+            continue
+
+        # Each binding catches its own transport failure and returns the
+        # deterministic shape rather than raising. That is NOT an answer from
+        # this provider, and treating it as one is how a chain silently stops
+        # being a chain — the backup would never be reached because the primary
+        # always "succeeded". `used_model` is the discriminator.
+        if not reasoning.used_model:
+            failures.append(
+                f"{provider} ({model_for(provider)}) did not serve — {reasoning.fallback_reason}"
+            )
+            last_fallback = reasoning
+            continue
+
+        reasoning.provider = provider
+        reasoning.model = model_for(provider)
+        if failures:
+            # The backup answered. Name what it stood in for, on the artefact.
+            reasoning.degraded_from = "; ".join(failures)
+        return reasoning
+
+    # No binding served. The deterministic pipeline is the answer, carrying
+    # every reason it took — one per link that could not.
+    result = last_fallback if last_fallback is not None else _deterministic(tools, "; ".join(failures))
+    result.provider = "deterministic"
+    result.model = "ethara-deterministic-pipeline"
+    if failures:
+        result.fallback_reason = "; ".join(failures)
+    return result
 
 
 # ── Binding 1 · Ollama (local) ───────────────────────────────────────────────

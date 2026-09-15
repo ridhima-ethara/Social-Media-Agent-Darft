@@ -32,6 +32,7 @@ class CalendarAgent(Agent):
     icon = identity["icon"]
     stage = "plan"
     hands_off_to = ["content_agent"]
+    skills = ["calendar-idea-agent"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         cfg = self.config

@@ -14,6 +14,25 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- pgvector — SEMANTIC RETRIEVAL, IN THE DATABASE WE ALREADY RUN
+--
+-- Not a separate vector store. Every retrieval must filter on the metadata the
+-- rows already carry — `active`, `category`, `confidence`, `workspace_id` — and
+-- a standalone index cannot do that without holding a copy of those columns
+-- that then drifts. `Brain.recall()` refusing an inactive entry is what makes
+-- "switch an entry off and generation changes" true rather than decorative, so
+-- the vector has to live beside the flag that governs it.
+--
+-- 768 DIMENSIONS, FIXED. That is `nomic-embed-text`, the default embedder.
+-- pgvector needs a literal dimension at DDL time for an HNSW index to exist, so
+-- this cannot be an environment variable. The model that produced each vector is
+-- recorded on the row instead, so swapping embedders is a detectable condition
+-- that re-embeds rather than a silent comparison of incompatible spaces.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- ── workspaces ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS workspaces (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -164,7 +183,17 @@ CREATE TABLE IF NOT EXISTS scraped_items (
   brand_relevance  SMALLINT NOT NULL DEFAULT 0,
   posted_at        TIMESTAMPTZ,
   scraped_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  validated_at     TIMESTAMPTZ
+  validated_at     TIMESTAMPTZ,
+  -- ── Semantic retrieval ──────────────────────────────────────────────────
+  -- NULL means "not embedded yet", which is a first-class state: the embedder
+  -- is an external service, and a capture must never be lost because it was
+  -- unreachable. `npm run db:embed` picks these up later.
+  embedding        vector(768),
+  -- Which model produced the vector above. Recorded so a change of embedder is
+  -- detectable: comparing a vector from one model against another's is
+  -- meaningless, and would return confident nonsense rather than an error.
+  embedding_model  TEXT,
+  embedded_at      TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS scraped_items_workspace_scraped_idx
@@ -364,7 +393,14 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
                  CHECK (origin IN ('brand','research','learned','manual','assistant')),
   build_id       UUID REFERENCES knowledge_builds(id) ON DELETE SET NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- ── Semantic retrieval ────────────────────────────────────────────────────
+  -- See the pgvector note at the top of this file. NULL means "not embedded
+  -- yet"; an entry is never withheld from the store because the embedder was
+  -- down, it simply retrieves lexically until `npm run db:embed` reaches it.
+  embedding      vector(768),
+  embedding_model TEXT,
+  embedded_at    TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS knowledge_entries_workspace_active_idx
@@ -654,3 +690,38 @@ ALTER TABLE posts              DROP CONSTRAINT IF EXISTS posts_platform_check;
 ALTER TABLE posts              ADD CONSTRAINT posts_platform_check CHECK (platform IN ('linkedin','instagram','x','facebook'));
 ALTER TABLE platform_analytics DROP CONSTRAINT IF EXISTS platform_analytics_platform_check;
 ALTER TABLE platform_analytics ADD CONSTRAINT platform_analytics_platform_check CHECK (platform IN ('linkedin','instagram','x','facebook'));
+
+-- ── Semantic retrieval columns and indexes (pgvector) ──────────────────────
+-- The columns are declared inline in the CREATE TABLE bodies above, which only
+-- takes effect on a database being built from scratch. These ALTERs are what
+-- reach a database that already exists — `CREATE TABLE IF NOT EXISTS` leaves an
+-- existing table exactly as it was, so without them `findSchemaDrift()` would
+-- report the new columns as drift and demand a destructive `--fresh` rebuild.
+-- Adding them additively means an existing corpus keeps every captured row.
+ALTER TABLE scraped_items     ADD COLUMN IF NOT EXISTS embedding       vector(768);
+ALTER TABLE scraped_items     ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+ALTER TABLE scraped_items     ADD COLUMN IF NOT EXISTS embedded_at     TIMESTAMPTZ;
+ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS embedding       vector(768);
+ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS embedded_at     TIMESTAMPTZ;
+
+-- HNSW over cosine distance. HNSW rather than IVFFlat because it needs no
+-- training pass and stays correct as rows arrive one run at a time; cosine
+-- because the embedder returns unnormalised vectors and cosine is the metric
+-- `nomic-embed-text` was trained against.
+--
+-- A partial index: only rows that HAVE a vector belong in it. Most of the corpus
+-- is unembedded the moment the feature ships, and indexing NULLs would cost
+-- space to describe their absence.
+CREATE INDEX IF NOT EXISTS scraped_items_embedding_idx
+  ON scraped_items USING hnsw (embedding vector_cosine_ops)
+  WHERE embedding IS NOT NULL;
+CREATE INDEX IF NOT EXISTS knowledge_entries_embedding_idx
+  ON knowledge_entries USING hnsw (embedding vector_cosine_ops)
+  WHERE embedding IS NOT NULL;
+
+-- Finding what still needs embedding must not scan the whole table.
+CREATE INDEX IF NOT EXISTS scraped_items_unembedded_idx
+  ON scraped_items (workspace_id) WHERE embedding IS NULL;
+CREATE INDEX IF NOT EXISTS knowledge_entries_unembedded_idx
+  ON knowledge_entries (workspace_id) WHERE embedding IS NULL;

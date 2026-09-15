@@ -34,8 +34,20 @@ import type {
   ValidationVerdict,
 } from '../types'
 
-export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:4000/api'
+/**
+ * THE API BASE IS RELATIVE BY DEFAULT.
+ *
+ * `/api` — not `http://localhost:4001/api`. The Vite dev server proxies `/api`
+ * to the API, and nginx does the same in the container image, so a relative base
+ * resolves correctly from whatever host served the bundle. An absolute default
+ * would break the moment a second device opened the app: `localhost` on a phone
+ * is the phone. Hard-coding a LAN IP only moves the problem to the next DHCP
+ * lease.
+ *
+ * `VITE_API_URL` remains available as an override, for pointing the app at an
+ * API on a genuinely different origin.
+ */
+export const API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.trim() || '/api'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE TRANSPORT
@@ -52,6 +64,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   const response = await fetch(`${API_BASE}${path}`, {
     method,
+    // The session is an httpOnly cookie, so it only travels when credentials are
+    // included. Without this every mutating request would answer 401.
+    credentials: 'include',
     headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(timeoutMs),
@@ -494,4 +509,58 @@ export async function runAgentPipeline(
     drain(decoder.decode(value, { stream: true }))
   }
   drain(decoder.decode())
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SESSION
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface SessionInfo {
+  role: 'marketing' | 'leadership' | null
+  actor: string | null
+  /** False when no OPERATOR_PASSWORD is configured — the gate is open, and says so. */
+  enforced: boolean
+}
+
+/**
+ * The server said no. Distinct from the API being unreachable, because the
+ * two mean opposite things at the sign-in screen: a refusal must be shown
+ * and block; an absent API means the product runs standalone.
+ */
+export class SignInRefused extends Error {}
+
+/** Signs in. Throws `SignInRefused` with the server's own sentence when refused. */
+export async function signIn(
+  role: 'marketing' | 'leadership',
+  password: string,
+): Promise<SessionInfo> {
+  const response = await fetch(`${API_BASE}/session`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role, password }),
+  })
+  if (response.status === 400 || response.status === 401) {
+    const parsed: unknown = await response.json().catch(() => null)
+    const reason =
+      parsed !== null && typeof parsed === 'object' && 'error' in parsed
+        ? String((parsed as { error: unknown }).error)
+        : 'Sign-in was refused.'
+    throw new SignInRefused(reason)
+  }
+  if (!response.ok) throw new Error(`Request failed with ${response.status}.`)
+  return (await response.json()) as SessionInfo
+}
+
+/** The current session, or `role: null`. Never throws on absence. */
+export async function currentSession(): Promise<SessionInfo | null> {
+  try {
+    return await request<SessionInfo>('/session')
+  } catch {
+    return null
+  }
+}
+
+export async function signOut(): Promise<void> {
+  await request('/session', { method: 'DELETE' })
 }

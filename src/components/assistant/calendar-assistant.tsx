@@ -19,7 +19,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { CornerDownLeft, Eraser, Sparkles } from 'lucide-react'
 import { useStore } from '../../store'
-import { Btn, PLATFORM_LABEL } from '../ui'
+import { Select, Btn, PLATFORM_LABEL } from '../ui'
 import { AssistantCore } from './core'
 import { ConfirmCard } from './confirm-card'
 import { Exchange } from './exchange'
@@ -148,32 +148,26 @@ export function CalendarAssistant() {
           >
             Working on
           </label>
-          <select
+          <Select
             id="calendar-assistant-target"
             value={targetId}
-            onChange={(event) => setTargetId(event.target.value)}
-            className="w-full truncate rounded-lg border border-line bg-surface-2 px-2 py-1.5 text-[11.5px] text-ink outline-none focus:border-accent"
-          >
-            <option value="">The whole calendar</option>
-            {onCalendar.length > 0 ? (
-              <optgroup label="On the calendar (drafted)">
-                {onCalendar.map((idea) => (
-                  <option key={idea.id} value={idea.id}>
-                    {PLATFORM_LABEL[idea.platform]} · {idea.scheduled_date} · {idea.title.slice(0, 34)}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null}
-            {waiting.length > 0 ? (
-              <optgroup label="Waiting on a caption">
-                {waiting.map((idea) => (
-                  <option key={idea.id} value={idea.id}>
-                    {PLATFORM_LABEL[idea.platform]} · {idea.scheduled_date} · {idea.title.slice(0, 34)}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null}
-          </select>
+            onChange={setTargetId}
+            className="w-full"
+            size="sm"
+            options={[
+              { value: '', label: 'The whole calendar' },
+              ...onCalendar.map((idea) => ({
+                value: idea.id,
+                label: `${PLATFORM_LABEL[idea.platform]} · ${idea.scheduled_date} · ${idea.title.slice(0, 34)}`,
+                group: 'On the calendar (drafted)',
+              })),
+              ...waiting.map((idea) => ({
+                value: idea.id,
+                label: `${PLATFORM_LABEL[idea.platform]} · ${idea.scheduled_date} · ${idea.title.slice(0, 34)}`,
+                group: 'Waiting on a caption',
+              })),
+            ]}
+          />
         </div>
       ) : null}
 

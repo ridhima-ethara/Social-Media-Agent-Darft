@@ -4,8 +4,8 @@ Evidence-grounded social content pipeline for a frontier AI research lab
 (RL / Agentic AI / Evaluation & Benchmarks / Post-training).
 
 ## Read first
-- `docs/architecture-v2.md` — system design, agent roster, connectors
-- `docs/agent-contract.md` — the 7-field AgentSpec every agent conforms to
+- `specs/architecture.md` — system design, agent roster, connectors (generated: `npm run specs:build`)
+- `shared/agent-contract.ts` — the AgentSpec every agent conforms to, in code
 - `packages/skills/*/SKILL.md` — the behavioural specification for each agent
 
 ## The rule that governs everything
@@ -127,7 +127,7 @@ lesson back.
 ```bash
 npm run setup            # install both tiers, start Postgres, migrate + seed
 npm run dev              # web app on :5173
-npm run dev:server       # API on :4000
+npm run dev:server       # API on :4001
 npm run dev:full         # both
 
 npm run typecheck        # tsc -b (root)
@@ -173,10 +173,10 @@ server/src/
 src/               the web app
   store.ts         ONE Zustand store. No context providers, no react-query, no router.
   types.ts         mirrors the server's rows exactly, so /api/state flows in with no adapter
-  data/demo.ts     the bundled dataset — same shape as /api/state
+  data/empty.ts    the empty fallback — same shape as /api/state, every collection empty
   lib/assistant.ts    server streaming AND the in-bundle deterministic parser
   components/      design system + components/assistant/* (core · bar · rail · hud · boot)
-  pages/           sixteen screens, selected by `page` in the store
+  pages/           fourteen screens, selected by `page` in the store
 ```
 
 ## Rules currently enforced by review and `agent:check`

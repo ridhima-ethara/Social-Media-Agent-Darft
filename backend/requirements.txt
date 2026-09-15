@@ -28,3 +28,8 @@ anthropic==1.4.0
 # Corpus ingestion: extracts the text layer from operator-supplied PDFs.
 # A scan with no text layer is reported, never OCR-guessed.
 pypdf==6.18.0
+
+# The test harness. `npm run verify` runs `backend/tests` as one of its gates, so
+# a rule this tier enforces — a rejected knob is RECORDED, not silently
+# defaulted — fails the build rather than being rediscovered by an operator.
+pytest==9.1.1

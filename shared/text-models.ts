@@ -14,6 +14,37 @@
 
 export type TextModelId = 'ethara-writer' | 'ollama-qwen3' | 'gcp-gemini'
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE DEFAULT MODEL TAGS — ONE HOME
+
+   A model tag is a deployment fact, not a preference, and it was previously
+   stated in four places that disagreed: `config.ts` defaulted to `qwen3:14b`
+   while `server/.env.example` shipped `qwen3.5:latest`, so copying the example
+   file pulled a different model than the code expected — and the one the code
+   named was not installed at all.
+
+   These constants are the single home. `server/src/config.ts` reads them as its
+   `str()` fallbacks, and the Python tier mirrors them in `backend/core/models.py`
+   — a test asserts the two files agree character for character, because Python
+   cannot import TypeScript and a comment asking someone to remember is not a
+   mechanism.
+
+   THE RULE FOR CHANGING ONE: the tag named here must exist in the registry it
+   addresses. `ollama list` is the check for the two Ollama tags.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Reasoning, captions, calendar copy. `qwen3.5:latest` is what `ollama pull qwen3.5` lands. */
+export const DEFAULT_OLLAMA_TEXT_MODEL = 'qwen3.5:latest'
+
+/** The hosted counterpart, used when `TEXT_MODEL_PROVIDER=gcp`. */
+export const DEFAULT_GCP_TEXT_MODEL = 'gemini-2.5-pro'
+
+/** Embeddings. 768 dimensions — `schema.sql` fixes the column to match. */
+export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text'
+
+/** The Python tier's hosted binding. That tier has no Gemini client. */
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5'
+
 export interface TextModelSpec {
   id: TextModelId
   label: string

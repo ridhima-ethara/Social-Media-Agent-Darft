@@ -13,7 +13,7 @@ import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
 import { KeywordBoard } from '../components/keyword-board'
 import { listVoices, setVoiceEnabled, speak, voiceSupport } from '../lib/voice'
-import { Badge, Btn, FacebookGlyph, InstagramGlyph, LinkedinGlyph, XGlyph } from '../components/ui'
+import { Select, Badge, Btn, FacebookGlyph, InstagramGlyph, LinkedinGlyph, XGlyph } from '../components/ui'
 
 /** The lanes the Scraping Agent captures, in the order it runs them. */
 /**
@@ -369,19 +369,16 @@ export function SettingsPage() {
               </div>
 
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <select
+                <Select
                   value={selectedVoice}
-                  onChange={(event) => setSelectedVoice(event.target.value)}
-                  aria-label="Voice"
-                  className="flex-1 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[12px] outline-none focus:border-accent"
-                >
-                  <option value="">Preferred en-GB voice</option>
-                  {listVoices().map((voice) => (
-                    <option key={voice.voiceURI} value={voice.voiceURI}>
-                      {voice.name} ({voice.lang})
-                    </option>
-                  ))}
-                </select>
+                  onChange={setSelectedVoice}
+                  ariaLabel="Voice"
+                  className="min-w-0 flex-1"
+                  options={[
+                    { value: '', label: 'Preferred en-GB voice' },
+                    ...listVoices().map((voice) => ({ value: voice.voiceURI, label: `${voice.name} (${voice.lang})` })),
+                  ]}
+                />
                 <Btn
                   variant="subtle"
                   onClick={() =>
@@ -435,32 +432,30 @@ export function SettingsPage() {
 
           <label className="mt-3 block">
             <span className="text-[11px] uppercase tracking-[0.08em] text-ink-3">Narration verbosity</span>
-            <select
+            <Select
               value={settings.assistantVerbosity}
-              onChange={(event) =>
-                updateSettings({ assistantVerbosity: event.target.value as 'terse' | 'normal' | 'detailed' })
-              }
-              className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[12px] outline-none focus:border-accent"
-            >
-              <option value="terse">Terse</option>
-              <option value="normal">Normal</option>
-              <option value="detailed">Detailed</option>
-            </select>
+              onChange={(next) => updateSettings({ assistantVerbosity: next as 'terse' | 'normal' | 'detailed' })}
+              options={[
+                { value: 'terse', label: 'Terse' },
+                { value: 'normal', label: 'Normal' },
+                { value: 'detailed', label: 'Detailed' },
+              ]}
+              className="mt-1 w-full"
+            />
           </label>
 
           <label className="mt-2 block">
             <span className="text-[11px] uppercase tracking-[0.08em] text-ink-3">Address style</span>
-            <select
+            <Select
               value={settings.assistantAddressStyle}
-              onChange={(event) =>
-                updateSettings({ assistantAddressStyle: event.target.value as 'surname' | 'firstname' | 'role' })
-              }
-              className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[12px] outline-none focus:border-accent"
-            >
-              <option value="surname">Surname</option>
-              <option value="firstname">First name</option>
-              <option value="role">Role</option>
-            </select>
+              onChange={(next) => updateSettings({ assistantAddressStyle: next as 'surname' | 'firstname' | 'role' })}
+              options={[
+                { value: 'surname', label: 'Surname' },
+                { value: 'firstname', label: 'First name' },
+                { value: 'role', label: 'Role' },
+              ]}
+              className="mt-1 w-full"
+            />
           </label>
 
           <div className="mt-3 rounded-lg border border-line bg-surface-2 px-3 py-2">

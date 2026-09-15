@@ -121,6 +121,7 @@ class PublishingAgent(Agent):
     icon = identity["icon"]
     stage = "ship"
     hands_off_to = ["analytics_agent"]
+    skills = ["publishing-runbook"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         platform = payload.get("platform", "linkedin")

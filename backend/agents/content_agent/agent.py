@@ -34,6 +34,12 @@ class ContentAgent(Agent):
     icon = identity["icon"]
     stage = "create"
     hands_off_to = ["image_agent"]
+    # Two specifications, because this agent does two specified things: it
+    # writes the caption AND it is the tier's brand-compliance check
+    # (`check_brand_voice`). There is no separate Review Agent on this side of
+    # the process boundary, so leaving brand-voice off would leave the rule set
+    # it enforces unstated.
+    skills = ["caption-writing", "brand-voice"]
 
     def tools(self, payload: dict[str, Any]) -> list[ToolSpec]:
         topic = payload.get("topic", "")

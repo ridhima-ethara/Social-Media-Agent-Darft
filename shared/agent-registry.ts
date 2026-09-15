@@ -1129,6 +1129,9 @@ const CALENDAR_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     critical: true,
     config: [
+      num('planningHorizonDays', 'Planning horizon', 14,
+        'How many days ahead the calendar spreads ideas over. 7 plans one week; 14 plans a fortnight, which gives the cadence limits room to breathe rather than compressing every idea into five weekdays. Weekends are still skipped when "Avoid weekends" is on, so a 14-day horizon offers ten postable days.',
+        { min: 1, max: 60, step: 1, unit: 'days' }),
       num('preferredWindowStart', 'Earliest hour', 8,
         'The start of the posting window in local time. Nothing is scheduled before it.',
         { min: 0, max: 23, step: 1, unit: 'h' }),
@@ -1181,6 +1184,8 @@ const CALENDAR_SKILLS: SkillSpec[] = [
     order: 5,
     enabledByDefault: true,
     config: [
+      bool('avoidWeekends', 'Avoid weekends', true,
+        'On, a post displaced from a full day skips Saturday and Sunday rather than landing on one. Declared here as well as on slot optimisation because this skill MOVES dates, and a rebalancer that ignored the rule would undo it at the first collision.'),
       num('maxPerDay', 'Maximum posts per day', 3,
         'Across all platforms. Beyond this, ideas move to the next available day.',
         { min: 1, max: 10, step: 1 }),

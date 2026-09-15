@@ -185,6 +185,54 @@ if (folderProblems === 0) {
   pass(`pipeline order from handsOffTo: ${pipelineOrder().join(' → ')}`)
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   5 · EVERY AGENT HAS A GENERATED SPEC
+
+   This check was documented at the top of this file and never implemented,
+   because `specs/` did not exist — the README promised `npm run specs:build`
+   and no such script was defined. Both now exist, so the check is real.
+
+   It asserts presence and freshness by regeneration, not by content: the specs
+   are generated from the registry, so the only failure mode that matters is
+   "the registry gained an agent and nobody re-ran the build".
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+section('Generated specs')
+
+const SPECS_DIR = join(ROOT, 'specs')
+const SPEC_AGENTS_DIR = join(SPECS_DIR, 'agents')
+
+if (!existsSync(join(SPECS_DIR, 'architecture.md'))) {
+  fail('specs/architecture.md', 'is missing — run `npm run specs:build`')
+} else {
+  const missingSpecs = AGENTS.filter(
+    (agent) => !existsSync(join(SPEC_AGENTS_DIR, `${agent.id}.md`)),
+  )
+  if (missingSpecs.length === 0) {
+    pass(`all ${AGENTS.length} agents have a section in specs/agents/`)
+  } else {
+    for (const agent of missingSpecs) {
+      fail(
+        `specs/agents/${agent.id}.md`,
+        'is missing — the registry declares this agent but no spec was generated. Run `npm run specs:build`',
+      )
+    }
+  }
+
+  // A spec file for an agent the registry no longer declares is a stale artefact
+  // describing a roster that is gone.
+  const declared = new Set(AGENTS.map((a) => `${a.id}.md`))
+  const orphanSpecs = existsSync(SPEC_AGENTS_DIR)
+    ? readdirSync(SPEC_AGENTS_DIR).filter((f) => f.endsWith('.md') && !declared.has(f))
+    : []
+  for (const orphan of orphanSpecs) {
+    fail(
+      `specs/agents/${orphan}`,
+      'describes an agent the registry no longer declares. Delete it, or re-run `npm run specs:build`',
+    )
+  }
+}
+
 
 /* ── Result ────────────────────────────────────────────────────────────────── */
 console.log('')
