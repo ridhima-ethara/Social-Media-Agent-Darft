@@ -11,7 +11,7 @@
  * The assistant lives in a popover under Ask Ethara, scoped to this week.
  */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useStore } from '../store'
 import { CalendarAssistant } from '../components/assistant/calendar-assistant'
@@ -102,7 +102,6 @@ export function CalendarPage() {
     const earliest = upcoming[0]
     return earliest === undefined ? 0 : Math.round((earliest - today) / (7 * DAY_MS))
   })
-  const [spotlight, setSpotlight] = useState<Platform | null>(null)
   const [askOpen, setAskOpen] = useState(false)
   const gridRef = useRef<HTMLDivElement | null>(null)
 
@@ -144,14 +143,13 @@ export function CalendarPage() {
       ? `${label(weekStart)}–${label(addDays(weekStart, 6))} ${monthOf(weekStart)}`
       : `${label(weekStart)} ${monthOf(weekStart)}–${label(addDays(weekStart, 6))} ${monthOf(addDays(weekStart, 6))}`
 
-  const mid = 3
 
   return (
     <div className="-mx-6 -mt-5 -mb-5 flex min-h-[calc(100vh-56px)] flex-col">
       {/* ── Command bar ─────────────────────────────────────────────────── */}
       <header className="glass relative z-20 flex min-h-[58px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
         <h1 className="whitespace-nowrap text-[17px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
-        <span className="mono inline-flex items-center gap-[7px] whitespace-nowrap rounded-md border border-line-strong px-[9px] py-1 text-[9.5px] tracking-[0.1em] text-ink-3">
+        <span className="inline-flex items-center gap-[7px] whitespace-nowrap rounded-md border border-line-strong px-[9px] py-1 text-[9.5px] tracking-[0.1em] text-ink-3">
           TOP {cap} PER PLATFORM
         </span>
         <div className="ml-auto flex items-center gap-2">
@@ -159,7 +157,7 @@ export function CalendarPage() {
             <button type="button" onClick={() => setWeekOffset(weekOffset - 1)} aria-label="Previous week" className="px-[9px] py-[5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink">
               <ChevronLeft size={13} />
             </button>
-            <span className="mono border-x border-line-strong px-3 py-[5px] text-[11px] text-ink">{weekLabel}</span>
+            <span className="border-x border-line-strong px-3 py-[5px] text-[11px] text-ink">{weekLabel}</span>
             <button type="button" onClick={() => setWeekOffset(weekOffset + 1)} aria-label="Next week" className="px-[9px] py-[5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink">
               <ChevronRight size={13} />
             </button>
@@ -181,7 +179,7 @@ export function CalendarPage() {
                 <span className="block text-[12.5px] font-semibold tracking-[-0.01em] text-ink">Ask Ethara</span>
                 <span className="mt-px block text-[10.5px] text-ink-3">Happy to move slots or redraft</span>
               </span>
-              <span className="mono shrink-0 rounded-[4px] border border-line-strong px-[5px] text-[9.5px] text-ink-3">⌘K</span>
+              <span className="shrink-0 rounded-[4px] border border-line-strong px-[5px] text-[9.5px] text-ink-3">⌘K</span>
             </button>
 
             {askOpen ? (
@@ -191,7 +189,7 @@ export function CalendarPage() {
                 className="absolute right-0 top-[calc(100%+10px)] z-30 w-[420px] max-w-[calc(100vw-48px)] origin-top-right overflow-hidden rounded-[14px] border border-line-strong bg-surface shadow-2xl"
                 style={{ animation: `eth-pop 380ms ${EASE} both` }}
               >
-                <div className="mono flex items-center gap-2 border-b border-line px-3.5 py-2 text-[9.5px] tracking-[0.1em] text-ink-3">
+                <div className="flex items-center gap-2 border-b border-line px-3.5 py-2 text-[9.5px] tracking-[0.1em] text-ink-3">
                   SCOPED TO {weekLabel} · PLANS BEFORE IT RUNS
                   <button type="button" onClick={() => setAskOpen(false)} aria-label="Close" className="ml-auto text-ink-3 transition-colors hover:text-ink">✕</button>
                 </div>
@@ -204,150 +202,60 @@ export function CalendarPage() {
         </div>
       </header>
 
-      {/* ── Capacity band ───────────────────────────────────────────────── */}
-      <section aria-label="Slot capacity by platform" className="grid shrink-0 grid-cols-2 gap-px border-b border-line bg-line-strong md:grid-cols-4">
-        {capacity.map((c) => (
-          <button
-            key={c.platform}
-            type="button"
-            onPointerEnter={() => setSpotlight(c.platform)}
-            onPointerLeave={() => setSpotlight(null)}
-            onFocus={() => setSpotlight(c.platform)}
-            onBlur={() => setSpotlight(null)}
-            className="bg-surface px-3.5 py-[11px] text-left outline-none focus-visible:bg-surface-2"
-            title={`${PLATFORM_LABEL[c.platform]}: ${c.placed} of ${cap} slots taken this week`}
-          >
-            <div className="flex items-center gap-2">
-              <PlatformIcon platform={c.platform} size={12} />
-              <span className="text-[12px] font-semibold tracking-[-0.01em] text-ink">{PLATFORM_LABEL[c.platform]}</span>
-              <span className={`mono ml-auto text-[11px] ${c.free > 0 ? 'text-serious' : 'text-accent-bright'}`}>
-                {c.placed}/{cap}
-              </span>
-            </div>
-            <div className="mt-[9px] flex gap-[3px]" aria-hidden="true">
-              {Array.from({ length: cap }, (_, i) => (
-                <span
-                  key={i}
-                  className="h-1 flex-1 origin-left rounded-[2px]"
-                  style={{
-                    background: i < c.placed ? PLATFORM_TOKEN[c.platform] : 'var(--color-surface-3)',
-                    animation: `eth-seg 520ms cubic-bezier(0.16, 1, 0.3, 1) ${120 + i * 60}ms both`,
-                  }}
-                />
-              ))}
-            </div>
-            <div className="mono mt-[7px] text-[9.5px] text-ink-3">
-              {c.free} slot{c.free === 1 ? '' : 's'} free · {c.waiting} queued below the cut
-            </div>
-          </button>
-        ))}
-      </section>
-
       {/* ── The week, and the queue ─────────────────────────────────────── */}
       <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
         <section
           className="relative min-w-0 flex-1 overflow-hidden border-r border-line px-[18px] py-3.5"
         >
-          <WeekGround />
-
           <div className="relative z-10 mb-2.5 flex items-center gap-2.5">
             <h2 className="text-[13.5px] font-semibold tracking-[-0.015em] text-ink">
               {totalPlaced} slot{totalPlaced === 1 ? '' : 's'} placed
             </h2>
-            <span className="mono text-[10px] text-ink-3">
+            <span className="text-[10px] text-ink-3">
               {totalFree} of {cap * PLATFORMS.length} slots free · open a card to edit it or move its day
             </span>
           </div>
 
-          <div style={{ perspective: 1600, perspectiveOrigin: '50% 20%' }}>
-            <div
-              ref={gridRef}
-              className="relative z-10 grid grid-cols-2 items-start gap-[9px] md:grid-cols-4 xl:grid-cols-7"
-              style={{
-                transformStyle: 'preserve-3d',
-                /*
-                 * NO 3D ROTATION ON THE INTERACTIVE GRID.
-                 *
-                 * This carried `rotateY(tilt.y) rotateX(tilt.x)` under a
-                 * `perspective: 1600` parent — a mouse-driven parallax. It looked
-                 * good and broke clicking: a 3D-rotated element is hit-tested
-                 * against its TRANSFORMED geometry, so what a person sees and
-                 * what the browser considers clickable diverge, and the gap grows
-                 * with distance from `perspectiveOrigin`. Cards near the origin
-                 * opened; the rest silently missed. Worse, the tilt tracked the
-                 * cursor, so the hit area moved while it was being aimed at.
-                 *
-                 * The lift on a hovered card (`translateZ`) is kept — that is a
-                 * per-card z-translation, which does not displace hit-testing in
-                 * the plane. It is the ROTATION that has to go, and a decorative
-                 * parallax is not worth cards that cannot be clicked.
-                 *
-                 * AND THE CONTAINER MUST NOT OCCLUDE ITS OWN COLUMNS.
-                 *
-                 * The columns recede on a shallow arc, so every one except the
-                 * middle sits BEHIND this element's own z=0 plane under
-                 * `preserve-3d`. That put this div in front of them for hit
-                 * testing: `elementFromPoint` over Monday returned the grid, and
-                 * only Thursday — the one column at z=0 — could be clicked at
-                 * all. Taking the grid out of hit testing entirely hands every
-                 * event to the columns, which is where the handlers live.
-                 */
-                pointerEvents: 'none',
-                transition: `transform 900ms ${EASE}`,
-              }}
-            >
+          <div
+            ref={gridRef}
+            className="grid grid-cols-2 items-start gap-[9px] md:grid-cols-4 xl:grid-cols-7"
+          >
               {days.map((day, i) => {
                 const iso = isoDate(day)
                 const dayIdeas = primary
                   .filter((idea) => idea.scheduled_date === iso)
                   .sort((a, b) => timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
                 const isToday = iso === todayIso
-                const t = (i - mid) / mid
-                const z = -Math.round(t * t * 90)
                 return (
                   <div
                     key={iso}
                     className="flex min-w-0 flex-col gap-[7px]"
-                    style={
-                      {
-                        // The grid above is `pointer-events: none`, so the columns
-                        // take every event back.
-                        pointerEvents: 'auto',
-                        transformStyle: 'preserve-3d',
-                        '--from': `translate3d(0, 26px, ${z - 200}px)`,
-                        '--rest': `translate3d(0, 0, ${z}px)`,
-                        '--op': 1,
-                        animation: `eth-stage-in 760ms ${EASE} ${320 + i * 60}ms both`,
-                      } as CSSProperties
-                    }
+                    style={{ animation: `eth-rise 420ms ${EASE} ${120 + i * 50}ms both` }}
                   >
                     <header className="flex items-baseline gap-1.5 px-0.5 pb-0.5">
-                      <span className={`mono text-[9.5px] tracking-[0.12em] ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}>
+                      <span className={`text-[9.5px] tracking-[0.12em] ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}>
                         {day.toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase()}
                       </span>
-                      <span className={`mono text-[11px] ${isToday ? 'text-ink' : 'text-ink-3'}`}>{day.getDate()}</span>
-                      {isToday ? <span className="mono ml-auto text-[8.5px] tracking-[0.1em] text-accent-bright">TODAY</span> : null}
+                      <span className={`text-[11px] ${isToday ? 'text-ink' : 'text-ink-3'}`}>{day.getDate()}</span>
+                      {isToday ? <span className="ml-auto text-[8.5px] tracking-[0.1em] text-accent-bright">TODAY</span> : null}
                     </header>
 
                     {dayIdeas.map((idea) => (
                       <SlotCard
                         key={idea.id}
                         idea={idea}
-                        dimmed={spotlight !== null && spotlight !== idea.platform}
-                        lifted={spotlight === idea.platform}
                         onOpen={() => openReview(idea.id)}
                       />
                     ))}
 
                     {/* A day with room left says so. It is a label, not a drop
                         target — nothing on this grid is draggable. */}
-                    <div className="mono flex min-h-[84px] items-center justify-center rounded-[9px] border border-dashed border-line-strong text-[9px] tracking-[0.1em] text-ink-3">
+                    <div className="flex min-h-[84px] items-center justify-center rounded-[9px] border border-dashed border-line-strong text-[9px] tracking-[0.1em] text-ink-3">
                       {dayIdeas.length === 0 ? 'NO SLOT TAKEN' : 'ROOM FOR MORE'}
                     </div>
                   </div>
                 )
               })}
-            </div>
           </div>
         </section>
 
@@ -361,17 +269,7 @@ export function CalendarPage() {
    THE CARD — a title, with a small creative under it
    ═══════════════════════════════════════════════════════════════════════════ */
 
-function SlotCard({
-  idea,
-  dimmed,
-  lifted,
-  onOpen,
-}: {
-  idea: Idea
-  dimmed: boolean
-  lifted: boolean
-  onOpen: () => void
-}) {
+function SlotCard({ idea, onOpen }: { idea: Idea; onOpen: () => void }) {
   const bar = STATUS_TONE[idea.status] ?? 'var(--color-line-strong)'
   const ink = STATUS_INK[idea.status] ?? 'var(--color-ink-3)'
   const chip = STATUS_CHIP[idea.status] ?? idea.status.toUpperCase()
@@ -421,19 +319,13 @@ function SlotCard({
         }
       }}
       className="group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-[9px] border border-line-strong bg-surface py-2 pl-[11px] pr-[9px] transition-[border-color,transform,opacity,box-shadow] duration-[320ms] ease-[var(--ease-out-soft)] hover:-translate-y-0.5 hover:border-accent/60"
-      style={{
-        transformStyle: 'preserve-3d',
-        opacity: dimmed ? 0.28 : 1,
-        transform: lifted ? 'translateZ(18px)' : undefined,
-        boxShadow: lifted ? '0 18px 40px -18px rgba(0, 0, 0, 0.6)' : undefined,
-      }}
     >
       <span aria-hidden="true" className="absolute inset-y-0 left-0 w-0.5" style={{ background: bar }} />
       <div className="flex items-center gap-1.5">
         <PlatformIcon platform={idea.platform} size={11} />
-        <span className="mono text-[9.5px] text-ink-3">{clock(idea.scheduled_time)}</span>
-        {idea.is_new_trend ? <span className="mono text-[8.5px] tracking-[0.1em] text-magenta">NEW</span> : null}
-        <span className="mono ml-auto text-[9.5px]" style={{ color: ink }}>{idea.confidence}</span>
+        <span className="text-[9.5px] text-ink-3">{clock(idea.scheduled_time)}</span>
+        {idea.is_new_trend ? <span className="text-[8.5px] tracking-[0.1em] text-magenta">NEW</span> : null}
+        <span className="ml-auto text-[9.5px]" style={{ color: ink }}>{idea.confidence}</span>
       </div>
       <div className="mt-1.5 text-[11.5px] font-semibold leading-snug text-ink">{idea.title}</div>
       <div
@@ -462,13 +354,13 @@ function SlotCard({
         ) : (
           <>
             <span aria-hidden="true" className="absolute inset-0" style={{ background: 'radial-gradient(120% 90% at 100% 0%, rgba(255, 255, 255, 0.18), transparent 60%)' }} />
-            <span className="mono absolute bottom-[5px] left-[7px] text-[7.5px] tracking-[0.12em] text-white/85">
+            <span className="absolute bottom-[5px] left-[7px] text-[7.5px] tracking-[0.12em] text-white/85">
               {idea.media?.model ? idea.media.model.toUpperCase() : 'ETHARA · NO CREATIVE YET'}
             </span>
           </>
         )}
         <span
-          className="mono absolute right-1.5 top-[5px] rounded-[3px] px-[5px] py-px text-[8px] tracking-[0.08em]"
+          className="absolute right-1.5 top-[5px] rounded-[3px] px-[5px] py-px text-[8px] tracking-[0.08em]"
           style={{ color: ink, background: 'color-mix(in srgb, var(--color-page) 55%, transparent)' }}
         >
           {chip}
@@ -518,8 +410,8 @@ function Queue({
               <div className="sticky top-0 z-[2] flex items-center gap-2 border-y border-line bg-surface-2 px-3.5 py-[9px]">
                 <PlatformIcon platform={c.platform} size={12} />
                 <span className="text-[12px] font-semibold tracking-[-0.01em] text-ink">{PLATFORM_LABEL[c.platform]}</span>
-                <span className="mono text-[9.5px] text-ink-3">{rows.length} waiting</span>
-                <span className={`mono ml-auto text-[9.5px] tracking-[0.08em] ${c.free > 0 ? 'text-serious' : 'text-ink-3'}`}>
+                <span className="text-[9.5px] text-ink-3">{rows.length} waiting</span>
+                <span className={`ml-auto text-[9.5px] tracking-[0.08em] ${c.free > 0 ? 'text-serious' : 'text-ink-3'}`}>
                   {c.free > 0 ? `${c.free} SLOT${c.free === 1 ? '' : 'S'} FREE` : 'FULL'}
                 </span>
               </div>
@@ -532,31 +424,31 @@ function Queue({
                     style={{ animation: `eth-row-stream 200ms ${EASE} ${i * 40}ms both` }}
                   >
                     <div className="flex items-center gap-2">
-                      <span className="mono w-[18px] shrink-0 text-[10px] text-ink-3">#{idea.platform_rank ?? '–'}</span>
+                      <span className="w-[18px] shrink-0 text-[10px] text-ink-3">#{idea.platform_rank ?? '–'}</span>
                       <PlatformIcon platform={idea.platform} size={11} />
                       <button type="button" onClick={() => openReview(idea.id)} className="min-w-0 flex-1 text-left text-[11.5px] font-medium leading-snug text-ink hover:text-accent-bright">
                         {idea.title}
                       </button>
-                      <span className="mono text-[10px] text-ink-3">{idea.confidence}%</span>
+                      <span className="text-[10px] text-ink-3">{idea.confidence}%</span>
                     </div>
 
                     {isArmed ? (
                       <div className={`mt-2 border-l pl-[9px] ${c.free > 0 ? 'border-good/60' : 'border-serious/60'}`} style={{ animation: `eth-row-stream 260ms ${EASE} both` }}>
                         {c.free > 0 ? (
                           <>
-                            <div className="mono text-[9px] tracking-[0.12em] text-good-ink">A SLOT IS FREE</div>
+                            <div className="text-[9px] tracking-[0.12em] text-good-ink">A SLOT IS FREE</div>
                             <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">Takes the first open slot on {PLATFORM_LABEL[c.platform]}. Nothing is displaced.</div>
                           </>
                         ) : (
                           <>
-                            <div className="mono text-[9px] tracking-[0.12em] text-serious">PROMOTING THIS DISPLACES</div>
+                            <div className="text-[9px] tracking-[0.12em] text-serious">PROMOTING THIS DISPLACES</div>
                             <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">
                               #{cap} <strong className="font-semibold">“{weakest?.title ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
                             </div>
                           </>
                         )}
                         {idea.status === 'suggested' ? (
-                          <div className="mono mt-1 text-[9.5px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
+                          <div className="mt-1 text-[9.5px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
                         ) : null}
                       </div>
                     ) : null}
@@ -609,28 +501,6 @@ function Queue({
    GROUND AND FACE
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** A floor receding under the week, and a pool of light at its foot. Still. */
-function WeekGround() {
-  return (
-    <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
-      <div className="absolute inset-x-0 -bottom-10 h-[62%]" style={{ perspective: 700, perspectiveOrigin: '50% 0%' }}>
-        <div
-          className="absolute -bottom-1/2 -left-[30%] -right-[30%] top-0 origin-top"
-          style={{
-            transform: 'rotateX(74deg)',
-            backgroundImage: 'linear-gradient(to right, var(--color-hud) 1px, transparent 1px), linear-gradient(to bottom, var(--color-hud) 1px, transparent 1px)',
-            backgroundSize: '64px 64px',
-            maskImage: 'linear-gradient(to bottom, transparent 0%, #000 42%, transparent 96%)',
-            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, #000 42%, transparent 96%)',
-          }}
-        />
-      </div>
-      <span className="absolute -bottom-[120px] left-1/2 h-[360px] w-[900px] -translate-x-1/2 rounded-full" style={{ background: 'radial-gradient(circle, var(--color-hud), transparent 66%)' }} />
-    </div>
-  )
-}
-
-/** The assistant's face on the Ask button: it bobs, its eyes blink, its antenna pulses. */
 function AgentFace() {
   return (
     <span aria-hidden="true" className="relative inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center">

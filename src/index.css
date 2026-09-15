@@ -58,6 +58,8 @@
   --font-sans:
     Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
     Arial, sans-serif;
+  /* Declared but unused: `mono` now resolves to the sans stack. Kept so a
+     deliberate code or diff view can opt back into a fixed-width face. */
   --font-mono:
     'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono',
     monospace;
@@ -115,8 +117,32 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow: hidden; /* the page never scrolls; panes scroll */
+  overflow: hidden; /* the page never scrolls; panes scroll */}
+
+/*
+ * FORM CONTROLS DO NOT INHERIT THE FONT.
+ *
+ * `font-family` on `body` reaches every element EXCEPT form controls: browsers
+ * give `input`, `button`, `select` and `textarea` their own platform UI font, and
+ * no amount of setting it on an ancestor changes that. The sign-in screen is
+ * almost entirely form controls — the password field, the two role buttons, the
+ * submit button — so it rendered in the system default while every other screen
+ * used Inter. That is why the sign-in page looked different from the rest of the
+ * product, and why setting the body font did not fix it.
+ *
+ * `font: inherit` takes family, size, weight and line-height from the parent, so
+ * a control matches the text around it and Tailwind's per-element size classes
+ * still win by specificity.
+ */
+input,
+button,
+select,
+textarea,
+optgroup {
+  font: inherit;
+  letter-spacing: inherit;
 }
+
 
 ::selection {
   background: var(--color-glow);
@@ -189,9 +215,27 @@ body {
   border: 1px solid var(--color-line);
 }
 
+/*
+ * `mono` NO LONGER MEANS MONOSPACE.
+ *
+ * This applied JetBrains Mono across 214 usages — every day label, status chip,
+ * metric and "DROP HERE" placeholder in the product. The class name describes
+ * the intent it was created for (fixed-width figures for scanning columns), not
+ * a typeface, so the typeface is now the sans stack and the alignment behaviour
+ * is kept by `tabular-nums` plus the `tnum` feature.
+ *
+ * That is the whole point: the reason to reach for a monospace face here was
+ * column alignment, and `tabular-nums` delivers that in Inter without the
+ * typewriter texture. The tracking is preserved because these are small
+ * uppercase labels, which need the extra letter-spacing to stay legible.
+ *
+ * The class is NOT renamed. It is a storage key in 214 places, and renaming it
+ * would be a large mechanical diff with no behavioural gain.
+ */
 @utility mono {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
