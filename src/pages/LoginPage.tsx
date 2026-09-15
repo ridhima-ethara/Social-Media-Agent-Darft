@@ -153,13 +153,6 @@ export function LoginPage() {
           Social Media Agent
         </p>
 
-        <p
-          className="mt-[18px] max-w-[34ch] text-center text-[14px] leading-relaxed text-ink-2"
-          style={{ textWrap: 'pretty', animation: `eth-rise 560ms ${EASE} 1200ms both` }}
-        >
-          Twelve agents run the week. Two people decide what ships.
-        </p>
-
         <span
           aria-hidden="true"
           className="mt-[30px] h-px w-full origin-center"
@@ -273,17 +266,9 @@ export function LoginPage() {
             )}
           </button>
         </form>
-
-        <p
-          className="mono mt-4 flex items-center gap-[9px] text-[10px] tracking-[0.08em] text-ink-3"
-          style={{ animation: `eth-rise 520ms ${EASE} 1500ms both` }}
-        >
-          <span className="h-[5px] w-[5px] rounded-full bg-good" aria-hidden="true" />
-          PASSWORD CHECKED BY THE API · STANDALONE WHEN IT IS OFF
-        </p>
       </div>
 
-      <p className="mono absolute inset-x-0 bottom-[22px] text-center text-[9.5px] uppercase tracking-[0.18em] text-ink-3">
+      <p className="mono absolute inset-x-0 bottom-[22px] text-center text-[11px] uppercase tracking-[0.18em] text-ink-3">
         Ethara.AI · marketing operations
       </p>
     </div>

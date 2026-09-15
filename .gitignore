@@ -59,3 +59,8 @@ packages/runtime/.claude/
 # the source documents are not — they are inputs, often large and often private.
 corpus/*
 !corpus/README.md
+
+# Personal Claude Code settings — MCP approvals and local overrides.
+# Not shared: approving a project-scoped MCP server is a per-person trust
+# decision, and committing it would approve it for everyone who clones.
+.claude/settings.local.json

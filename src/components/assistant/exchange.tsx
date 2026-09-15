@@ -134,7 +134,7 @@ export function Exchange({
             <div className="group rounded-[10px] border border-line-strong bg-surface px-3 py-2.5">
               {evidence.length > 0 ? (
                 <>
-                  <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">What the tools found</p>
+                  <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">What the tools found</p>
                   <ul className="mt-1 space-y-1">
                     {evidence.map((line) => (
                       <li key={line} className="flex gap-2 text-[12.5px] leading-relaxed text-ink">
@@ -143,10 +143,10 @@ export function Exchange({
                       </li>
                     ))}
                   </ul>
-                  <p className="mono mt-2.5 text-[9px] uppercase tracking-[0.12em] text-ink-3">Ethara’s reading</p>
+                  <p className="mono mt-2.5 text-[10.5px] uppercase tracking-[0.12em] text-ink-3">Ethara’s reading</p>
                 </>
               ) : (
-                <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">Answer</p>
+                <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">Answer</p>
               )}
               <p className={`mt-1 whitespace-pre-wrap leading-relaxed ${evidence.length > 0 ? 'text-[12px] text-ink-2' : 'text-[12.5px] text-ink'}`}>{turn.narration}</p>
               <div className="mt-1.5 flex items-center gap-3">
@@ -155,7 +155,7 @@ export function Exchange({
                     type="button"
                     onClick={() => setShowWork((v) => !v)}
                     aria-expanded={showWork}
-                    className="mono text-[9.5px] uppercase tracking-[0.1em] text-ink-3 transition-colors hover:text-ink"
+                    className="mono text-[11px] uppercase tracking-[0.1em] text-ink-3 transition-colors hover:text-ink"
                   >
                     {showWork ? 'hide the work' : `how I got there · ${steps.length} step${steps.length === 1 ? '' : 's'}`}
                   </button>

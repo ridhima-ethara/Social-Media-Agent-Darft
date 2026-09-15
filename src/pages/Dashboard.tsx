@@ -11,7 +11,7 @@
  * why, and never shows a zero that reads as a result.
  */
 
-import { useMemo, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { ArrowUpRight, ExternalLink, Play } from 'lucide-react'
 import { AGENT_BY_ID, STAGES } from '@shared/agent-registry'
 import { useStore } from '../store'
@@ -243,7 +243,7 @@ export function Dashboard() {
     <>
       <header className="glass -mx-6 -mt-5 mb-3.5 flex min-h-[52px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
         <div className="flex min-w-0 items-baseline gap-[9px]">
-          <h1 className="text-[17px] font-semibold tracking-[-0.02em] text-ink">Dashboard</h1>
+          <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Dashboard</h1>
           <span className="hidden truncate text-[11.5px] text-ink-3 md:inline">measured against our own trailing baseline</span>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -302,7 +302,7 @@ export function Dashboard() {
       {/* ── Metric band ──────────────────────────────────────────────── */}
       <section
         aria-label="Performance this period"
-        className="mb-3.5 grid grid-cols-2 gap-px overflow-hidden rounded-[10px] border border-line-strong bg-line-strong md:grid-cols-3 xl:grid-cols-6"
+        className="mb-3.5 grid grid-cols-1 gap-px overflow-hidden rounded-[10px] border border-line-strong bg-line-strong sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
         style={{ animation: 'eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
       >
         <Tile label="Engagement rate" unavailable={linkedin ? null : 'LinkedIn has reported no monthly rollup yet'}>
@@ -387,7 +387,7 @@ export function Dashboard() {
         <Panel>
           <PanelHeader
             lead={
-              <span className={`mono inline-flex items-center gap-[7px] text-[9.5px] uppercase tracking-[0.14em] ${anyRunning ? 'text-accent-bright' : 'text-ink-3'}`}>
+              <span className={`mono inline-flex items-center gap-[7px] text-[11px] uppercase tracking-[0.14em] ${anyRunning ? 'text-accent-bright' : 'text-ink-3'}`}>
                 <span className={`h-[5px] w-[5px] rounded-full ${anyRunning ? 'bg-accent-bright' : 'bg-ink-3'}`} aria-hidden="true" />
                 {anyRunning ? `Live${runId ? ` · run ${runId}` : ''}` : 'Idle'}
               </span>
@@ -536,9 +536,9 @@ export function Dashboard() {
                     style={{ animation: `eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 60}ms both` }}
                   >
                     <div className="flex items-center gap-2">
-                      <span className={`mono text-[9px] uppercase tracking-[0.12em] ${provisional ? 'text-serious' : 'text-accent-bright'}`}>{entry.category}</span>
+                      <span className={`mono text-[10.5px] uppercase tracking-[0.12em] ${provisional ? 'text-serious' : 'text-accent-bright'}`}>{entry.category}</span>
                       <span className={`h-1 w-1 rounded-full ${provisional ? 'bg-serious/60' : 'bg-hud-strong'}`} aria-hidden="true" />
-                      <span className="mono text-[9.5px] text-ink-3">
+                      <span className="mono text-[11px] text-ink-3">
                         {entry.evidence_count} observation{entry.evidence_count === 1 ? '' : 's'} · {provisional ? 'provisional' : entry.confidence.toLowerCase()}
                       </span>
                     </div>
@@ -644,16 +644,44 @@ function StageScene({
   lineFor: (id: string) => { text: string; tone: string }
   anyRunning: boolean
 }) {
+  /*
+   * THE SCENE FILLS ITS PANEL.
+   *
+   * The five stages sit at fixed 3D coordinates spanning roughly 880px, and the
+   * camera used to shrink them by a constant 0.74 — which on a 1440px display
+   * left a 600px cluster of 9px text floating in a 900px panel, and on a 1920px
+   * display a smaller one still. The scale now follows the panel's measured
+   * width, so the stages are as large as the space allows and the text on them
+   * reads at every size the product runs at.
+   */
+  const sceneRef = useRef<HTMLDivElement | null>(null)
+  const [sceneScale, setSceneScale] = useState(0.74)
+  useEffect(() => {
+    const el = sceneRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect
+      if (!rect || rect.width === 0) return
+      // Bounded by whichever the panel runs out of first — width or height.
+      setSceneScale(Math.max(0.62, Math.min(1.35, (rect.width - 48) / 880, (rect.height - 40) / 300)))
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
   return (
-    <div className="relative min-h-[300px] flex-1 overflow-hidden">
+    <div ref={sceneRef} className="relative min-h-[340px] flex-1 overflow-hidden">
       <div className="absolute inset-0" style={{ perspective: 1200, perspectiveOrigin: '50% 44%' }}>
         <div
           className="absolute left-1/2 top-1/2 h-0 w-0"
-          style={{
-            transformStyle: 'preserve-3d',
-            transform: 'translate(-50%, -50%) translateY(16px) scale(0.74)',
-            animation: 'eth-cam3 56s cubic-bezier(0.4, 0, 0.2, 1) infinite',
-          }}
+          style={
+            {
+              transformStyle: 'preserve-3d',
+              transform: 'translate(-50%, -50%) translateY(16px) scale(var(--scene-scale))',
+              animation: 'eth-cam3 56s cubic-bezier(0.4, 0, 0.2, 1) infinite',
+              '--scene-scale': sceneScale,
+            } as CSSProperties
+          }
         >
           {/* the floor */}
           <div
@@ -761,8 +789,8 @@ function StageScene({
                   ) : null}
                 </div>
                 <div className="absolute left-1/2 top-1/2 w-[340px] text-center" style={{ marginLeft: -170, transform: 'translate3d(-18px, -158px, -118px)' }}>
-                  <div className="mono text-[9px] tracking-[0.14em] text-accent-bright">06 · 07 &nbsp;MEASURE → LEARN</div>
-                  <div className="mono mt-0.5 text-[9.5px] text-ink-3">
+                  <div className="mono text-[10.5px] tracking-[0.14em] text-accent-bright">06 · 07 &nbsp;MEASURE → LEARN</div>
+                  <div className="mono mt-0.5 text-[11px] text-ink-3">
                     {loopStage?.status === 'running'
                       ? 'Velma is writing the lesson back'
                       : loopStage?.status === 'done'
@@ -806,7 +834,7 @@ function StageScene({
                     />
                   ) : null}
                   <div className="flex items-center gap-[7px]">
-                    <span className="mono text-[9px] tracking-[0.14em]" style={{ color: live ? 'var(--color-accent-bright)' : s.status === 'done' ? 'var(--color-good)' : s.status === 'gated' ? 'var(--color-serious)' : 'var(--color-ink-3)' }}>
+                    <span className="mono text-[10.5px] tracking-[0.14em]" style={{ color: live ? 'var(--color-accent-bright)' : s.status === 'done' ? 'var(--color-good)' : s.status === 'gated' ? 'var(--color-serious)' : 'var(--color-ink-3)' }}>
                       {String(i + 1).padStart(2, '0')}
                     </span>
                     <span className="ml-auto">
@@ -820,10 +848,10 @@ function StageScene({
                     </span>
                   </div>
                   <div className={`mt-1.5 whitespace-nowrap font-semibold leading-tight tracking-[-0.02em] text-ink ${live ? 'text-[14px]' : 'text-[13px]'}`}>{s.name}</div>
-                  <div className="mono mt-0.5 truncate text-[9.5px] text-ink-3">{s.agents.map(agentShort).join(' · ')}</div>
+                  <div className="mono mt-0.5 truncate text-[11px] text-ink-3">{s.agents.map(agentShort).join(' · ')}</div>
                   <div className="absolute inset-x-[13px] bottom-[11px]">
                     <div className="mb-[7px] h-px bg-surface-3" />
-                    <div className={`mono truncate text-[9.5px] ${line.tone}`}>{line.text || (s.status === 'idle' ? 'queued' : s.status)}</div>
+                    <div className={`mono truncate text-[11px] ${line.tone}`}>{line.text || (s.status === 'idle' ? 'queued' : s.status)}</div>
                   </div>
                 </div>
               </div>
@@ -832,7 +860,7 @@ function StageScene({
         </div>
       </div>
 
-      <div className="mono absolute bottom-[9px] left-[15px] flex flex-wrap gap-x-3.5 gap-y-1 text-[9.5px] tracking-[0.08em] text-ink-3">
+      <div className="mono absolute bottom-[9px] left-[15px] flex flex-wrap gap-x-3.5 gap-y-1 text-[11px] tracking-[0.08em] text-ink-3">
         <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-2 bg-good" />SETTLED</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-2 bg-accent" />CARRYING WORK</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-2 bg-hud-strong" />LESSON RETURNING</span>
@@ -910,7 +938,7 @@ function DecisionQueue({
       >
         <p className="mt-[7px] text-[12.5px] font-medium leading-snug text-ink">{idea.title}</p>
         <div className="mt-2 flex items-center gap-[9px]">
-          <span className="mono text-[9.5px] text-ink-3">CONF</span>
+          <span className="mono text-[11px] text-ink-3">CONF</span>
           <span className="relative h-[3px] flex-1 rounded-[2px] bg-surface-3">
             <span className="absolute inset-y-0 left-0 rounded-[2px] bg-accent-bright" style={{ width: `${idea.confidence}%`, transformOrigin: 'left', animation: 'eth-fill 560ms cubic-bezier(0.16, 1, 0.3, 1) both' }} />
           </span>
@@ -926,7 +954,7 @@ function DecisionQueue({
             style={{ animation: 'eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
           >
             {idea.description ? <p>{idea.description}</p> : null}
-            <p className="mono mt-1 text-[9.5px] text-ink-3">
+            <p className="mono mt-1 text-[11px] text-ink-3">
               {idea.source_topic ? `topic ${idea.source_topic} · ` : ''}conf {idea.confidence}
               {idea.alt_platforms.length > 0 ? ` · also fits ${idea.alt_platforms.map((a) => PLATFORM_LABEL[a.platform]).join(', ')}` : ''}
               {idea.platform_rank !== null ? ` · rank ${idea.platform_rank}` : ''}
@@ -1030,8 +1058,8 @@ function Decision({
       style={{ animation: `eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) ${index * 60}ms both` }}
     >
       <div className="flex items-center gap-[7px]">
-        <span className={`mono text-[9px] uppercase tracking-[0.12em] ${tone === 'serious' ? 'text-serious' : 'text-accent-bright'}`}>{eyebrow}</span>
-        <span className="mono ml-auto text-[9.5px] text-ink-3">{meta}</span>
+        <span className={`mono text-[10.5px] uppercase tracking-[0.12em] ${tone === 'serious' ? 'text-serious' : 'text-accent-bright'}`}>{eyebrow}</span>
+        <span className="mono ml-auto text-[11px] text-ink-3">{meta}</span>
       </div>
       {children}
     </article>
@@ -1096,7 +1124,7 @@ function BaselineChart({
           <line key={v} x1={L} y1={y(v)} x2={W - R} y2={y(v)} />
         ))}
       </g>
-      <g className="mono" fontSize={9.5} fill="var(--color-ink-3)" textAnchor="end">
+      <g className="mono" fontSize={10.5} fill="var(--color-ink-3)" textAnchor="end">
         {ticks.map((v) => (
           <text key={v} x={L - 6} y={y(v) + 3}>
             {tickLabel(v)}
@@ -1106,7 +1134,7 @@ function BaselineChart({
       {chart.band ? (
         <>
           <rect x={L} y={y(chart.band.hi)} width={W - L - R} height={Math.max(2, y(chart.band.lo) - y(chart.band.hi))} fill="var(--color-surface-3)" opacity={0.8} />
-          <text x={L + 6} y={y(chart.band.hi) - 4} className="mono" fontSize={9.5} fill="var(--color-ink-3)">
+          <text x={L + 6} y={y(chart.band.hi) - 4} className="mono" fontSize={10.5} fill="var(--color-ink-3)">
             our own trailing band
           </text>
         </>
@@ -1123,12 +1151,12 @@ function BaselineChart({
       {peak ? (
         <>
           <circle cx={peak[0]} cy={peak[1]} r={3.4} fill="var(--color-accent-bright)" />
-          <text x={peak[0]} y={Math.max(10, peak[1] - 7)} textAnchor="middle" className="mono" fontSize={9.5} fill="var(--color-ink-2)">
+          <text x={peak[0]} y={Math.max(10, peak[1] - 7)} textAnchor="middle" className="mono" fontSize={10.5} fill="var(--color-ink-2)">
             {tickLabel(chart.values[chart.peakIndex] ?? 0)}
           </text>
         </>
       ) : null}
-      <g className="mono" fontSize={9.5} fill="var(--color-ink-3)" textAnchor="middle">
+      <g className="mono" fontSize={10.5} fill="var(--color-ink-3)" textAnchor="middle">
         {chart.dates.map((d, i) =>
           i === 0 || i === n - 1 || i % 6 === 0 ? (
             <text key={d} x={x(i)} y={H - 4}>
@@ -1146,7 +1174,11 @@ function BaselineChart({
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function Panel({ children }: { children: ReactNode }) {
-  return <div className="flex min-h-0 flex-col overflow-hidden rounded-[10px] border border-line-strong bg-surface">{children}</div>
+  return (
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-[10px] border border-line-strong bg-surface shadow-[inset_0_1px_0_color-mix(in_srgb,var(--color-ink)_5%,transparent),0_12px_32px_-24px_color-mix(in_srgb,var(--color-page)_90%,transparent)]">
+      {children}
+    </div>
+  )
 }
 
 function PanelHeader({ lead, title, meta, action }: { lead?: ReactNode; title: string; meta?: string; action?: ReactNode }) {
@@ -1164,7 +1196,7 @@ function Tile({ label, unavailable, attention, children }: { label: string; unav
   return (
     <div className="relative flex flex-col bg-surface px-[15px] pb-3 pt-[13px]">
       {attention ? <span className="absolute inset-y-0 left-0 w-0.5 bg-serious" aria-hidden="true" /> : null}
-      <div className={`mono text-[9.5px] uppercase tracking-[0.14em] ${attention ? 'text-serious' : 'text-ink-3'}`}>{label}</div>
+      <div className={`mono text-[11px] uppercase tracking-[0.14em] ${attention ? 'text-serious' : 'text-ink-3'}`}>{label}</div>
       {unavailable ? (
         <>
           <div className="mono mt-[7px] text-[26px] font-medium leading-none text-ink-3">—</div>
@@ -1265,7 +1297,7 @@ function Spark({ values }: { values: number[] }) {
 function SubMetric({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="bg-surface-2 px-3 py-2">
-      <div className="mono text-[9px] uppercase tracking-[0.13em] text-ink-3">{label}</div>
+      <div className="mono text-[10.5px] uppercase tracking-[0.13em] text-ink-3">{label}</div>
       <div className="mt-[3px] flex items-baseline gap-1.5">{children}</div>
     </div>
   )

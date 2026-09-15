@@ -276,7 +276,7 @@ export function AssistantBar() {
                     <span className={`min-w-0 flex-1 truncate text-[12.5px] ${active ? 'text-ink' : 'text-ink-2'}`}>
                       {suggestion.label.charAt(0).toUpperCase() + suggestion.label.slice(1)}
                     </span>
-                    <span className={`mono shrink-0 text-[9.5px] tracking-[0.1em] ${KIND_TONE[suggestion.kind]}`}>{suggestion.note}</span>
+                    <span className={`mono shrink-0 text-[11px] tracking-[0.1em] ${KIND_TONE[suggestion.kind]}`}>{suggestion.note}</span>
                     {active ? <CornerDownLeft size={12} className="shrink-0 text-ink-3" aria-hidden="true" /> : null}
                   </button>
                   {/* The plan, under the highlighted row, before anything runs. */}
@@ -285,7 +285,7 @@ export function AssistantBar() {
                       className="flex items-start gap-2 bg-accent/10 px-4 pb-2.5 text-[11.5px] leading-relaxed text-ink-2"
                       style={{ animation: 'eth-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
                     >
-                      <span className="mono mt-[3px] shrink-0 text-[9px] tracking-[0.12em] text-ink-3">↩ PLAN</span>
+                      <span className="mono mt-[3px] shrink-0 text-[10.5px] tracking-[0.12em] text-ink-3">↩ PLAN</span>
                       <span className="min-w-0 flex-1">{suggestion.plan}</span>
                     </p>
                   ) : null}
@@ -298,16 +298,16 @@ export function AssistantBar() {
         {/* A typed query with nothing highlighted still shows what Enter will do. */}
         {highlighted === 0 && preview ? (
           <p className="flex items-start gap-2 border-t border-line px-4 py-2.5 text-[11.5px] leading-relaxed text-ink-2">
-            <span className="mono mt-[3px] shrink-0 text-[9px] tracking-[0.12em] text-ink-3">↩ PLAN</span>
+            <span className="mono mt-[3px] shrink-0 text-[10.5px] tracking-[0.12em] text-ink-3">↩ PLAN</span>
             <span className="min-w-0 flex-1">{preview.plan}</span>
-            <span className={`mono shrink-0 text-[9.5px] tracking-[0.1em] ${KIND_TONE[preview.kind]}`}>{preview.note}</span>
+            <span className={`mono shrink-0 text-[11px] tracking-[0.1em] ${KIND_TONE[preview.kind]}`}>{preview.note}</span>
           </p>
         ) : null}
 
         {recents.length > 0 && value.trim().length === 0 ? (
           <div className="flex items-center gap-2 overflow-x-auto border-t border-line px-4 py-2">
             <History size={12} className="shrink-0 text-ink-3" aria-hidden="true" />
-            <span className="mono shrink-0 text-[9px] tracking-[0.12em] text-ink-3">RECENT</span>
+            <span className="mono shrink-0 text-[10.5px] tracking-[0.12em] text-ink-3">RECENT</span>
             {recents.map((turn) => (
               <button
                 key={turn.id}
@@ -322,7 +322,7 @@ export function AssistantBar() {
         ) : null}
 
         {/* ── what the answers draw on, and the keys ────────────────── */}
-        <div className="mono flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-4 py-1.5 text-[9.5px] uppercase tracking-[0.1em] text-ink-3">
+        <div className="mono flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-4 py-1.5 text-[11px] uppercase tracking-[0.1em] text-ink-3">
           <span>↑↓ select · ↩ send · esc close</span>
           <span className="ml-auto flex items-center gap-x-3">
             <span title="Every answer is grounded in what the system holds: the Knowledge Base, the calendar and the run record.">

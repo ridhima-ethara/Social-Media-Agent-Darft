@@ -188,7 +188,9 @@ function KeywordsTab() {
               return (
                 <article
                   key={signal.id}
-                  className="card card-hover anim-fade-up p-3"
+                  // A column that fills its grid cell, so the link chips sit on
+                  // one baseline across the row however long each reason runs.
+                  className="card card-hover anim-fade-up flex h-full flex-col p-3"
                   style={{ ['--i' as string]: i, animationDelay: `${i * 30}ms` }}
                 >
                   <div className="flex items-start justify-between gap-2">
@@ -217,10 +219,12 @@ function KeywordsTab() {
                   </div>
 
                   {signal.trend_reason ? (
-                    <p className="mt-2 text-[11px] leading-relaxed text-ink-3">{signal.trend_reason}</p>
+                    <p className="mt-2 line-clamp-4 text-[11.5px] leading-relaxed text-ink-3" title={signal.trend_reason}>
+                      {signal.trend_reason}
+                    </p>
                   ) : null}
 
-                  <div className="mt-2 flex flex-wrap gap-1.5">
+                  <div className="mt-auto flex flex-wrap gap-1.5 pt-2.5">
                     {signal.search_url ? (
                       <a
                         href={signal.search_url}
@@ -409,7 +413,7 @@ function HashtagsTab() {
                 <span className="font-medium text-ink">#{tag.display_tag}</span>
                 <span className="tabular text-ink-3">{tag.hashtag_score}</span>
                 {tag.researched_at ? (
-                  <span className="text-[9px] text-good-ink">researched {timeAgo(tag.researched_at)}</span>
+                  <span className="text-[10.5px] text-good-ink">researched {timeAgo(tag.researched_at)}</span>
                 ) : null}
               </a>
             )

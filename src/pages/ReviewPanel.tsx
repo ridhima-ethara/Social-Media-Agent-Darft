@@ -418,7 +418,7 @@ export function ReviewPanel() {
 
           <div className="min-w-0">
             <h2 className="truncate text-[15px] font-semibold tracking-[-0.02em] text-ink">{idea.title}</h2>
-            <div className="mono flex flex-wrap items-center gap-2 text-[9.5px] text-ink-3">
+            <div className="mono flex flex-wrap items-center gap-2 text-[11px] text-ink-3">
               <span className="inline-flex items-center gap-1.5" style={{ color: PLATFORM_TOKEN[idea.platform] }}>
                 <PlatformIcon platform={idea.platform} size={10} />
                 {PLATFORM_LABEL[idea.platform].toUpperCase()}
@@ -433,7 +433,7 @@ export function ReviewPanel() {
               scrolled out of reach on the one screen that exists to make it. */}
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {savedAt ? (
-              <span className="mono hidden items-center gap-1.5 text-[9.5px] uppercase tracking-[0.08em] text-ink-3 xl:inline-flex">
+              <span className="mono hidden items-center gap-1.5 text-[11px] uppercase tracking-[0.08em] text-ink-3 xl:inline-flex">
                 <span className="h-[5px] w-[5px] rounded-full bg-good" aria-hidden="true" />
                 saved {timeAgo(new Date(savedAt).toISOString())}
               </span>
@@ -457,7 +457,7 @@ export function ReviewPanel() {
         {/* ── LEFT · why this exists ──────────────────────────────────── */}
         <aside className="flex min-h-0 flex-col overflow-y-auto border-r border-line bg-surface-2">
           <div className="border-b border-line px-3.5 py-3">
-            <p className="mono text-[9px] tracking-[0.14em] text-ink-3">WHY THIS POST EXISTS</p>
+            <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">WHY THIS POST EXISTS</p>
             <p className="mt-1.5 text-[12px] leading-relaxed text-ink-2">
               {idea.hashtag_display ? <>Captured under <span className="mono text-[11px] text-accent-bright">#{idea.hashtag_display}</span>. </> : null}
               {idea.source_topic ? <>Topic <span className="text-ink">{idea.source_topic}</span>. </> : null}
@@ -472,7 +472,7 @@ export function ReviewPanel() {
 
           <div className="border-b border-line px-3.5 py-3">
             <div className="flex items-center gap-2">
-              <p className="mono text-[9px] tracking-[0.14em] text-ink-3">
+              <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">
                 WHY {new Date(idea.scheduled_date).toLocaleDateString('en-GB', { weekday: 'long' }).toUpperCase()} {idea.scheduled_time}
               </p>
               <Select
@@ -501,7 +501,7 @@ export function ReviewPanel() {
                  * can still name the platform it was planned for — that is the
                  * record, so it is attributed rather than quietly rewritten.
                  */}
-                <p className="mono mt-2 text-[9px] uppercase tracking-[0.08em] text-ink-3">
+                <p className="mono mt-2 text-[10.5px] uppercase tracking-[0.08em] text-ink-3">
                   Dora’s reasoning when the slot was chosen
                   {staleSlotReason ? ' · planned before this post moved platform' : ''}
                 </p>
@@ -512,7 +512,7 @@ export function ReviewPanel() {
           </div>
 
           <div className="px-3.5 py-3">
-            <p className="mono text-[9px] tracking-[0.14em] text-ink-3">MOVE TO ANOTHER PLATFORM</p>
+            <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">MOVE TO ANOTHER PLATFORM</p>
             <p className="mt-1 text-[11px] leading-relaxed text-ink-3">Redrafts the caption and creative for that format.</p>
             <div className="mt-2.5 flex flex-col gap-1.5">
               {idea.alt_platforms.length === 0 ? (
@@ -553,11 +553,11 @@ export function ReviewPanel() {
                 </button>
               ))}
             </div>
-            <span className="mono truncate text-[9.5px] text-ink-3">
+            <span className="mono truncate text-[11px] text-ink-3">
               {draft ? `SpongeBob · ${draft.model} · rev ${draft.revision}` : 'Writing…'}
             </span>
             <span
-              className={`mono ml-auto shrink-0 text-[9.5px] ${body.length > CAPTION_CAP[idea.platform] ? 'text-critical-ink' : 'text-ink-3'}`}
+              className={`mono ml-auto shrink-0 text-[11px] ${body.length > CAPTION_CAP[idea.platform] ? 'text-critical-ink' : 'text-ink-3'}`}
               title={`${PLATFORM_LABEL[idea.platform]} captions are cut at ${CAPTION_CAP[idea.platform]} characters`}
             >
               {body.length} / {CAPTION_CAP[idea.platform]}
@@ -609,7 +609,7 @@ export function ReviewPanel() {
                     <div key={r.id} className="mt-2.5 flex shrink-0 items-center gap-2.5 rounded-lg border border-hud-strong bg-accent/10 px-3 py-2">
                       <Sparkles size={13} className="shrink-0 text-accent-bright" aria-hidden="true" />
                       <span className="flex-1 text-[11.5px] leading-relaxed text-ink-2">{r.finding}</span>
-                      <button type="button" onClick={() => setView('diff')} className="mono shrink-0 text-[9.5px] text-ink-3 transition-colors hover:text-accent-bright">
+                      <button type="button" onClick={() => setView('diff')} className="mono shrink-0 text-[11px] text-ink-3 transition-colors hover:text-accent-bright">
                         SEE DIFF
                       </button>
                     </div>
@@ -621,8 +621,8 @@ export function ReviewPanel() {
             {/* the creative, always on screen */}
             <div className="flex min-w-0 flex-col overflow-y-auto bg-surface-2 p-3.5">
               <div className="flex shrink-0 items-center gap-2">
-                <p className="mono text-[9px] tracking-[0.14em] text-ink-3">LIVE PREVIEW</p>
-                <span className="mono text-[9px] tracking-[0.1em] text-ink-3">· FEED</span>
+                <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">LIVE PREVIEW</p>
+                <span className="mono text-[10.5px] tracking-[0.1em] text-ink-3">· FEED</span>
                 {/* The crop the feed will show. The canvas is not changed — the
                     creative card below states what was actually rendered. */}
                 <div className="ml-auto flex gap-0.5 rounded-md border border-line-strong p-0.5" role="group" aria-label="Preview crop">
@@ -632,7 +632,7 @@ export function ReviewPanel() {
                       type="button"
                       onClick={() => setCropChoice(option)}
                       aria-pressed={crop === option}
-                      className={`mono rounded-[4px] px-1.5 py-px text-[9px] transition-colors ${
+                      className={`mono rounded-[4px] px-1.5 py-px text-[10.5px] transition-colors ${
                         crop === option ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:text-ink'
                       }`}
                     >
@@ -646,12 +646,12 @@ export function ReviewPanel() {
               </div>
 
               <div className="mt-3 flex shrink-0 items-center gap-2">
-                <p className="mono text-[9px] tracking-[0.14em] text-ink-3">CREATIVE</p>
-                <span className="mono truncate text-[9px] tracking-[0.08em] text-ink-3">
+                <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">CREATIVE</p>
+                <span className="mono truncate text-[10.5px] tracking-[0.08em] text-ink-3">
                   {asset ? `${asset.canvas ?? ''} · ${asset.model ?? 'brand-svg'}` : 'rendering…'}
                 </span>
                 {asset?.fallbackReason ? (
-                  <span title={asset.fallbackReason} className="mono ml-auto inline-flex shrink-0 items-center gap-1.5 text-[9px] tracking-[0.08em] text-serious">
+                  <span title={asset.fallbackReason} className="mono ml-auto inline-flex shrink-0 items-center gap-1.5 text-[10.5px] tracking-[0.08em] text-serious">
                     <span className="h-1 w-1 rounded-full bg-serious" aria-hidden="true" />
                     SVG FALLBACK
                   </span>
@@ -710,7 +710,7 @@ export function ReviewPanel() {
               <p className="text-[12.5px] font-semibold tracking-[-0.01em] text-ink">
                 {target === 'caption' ? 'SpongeBob' : 'Minnie'}
               </p>
-              <p className="mono truncate text-[9px] uppercase tracking-[0.08em] text-ink-3">
+              <p className="mono truncate text-[10.5px] uppercase tracking-[0.08em] text-ink-3">
                 {target === 'caption' ? `Content Agent · ${draft?.model ?? 'qwen3.5'}` : `Image Agent · ${asset?.model ?? 'brand-svg'}`}
               </p>
             </div>
@@ -721,7 +721,7 @@ export function ReviewPanel() {
                   type="button"
                   onClick={() => setTarget(t)}
                   aria-pressed={target === t}
-                  className={`mono rounded-[4px] px-2 py-[3px] text-[9.5px] uppercase transition-colors ${
+                  className={`mono rounded-[4px] px-2 py-[3px] text-[11px] uppercase transition-colors ${
                     target === t ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:text-ink'
                   }`}
                 >
@@ -742,7 +742,7 @@ export function ReviewPanel() {
                   </div>
                 ) : null}
                 <div className="flex gap-2.5">
-                  <span className={`mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border text-[9px] ${
+                  <span className={`mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border text-[10.5px] ${
                     i === spine.length - 1 ? 'border-accent bg-accent/12 text-accent-bright' : 'border-line-strong text-ink-3'
                   }`}>
                     R{rev.revision}
@@ -752,25 +752,25 @@ export function ReviewPanel() {
                     {rev.charDelta !== 0 || rev.paraDelta !== 0 ? (
                       <div className="mt-1.5 flex flex-wrap gap-1.5">
                         {rev.charDelta !== 0 ? (
-                          <span className={`mono rounded-[4px] border px-1.5 py-px text-[9px] tracking-[0.06em] ${
+                          <span className={`mono rounded-[4px] border px-1.5 py-px text-[10.5px] tracking-[0.06em] ${
                             rev.charDelta < 0 ? 'border-critical/50 text-critical-ink' : 'border-hud-strong text-accent-bright'
                           }`}>
                             {rev.charDelta > 0 ? '+' : ''}{rev.charDelta} CHARS
                           </span>
                         ) : null}
                         {rev.paraDelta !== 0 ? (
-                          <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[9px] tracking-[0.06em] text-ink-3">
+                          <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[10.5px] tracking-[0.06em] text-ink-3">
                             {rev.paraDelta > 0 ? '+' : ''}{rev.paraDelta} PARA
                           </span>
                         ) : null}
                         {i === spine.length - 1 ? (
-                          <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[9px] tracking-[0.06em] text-ink-3">CURRENT</span>
+                          <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[10.5px] tracking-[0.06em] text-ink-3">CURRENT</span>
                         ) : null}
                       </div>
                     ) : null}
                     {rev.finding ? (
                       <div className="mt-2 border-l border-serious/60 pl-2.5">
-                        <p className="mono text-[9px] tracking-[0.1em] text-serious">FINDING · RAISED, NOT RESOLVED</p>
+                        <p className="mono text-[10.5px] tracking-[0.1em] text-serious">FINDING · RAISED, NOT RESOLVED</p>
                         <p className="mt-0.5 text-[11px] leading-relaxed text-ink-2">{rev.finding}</p>
                       </div>
                     ) : null}
@@ -778,7 +778,7 @@ export function ReviewPanel() {
                       <button
                         type="button"
                         onClick={() => { setBody(rev.body); updateDraft(idea.id, rev.body); setRestorePoint(rev.id); setSavedAt(Date.now()) }}
-                        className="mono mt-1 text-[9.5px] text-ink-3 transition-colors hover:text-accent-bright"
+                        className="mono mt-1 text-[11px] text-ink-3 transition-colors hover:text-accent-bright"
                       >
                         {restorePoint === rev.id ? 'RESTORED' : 'RESTORE'}
                       </button>
@@ -790,7 +790,7 @@ export function ReviewPanel() {
 
             {bubbles.filter((b) => b.speaker === 'assistant' && !spine.some((r) => r.summary === b.text)).map((bubble) => (
               <div key={bubble.id} className="flex gap-2.5" style={{ animation: 'eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
-                <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border border-line-strong text-[9px] text-ink-3">IM</span>
+                <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border border-line-strong text-[10.5px] text-ink-3">IM</span>
                 <p className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-ink-2">{bubble.text}</p>
               </div>
             ))}
@@ -944,7 +944,7 @@ export function ReviewPanel() {
                   : 'The draft is withdrawn rather than deleted, so its lineage stays reconstructable. Say why, so the next draft is better.'}
               </p>
               <label className="mt-3 block">
-                <span className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">Reason</span>
+                <span className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">Reason</span>
                 <textarea
                   value={rejectReason}
                   onChange={(event) => setRejectReason(event.target.value)}
@@ -1167,7 +1167,7 @@ function ScoreBar({ label, value, delay }: { label: string; value: number; delay
   return (
     <div className="flex-1">
       <div className="flex items-baseline justify-between">
-        <span className="mono text-[9px] tracking-[0.1em] text-ink-3">{label}</span>
+        <span className="mono text-[10.5px] tracking-[0.1em] text-ink-3">{label}</span>
         <span className="mono text-[11px] text-ink">{value || '—'}</span>
       </div>
       <span className="mt-1 block h-[3px] overflow-hidden rounded-[2px] bg-surface-3">
@@ -1202,8 +1202,8 @@ function DiffView({ spine }: { spine: Revision[] }) {
       {spine.slice(1).map((rev) => (
         <div key={rev.id} className="rounded-lg border border-line-strong bg-surface px-3 py-2.5">
           <div className="flex items-center gap-2">
-            <span className="mono text-[9px] tracking-[0.12em] text-accent-bright">R{rev.revision}</span>
-            <span className="mono ml-auto text-[9.5px] text-ink-3">
+            <span className="mono text-[10.5px] tracking-[0.12em] text-accent-bright">R{rev.revision}</span>
+            <span className="mono ml-auto text-[11px] text-ink-3">
               {rev.charDelta > 0 ? '+' : ''}{rev.charDelta} chars
               {rev.paraDelta !== 0 ? ` · ${rev.paraDelta > 0 ? '+' : ''}${rev.paraDelta} para` : ''}
             </span>

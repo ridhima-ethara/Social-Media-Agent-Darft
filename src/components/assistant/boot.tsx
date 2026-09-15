@@ -264,11 +264,25 @@ export function BootSequence() {
           )}
         </div>
 
-        {/* Mode is stated, not implied: the three things that change what to do next. */}
-        <p className="mono mt-5 text-[10px] uppercase tracking-[0.14em] text-ink-3" style={{ animation: `eth-rise 520ms ${EASE} 1040ms both` }}>
-          {apiMode === 'connected' ? `Live runtime · ${publishMode} mode` : 'Standalone · bundled data'}
-          {forYou > 0 ? <span className="text-serious"> · {forYou} for you</span> : null}
-        </p>
+        {/*
+         * Mode is stated, not implied — but only when there is something to
+         * state. Connected reports the resolved runtime and publish mode;
+         * standalone says nothing here, because the header and the telemetry
+         * ticker already carry it and repeating it on the boot screen added
+         * noise rather than a next step. The paragraph is dropped entirely
+         * when neither the mode nor a for-you count has anything to show.
+         */}
+        {apiMode === 'connected' || forYou > 0 ? (
+          <p className="mono mt-5 text-[10px] uppercase tracking-[0.14em] text-ink-3" style={{ animation: `eth-rise 520ms ${EASE} 1040ms both` }}>
+            {apiMode === 'connected' ? `Live runtime · ${publishMode} mode` : null}
+            {forYou > 0 ? (
+              <span className="text-serious">
+                {apiMode === 'connected' ? ' · ' : ''}
+                {forYou} for you
+              </span>
+            ) : null}
+          </p>
+        ) : null}
       </div>
     </div>
   )

@@ -39,7 +39,20 @@ COPY . .
 # without a rebuild. Baking http://some-host:4001 in here is what makes a
 # frontend image single-use.
 ENV VITE_API_URL=/api
-RUN npm run build
+
+# `vite build`, NOT `npm run build`.
+#
+# The npm script is `tsc -b && vite build`, and `tsconfig.node.json` now
+# includes `server/src` — so the typechecker needs the SERVER's dependencies,
+# which this stage has no reason to install. Packaging a bundle and gating on
+# types are different jobs: the gate is `npm run typecheck` in development and
+# CI, where a failure is actionable, not in an image build where it only means
+# a slower, larger stage.
+#
+# Skipping tsc also avoids the stale-emit problem vite.config.ts documents:
+# `tsc -b` writes a .js beside every .tsx, and the resolver has to be told to
+# prefer the source. Vite transpiles the TypeScript itself; nothing is lost.
+RUN npx vite build
 
 
 ########################################################################
@@ -112,12 +125,20 @@ RUN python -m venv /app/backend/.venv \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
-# Server: scripts must RUN here. tsx pulls esbuild, whose postinstall resolves
-# the platform binary — `--ignore-scripts` leaves it unresolved and `npm start`
-# dies with an esbuild host/binary mismatch. The root package.json's
-# `allowScripts` block names esbuild for exactly this reason.
+# Server: devDependencies and install scripts are BOTH required here.
+#
+#   --include=dev   `npm start` is `tsx src/index.ts` and tsx is a
+#                   devDependency. NODE_ENV=production (set above, for the
+#                   app's own behaviour) makes npm omit dev by default, so
+#                   without this flag the image builds clean and then
+#                   crash-loops on `sh: 1: tsx: not found`.
+#   scripts ON      tsx pulls esbuild, whose postinstall resolves the platform
+#                   binary. The root package.json's `allowScripts` block names
+#                   esbuild for exactly this reason.
 COPY server/package.json server/package-lock.json ./server/
-RUN cd server && npm ci
+RUN cd server && npm ci --include=dev \
+ && ./node_modules/.bin/tsx --version \
+ && echo "tsx present"
 
 # ── The source ────────────────────────────────────────────────────────
 # The server runs TypeScript through tsx rather than a build step, so the

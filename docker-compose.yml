@@ -20,7 +20,13 @@ name: ethara-socialai
 services:
   # ── Postgres ──────────────────────────────────────────────────────────
   db:
-    image: postgres:17-alpine
+    # pgvector, NOT plain postgres. `schema.sql` declares vector(768) columns
+    # for semantic retrieval and `db:migrate` refuses to apply against a server
+    # without the extension — correctly, since serving the API against a schema
+    # that never applied would fail later and less legibly. This image is the
+    # stock Postgres 17 with pgvector compiled in; the fix the migration itself
+    # prints.
+    image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ethara}
@@ -59,73 +65,48 @@ services:
     # Chromium writes to /dev/shm and Docker's 64 MB default is the classic
     # cause of "Target closed" mid-crawl.
     shm_size: 1gb
+    # THE HOST'S OWN CONFIGURATION, READ AT RUN TIME — never baked into a layer.
+    # Later files win, so secrets.env overrides the blank placeholders .env
+    # carries for the same keys. Both are excluded from the build context.
+    #
+    # Everything the app can be configured with lives in these two files and is
+    # picked up here unchanged: model choice, actor slugs, thresholds, tokens.
+    # The `environment:` block below deliberately does NOT restate them.
+    env_file:
+      - ./server/.env
+      - ./server/secrets.env
+    #
+    # ONLY WHAT MUST DIFFER INSIDE A CONTAINER.
+    #
+    # `environment` beats `env_file` in compose, so every key listed here
+    # silently overrides the host's value — which is right for a path or a
+    # service address and wrong for anything else. A `${VAR:-}` default here
+    # would blank a real token whenever the shell did not happen to export it,
+    # so credentials and tuning are left to the files above.
     environment:
-      # ── Core ──
+      # Service addresses. The host files point these at localhost, which
+      # inside a container means the container.
       DATABASE_URL: postgresql://${POSTGRES_USER:-ethara}:${POSTGRES_PASSWORD:-ethara}@db:5432/${POSTGRES_DB:-ethara_socialai}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       PORT: '4001'
-      WORKSPACE_SLUG: ${WORKSPACE_SLUG:-ethara}
-      TZ: ${TZ:-Asia/Kolkata}
-      PUBLISH_MODE: ${PUBLISH_MODE:-demo}
       # Same-origin through nginx, so no browser ever sends a cross-origin
       # request. Kept narrow rather than '*' because the API has no auth.
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
 
-      # ── Scraping · the four platform lanes ──
-      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
-      APIFY_LINKEDIN_POSTS_ACTOR: ${APIFY_LINKEDIN_POSTS_ACTOR:-harvestapi~linkedin-post-search}
-      APIFY_INSTAGRAM_ACTOR: ${APIFY_INSTAGRAM_ACTOR:-apify~instagram-hashtag-scraper}
-      APIFY_X_ACTOR: ${APIFY_X_ACTOR:-apidojo~tweet-scraper}
-      APIFY_FACEBOOK_ACTOR: ${APIFY_FACEBOOK_ACTOR:-scraper_one~facebook-posts-search}
-      APIFY_MAX_ITEMS_PER_KEYWORD: ${APIFY_MAX_ITEMS_PER_KEYWORD:-50}
-      APIFY_RUN_TIMEOUT_MS: ${APIFY_RUN_TIMEOUT_MS:-180000}
-
-      # ── Scraping · the open-web lane ──
-      # Baked into the image, not the host path — this is the venv the
-      # Dockerfile built.
+      # Filesystem paths. The host's are macOS paths that do not exist here.
       CRAWL4AI_PYTHON: /app/backend/.venv/bin/python
-      CRAWL4AI_SEARCH_ENGINES: ${CRAWL4AI_SEARCH_ENGINES:-duckduckgo,bing}
-      CRAWL4AI_MAX_PAGES_PER_KEYWORD: ${CRAWL4AI_MAX_PAGES_PER_KEYWORD:-6}
-      CRAWL4AI_TIMEOUT_MS: ${CRAWL4AI_TIMEOUT_MS:-300000}
-      CRAWL4AI_HEADLESS: 'true'
+      # The service-account JSON is bind-mounted read-only below rather than
+      # copied in: an image layer is readable by anyone who can pull the image,
+      # and survives a later layer deleting the file.
+      GCP_SERVICE_ACCOUNT_JSON: /run/secrets/gcp-sa.json
 
-      # ── Research ──
-      PARALLEL_API_KEY: ${PARALLEL_API_KEY:-}
-
-      # ── Text and images · Gemini ──
-      # `gcp` by default because that is what this deployment is configured for:
-      # captions, calendar copy and the creative backgrounds all come from
-      # Gemini. Blank credentials degrade to the local model, and then to the
-      # deterministic template writer — labelled either way, never silently.
-      TEXT_MODEL_PROVIDER: ${TEXT_MODEL_PROVIDER:-gcp}
-      ASSISTANT_MODEL_PROVIDER: ${ASSISTANT_MODEL_PROVIDER:-gcp}
-      GCP_API_KEY: ${GCP_API_KEY:-}
-      # A service account authenticates Vertex. The JSON is NOT copied into the
-      # image — `.dockerignore` excludes it, because an image layer is readable
-      # by anyone who can pull it. It is bind-mounted read-only below, and this
-      # path is where the container sees it.
-      GCP_SERVICE_ACCOUNT_JSON: ${GCP_SERVICE_ACCOUNT_JSON:-/run/secrets/gcp-sa.json}
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
-      GCP_LOCATION: ${GCP_LOCATION:-us-central1}
-      GCP_TEXT_MODEL: ${GCP_TEXT_MODEL:-gemini-2.5-pro}
-      GCP_FAST_TEXT_MODEL: ${GCP_FAST_TEXT_MODEL:-gemini-2.5-flash}
-      # A `gemini-*` image model is served over :generateContent and an
-      # `imagen-*` one over :predict; the adapter routes on the name.
-      GCP_IMAGE_MODEL: ${GCP_IMAGE_MODEL:-gemini-2.5-flash-image}
-      GCP_TIMEOUT_MS: ${GCP_TIMEOUT_MS:-90000}
-      GCP_MAX_OUTPUT_TOKENS: ${GCP_MAX_OUTPUT_TOKENS:-2048}
-
-      # ── Local text model, as the fallback behind Gemini ──
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
-      OLLAMA_TEXT_MODEL: ${OLLAMA_TEXT_MODEL:-qwen3:14b}
-      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-300000}
-
-      # ── Images ──
-      # Intentionally blank: MLX cannot run on Linux. With Gemini configured the
-      # creative background comes from it; without any painter the brand SVG
-      # renderer takes over and says so on every asset it produces.
+      # Intentionally blank. MLX is Apple-Silicon-only and needs Metal, which no
+      # Linux container has, so mflux cannot run here at any setting. With
+      # Gemini configured the creative background comes from it; with neither,
+      # the local brand SVG renderer takes over and says so on every asset.
       MFLUX_PYTHON: ''
 
-      # ── First-boot behaviour ──
+      # Container boot behaviour — meaningless on the host, so defined only here.
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
       # `auto` seeds ONLY a database with no ideas and no captured posts, so a
       # restart cannot wipe the calendar. `true` reseeds and DELETES existing

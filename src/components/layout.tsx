@@ -24,7 +24,6 @@ import {
 } from 'lucide-react'
 import { AGENT_BY_ID } from '@shared/agent-registry'
 import { useStore } from '../store'
-import { Badge } from './ui'
 import { Logo, Wordmark } from './logo'
 import { ThemeToggle } from './theme-toggle'
 import { AssistantBar } from './assistant/bar'
@@ -171,12 +170,11 @@ function Sidebar() {
         ) : null}
       </div>
 
+      {/* The mode is stated once, in the header. It was also badged here and
+          in the dashboard's footer — three "DEMO"s on one screen. */}
       {!collapsed ? (
         <div className="mx-3 mb-3 rounded-lg border border-line bg-surface-2 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-[11px] text-ink-2">Ethara.AI · Main</span>
-            <Badge tone="magenta">DEMO</Badge>
-          </div>
+          <span className="block truncate text-[11.5px] text-ink-2">Ethara.AI · Main</span>
         </div>
       ) : null}
 
@@ -192,7 +190,7 @@ function Sidebar() {
         {!collapsed ? (
           <>
             <span className="flex-1 truncate">Ask or command…</span>
-            <span className="mono rounded-[3px] border border-line-strong px-1 text-[9.5px] text-ink-3">⌘K</span>
+            <span className="mono rounded-[3px] border border-line-strong px-1 text-[11px] text-ink-3">⌘K</span>
           </>
         ) : null}
       </button>
@@ -203,7 +201,7 @@ function Sidebar() {
             {collapsed ? (
               <span className="mx-auto my-2 block h-px w-4 bg-line" />
             ) : (
-              <span className="mono block px-2 pb-1.5 pt-3 text-[9px] uppercase tracking-[0.16em] text-ink-3">{group.label}</span>
+              <span className="mono block px-2 pb-1.5 pt-3 text-[10.5px] uppercase tracking-[0.16em] text-ink-3">{group.label}</span>
             )}
           </li>,
           ...group.items.map((item) => {
@@ -215,25 +213,31 @@ function Sidebar() {
                 onClick={() => setPage(item.page)}
                 title={collapsed ? item.label : undefined}
                 aria-current={active ? 'page' : undefined}
-                className={`relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[12.5px] font-medium transition-colors duration-[var(--dur-fast)] ${
+                className={`relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors duration-[var(--dur-fast)] ${
                   active ? 'text-ink' : 'text-ink-3 hover:bg-surface-2 hover:text-ink-2'
                 }`}
-                style={
-                  active
-                    ? {
-                        background:
-                          'linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 18%, transparent), color-mix(in srgb, var(--color-magenta) 8%, transparent))',
-                      }
-                    : undefined
-                }
               >
+                {/* The highlight is its own element, named for the View
+                    Transition, so on a page change it glides to the new entry
+                    instead of vanishing here and appearing there. The icon and
+                    label are positioned so they paint above it. */}
                 {active ? (
-                  <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-accent" aria-hidden="true" />
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-0 rounded-lg"
+                    style={{
+                      background:
+                        'linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 18%, transparent), color-mix(in srgb, var(--color-magenta) 8%, transparent))',
+                      viewTransitionName: 'nav-active',
+                    }}
+                  >
+                    <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-accent" />
+                  </span>
                 ) : null}
-                <item.icon size={15} className={active ? 'text-accent-bright' : ''} aria-hidden="true" />
-                {!collapsed ? <span className="truncate">{item.label}</span> : null}
+                <item.icon size={15} className={`relative ${active ? 'text-accent-bright' : ''}`} aria-hidden="true" />
+                {!collapsed ? <span className="relative truncate">{item.label}</span> : null}
                 {item.badge === 'leadership' && awaitingLeadership > 0 ? (
-                  <span className="tabular ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-critical px-1 text-[9px] font-semibold text-ink">
+                  <span className="tabular relative ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-critical px-1 text-[10.5px] font-semibold text-ink">
                     {awaitingLeadership}
                   </span>
                 ) : null}
@@ -283,7 +287,7 @@ function Header() {
       <ThemeToggle />
 
       {/* The mode, as a fact rather than a highlight. */}
-      <span className="mono rounded-md border border-line-strong px-2 py-[4px] text-[9.5px] uppercase tracking-[0.1em] text-ink-2">
+      <span className="mono hidden rounded-md border border-line-strong px-2 py-[4px] text-[10.5px] uppercase tracking-[0.1em] text-ink-2 sm:inline-block">
         {apiMode === 'connected' ? `${publishMode} mode` : 'standalone'}
       </span>
 
@@ -296,7 +300,7 @@ function Header() {
         <Brain size={12} className="text-accent-bright" aria-hidden="true" />
         {/* A count is a machine figure; nothing here loops, because nothing here is running. */}
         <span className="mono text-[11px]">{knowledge.filter((k) => k.active).length}</span>
-        <span className="mono hidden text-[9px] uppercase tracking-[0.1em] text-ink-3 xl:inline">knowledge</span>
+        <span className="mono hidden text-[10.5px] uppercase tracking-[0.1em] text-ink-3 xl:inline">knowledge</span>
       </button>
 
       <span className="mx-1 h-5 w-px bg-line" aria-hidden="true" />
@@ -462,8 +466,19 @@ export function Shell({ children }: { children: ReactNode }) {
     <div className="relative flex h-screen w-screen overflow-hidden bg-page text-ink">
       {/* The drifting orbs, panning grid, corner brackets and scan line used to
           sit behind every screen. They moved without a referent and competed
-          with the data in front of them, so the ground is now the page colour
-          and the only things that move are live processes. */}
+          with the data in front of them, so the only things that move are live
+          processes. What remains is a still wash of light — depth, not motion:
+          the accent from the top-left, the brand magenta from the bottom-right,
+          faint enough that the panels read as glass over it. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-0"
+        style={{
+          background:
+            'radial-gradient(56% 48% at 6% 0%, var(--color-hud) 0%, transparent 62%), radial-gradient(46% 40% at 100% 100%, var(--color-hud-glow) 0%, transparent 60%)',
+          opacity: 0.6,
+        }}
+      />
       <Sidebar />
 
       <div className="relative z-10 flex min-w-0 flex-1 flex-col">

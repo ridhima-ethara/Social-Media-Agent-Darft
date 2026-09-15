@@ -333,7 +333,7 @@ export function InsightChart<T extends { label: string; value: number }>({
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-medium text-ink-2">{row.label}</span>
           {isPeak ? (
-            <span className="rounded-full border border-magenta/40 bg-magenta/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-magenta-ink">
+            <span className="rounded-full border border-magenta/40 bg-magenta/10 px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wide text-magenta-ink">
               Peak
             </span>
           ) : null}

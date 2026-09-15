@@ -224,9 +224,22 @@ export function RunConsole() {
 
       <div ref={scroller} className="card mono max-h-[62vh] overflow-y-auto p-3 text-[11.5px]">
         {rows.length === 0 ? (
-          <p className="px-1 py-6 text-center text-ink-3">
-            Nothing yet. Run the pipeline and every skill execution will stream here as it happens.
-          </p>
+          <EmptyState
+            className="border-0 py-10"
+            title="Nothing has run this session"
+            body="Every agent and skill execution streams here the moment one starts. Kick off discovery and watch the log fill in."
+            action={
+              <Btn
+                variant="primary"
+                onClick={() => {
+                  openTheater()
+                  void runScraping()
+                }}
+              >
+                Run the pipeline
+              </Btn>
+            }
+          />
         ) : (
           rows.map((event, i) => {
             const time = new Date(event.at).toLocaleTimeString('en-GB', { hour12: false })

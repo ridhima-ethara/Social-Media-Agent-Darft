@@ -215,8 +215,10 @@ export function RiskPill({ risk, className = '' }: { risk: ToolRisk; className?:
 export type BtnVariant = 'primary' | 'ghost' | 'subtle' | 'danger'
 
 const BTN_VARIANT: Record<BtnVariant, string> = {
+  // A gradient with a glow underneath: the one button on a screen that should
+  // look like it does something.
   primary:
-    'bg-accent text-on-accent border-accent hover:bg-accent-bright hover:border-accent-bright',
+    'text-on-accent border-transparent bg-[linear-gradient(135deg,var(--color-accent-bright),var(--color-accent))] shadow-[0_6px_20px_-10px_var(--color-glow)] hover:shadow-[0_10px_28px_-10px_var(--color-glow)] hover:brightness-110',
   ghost: 'bg-transparent text-ink-2 border-line hover:text-ink hover:border-line-strong',
   subtle: 'bg-surface-2 text-ink-2 border-line hover:bg-surface-3 hover:text-ink',
   danger: 'bg-critical text-ink border-critical hover:brightness-110',
@@ -474,7 +476,7 @@ export function ScoreRing({
       </svg>
       <span className="absolute inset-0 flex flex-col items-center justify-center">
         <span className="tabular text-[13px] font-semibold leading-none">{Math.round(value)}</span>
-        {label ? <span className="mt-0.5 text-[9px] uppercase tracking-wide text-ink-3">{label}</span> : null}
+        {label ? <span className="mt-0.5 text-[10.5px] uppercase tracking-wide text-ink-3">{label}</span> : null}
       </span>
     </div>
   )
@@ -984,7 +986,7 @@ export interface SelectOption {
 }
 
 const SELECT_SIZE = {
-  xs: 'gap-1 rounded-[5px] px-1.5 py-0.5 text-[9.5px]',
+  xs: 'gap-1 rounded-[5px] px-1.5 py-0.5 text-[11px]',
   sm: 'gap-1.5 rounded-md px-2 py-1 text-[11.5px]',
   md: 'gap-1.5 rounded-md px-2.5 py-1.5 text-[12px]',
 } as const
@@ -1129,7 +1131,7 @@ export function Select({
                 return (
                   <div key={`${option.value}-${i}`}>
                     {heading ? (
-                      <p className="mono px-2 pb-1 pt-2 text-[9px] uppercase tracking-[0.12em] text-ink-3">{heading}</p>
+                      <p className="mono px-2 pb-1 pt-2 text-[10.5px] uppercase tracking-[0.12em] text-ink-3">{heading}</p>
                     ) : null}
                     <button
                       type="button"

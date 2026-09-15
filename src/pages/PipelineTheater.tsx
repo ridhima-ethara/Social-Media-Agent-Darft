@@ -798,7 +798,7 @@ export function PipelineTheater() {
             <span className="relative h-1.5 w-1.5 rounded-full bg-serious" />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="mono text-[9.5px] uppercase tracking-[0.14em] text-serious">The finding · not a failure</p>
+            <p className="mono text-[11px] uppercase tracking-[0.14em] text-serious">The finding · not a failure</p>
             <p className="mt-[5px] max-w-[94ch] text-[14px] leading-[1.5] text-ink"><strong className="font-semibold">{finding.sentence}</strong></p>
           </div>
           <div className="flex shrink-0 gap-px overflow-hidden rounded-lg border border-line-strong bg-line-strong">
@@ -807,7 +807,7 @@ export function PipelineTheater() {
                 <p className={`mono text-[19px] font-medium leading-[1.1] ${figure.emphasis ? 'text-serious' : figure.value === 0 ? 'text-ink-3' : 'text-ink'}`}>
                   {figure.value}
                 </p>
-                <p className="mono text-[9px] tracking-[0.1em] text-ink-3">{figure.label.toUpperCase()}</p>
+                <p className="mono text-[10.5px] tracking-[0.1em] text-ink-3">{figure.label.toUpperCase()}</p>
               </div>
             ))}
           </div>
@@ -872,7 +872,7 @@ export function PipelineTheater() {
               speaks in the run's own words. */}
           <div className="mt-2 min-h-[44px] shrink-0 rounded-lg border border-line-strong bg-surface-2 px-3 py-[9px]">
             <p
-              className="mono text-[9px] uppercase tracking-[0.13em]"
+              className="mono text-[10.5px] uppercase tracking-[0.13em]"
               style={{ color: STATION_TONE[stations[stationIndex]?.status ?? 'idle'] }}
             >
               {stations[stationIndex]?.tag === '01' || stations[stationIndex]?.tag === '02' || stations[stationIndex]?.tag === '03'
@@ -908,7 +908,7 @@ export function PipelineTheater() {
               <h3 className="text-[13.5px] font-semibold tracking-[-0.015em] text-ink">
                 {onRecordOnly ? 'On record' : 'This run'}
               </h3>
-              <span className="mono text-[9.5px] text-ink-3">
+              <span className="mono text-[11px] text-ink-3">
                 {verdictTotal} {verdictTotal === 1 ? 'page' : 'pages'}
                 {onRecordOnly ? ' · earlier run' : ''}
               </span>
@@ -948,7 +948,7 @@ export function PipelineTheater() {
                     )}
                     <span className="text-[12px] text-ink-2">{meta.label}</span>
                     {yours ? (
-                      <span className="mono rounded-[3px] border border-warn/50 px-1.5 py-px text-[8.5px] uppercase tracking-[0.08em] text-warn">Yours</span>
+                      <span className="mono rounded-[3px] border border-warn/50 px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-warn">Yours</span>
                     ) : null}
                     <span className="ml-auto block h-[3px] w-16 overflow-hidden rounded-[2px] bg-surface-3">
                       <span
@@ -962,7 +962,7 @@ export function PipelineTheater() {
                     >
                       {count}
                     </span>
-                    <span className="mono w-8 shrink-0 text-right text-[9.5px] text-ink-3">{share}%</span>
+                    <span className="mono w-8 shrink-0 text-right text-[11px] text-ink-3">{share}%</span>
                   </button>
                 )
               })}
@@ -986,16 +986,16 @@ export function PipelineTheater() {
                   row.kind === 'verdict' ? (
                     <li key={row.id} className="border-t border-line px-3.5 py-2.5 first:border-t-0">
                       <div className="flex items-center gap-2">
-                        <span className="mono rounded-[3px] bg-warn/12 px-1.5 py-px text-[8.5px] uppercase tracking-[0.08em] text-warn">Needs review</span>
+                        <span className="mono rounded-[3px] bg-warn/12 px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-warn">Needs review</span>
                         {row.onRecord ? (
-                          <span className="mono text-[9px] uppercase tracking-[0.08em] text-ink-3">captured {row.onRecord}</span>
+                          <span className="mono text-[10.5px] uppercase tracking-[0.08em] text-ink-3">captured {row.onRecord}</span>
                         ) : null}
                       </div>
                       <p className="mt-1.5 text-[12.5px] font-medium leading-[1.4] text-ink">{row.title}</p>
                       {row.reason || row.evidence ? (
                         <div className="mt-[7px] border-l border-serious/60 pl-[9px]">
                           {row.reason ? <p className="text-[11.5px] leading-[1.5] text-ink-2">{row.reason}</p> : null}
-                          {row.evidence ? <p className="mono mt-1 text-[9.5px] text-ink-3">{row.evidence}</p> : null}
+                          {row.evidence ? <p className="mono mt-1 text-[11px] text-ink-3">{row.evidence}</p> : null}
                         </div>
                       ) : null}
                       <div className="mt-2 flex items-center gap-2">
@@ -1014,7 +1014,7 @@ export function PipelineTheater() {
             className="shrink-0 rounded-[10px] border border-line-strong bg-surface px-3.5 py-3"
             style={{ animation: 'eth-rise 560ms cubic-bezier(0.22, 1, 0.36, 1) 480ms both' }}
           >
-            <p className="mono text-[9px] uppercase tracking-[0.14em] text-ink-3">What would change the outcome</p>
+            <p className="mono text-[10.5px] uppercase tracking-[0.14em] text-ink-3">What would change the outcome</p>
             {levers.length === 0 ? (
               <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">
                 This run reported nothing that a settings change would have altered. Every lever here is
@@ -1031,7 +1031,7 @@ export function PipelineTheater() {
                       title="Open this knob in Agent Studio"
                       className="flex w-full items-start gap-[9px] rounded-[7px] border border-line-strong bg-page px-2.5 py-2 text-left transition-colors hover:border-accent"
                     >
-                      <span className="mono mt-px shrink-0 text-[9.5px] text-accent-bright">{String(i + 1).padStart(2, '0')}</span>
+                      <span className="mono mt-px shrink-0 text-[11px] text-accent-bright">{String(i + 1).padStart(2, '0')}</span>
                       <span className="min-w-0">
                         <span className="block text-[12px] font-medium text-ink">{lever.knob}</span>
                         <span className="block text-[11px] leading-[1.5] text-ink-3">{lever.consequence}</span>
@@ -1045,7 +1045,7 @@ export function PipelineTheater() {
               <button
                 type="button"
                 onClick={() => { closeTheater(); setPage('studio') }}
-                className="mono mt-2.5 inline-flex items-center gap-1.5 rounded-[5px] border border-line-strong px-2 py-1 text-[9.5px] uppercase tracking-[0.08em] text-ink-2 transition-colors hover:border-accent hover:text-ink"
+                className="mono mt-2.5 inline-flex items-center gap-1.5 rounded-[5px] border border-line-strong px-2 py-1 text-[11px] uppercase tracking-[0.08em] text-ink-2 transition-colors hover:border-accent hover:text-ink"
               >
                 Open Agent Studio
               </button>
@@ -1055,7 +1055,7 @@ export function PipelineTheater() {
 
           {/* ── The feed: every row the run reported, in order ───────── */}
           <section ref={feedRef} className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
-            <p className="mono sticky top-0 z-10 bg-page/95 py-1 text-[9px] uppercase tracking-[0.14em] text-ink-3 backdrop-blur-sm">
+            <p className="mono sticky top-0 z-10 bg-page/95 py-1 text-[10.5px] uppercase tracking-[0.14em] text-ink-3 backdrop-blur-sm">
               The run, row by row
             </p>
             {filtered.map((row) => (
@@ -1089,7 +1089,7 @@ export function PipelineTheater() {
       {/* ── Footer ──────────────────────────────────────────────────────── */}
       <footer className="shrink-0 border-t border-line bg-surface px-5 py-2.5">
         <RunBar progress={progress} stage={stage} paused={paused} />
-        <div className="mono mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9.5px] uppercase tracking-[0.08em] text-ink-3">
+        <div className="mono mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] uppercase tracking-[0.08em] text-ink-3">
           <span className="text-ink-2">{progress}%</span>
           <span aria-hidden="true">·</span>
           <span>
@@ -1213,8 +1213,32 @@ function RunStage({
 }) {
   const reduced = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const play = paused || reduced ? 'paused' : 'running'
+
+  /*
+   * THE STAGE FILLS ITS FRAME.
+   *
+   * The five stations sit at fixed 3D coordinates about 1000px across, and the
+   * camera used to shrink them by a constant 0.86 whatever the frame. The scale
+   * now follows the frame's measured size — bounded by width or height,
+   * whichever runs out first — so on a wide display the stations grow to meet
+   * it instead of huddling in the middle of a dark stage.
+   */
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const [stageScale, setStageScale] = useState(0.86)
+  useEffect(() => {
+    const el = stageRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect
+      if (!rect || rect.width === 0) return
+      setStageScale(Math.max(0.8, Math.min(1.35, (rect.width - 40) / 1000, (rect.height - 40) / 560)))
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
   return (
-    <div className="relative mt-2 min-h-0 flex-1 overflow-hidden rounded-[10px] bg-page">
+    <div ref={stageRef} className="relative mt-2 min-h-0 flex-1 overflow-hidden rounded-[10px] bg-page">
       {/* light from above, and the edges held */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
         <span
@@ -1230,13 +1254,16 @@ function RunStage({
       <div className="absolute inset-0" style={{ perspective: 1150, perspectiveOrigin: '50% 50%', pointerEvents: 'none' }}>
         <div
           className="absolute left-1/2 top-1/2 h-0 w-0"
-          style={{
-            transformStyle: 'preserve-3d',
-            transform: 'translate(-50%, -50%) translateY(6px) scale(0.86) rotateY(-1.4deg) rotateX(20deg)',
-            animation: 'eth-cam5 84s cubic-bezier(0.4, 0, 0.2, 1) infinite',
-            animationPlayState: reduced ? 'paused' : 'running',
-            willChange: 'transform',
-          }}
+          style={
+            {
+              transformStyle: 'preserve-3d',
+              transform: 'translate(-50%, -50%) translateY(6px) scale(var(--scene-scale)) rotateY(-1.4deg) rotateX(20deg)',
+              animation: 'eth-cam5 84s cubic-bezier(0.4, 0, 0.2, 1) infinite',
+              animationPlayState: reduced ? 'paused' : 'running',
+              willChange: 'transform',
+              '--scene-scale': stageScale,
+            } as React.CSSProperties
+          }
         >
           {/* the floor */}
           <div
@@ -1328,7 +1355,7 @@ function RunStage({
           {/* what comes after this theater */}
           <div
             aria-hidden="true"
-            className="mono absolute left-1/2 top-1/2 whitespace-nowrap text-[9px] tracking-[0.14em] text-ink-3"
+            className="mono absolute left-1/2 top-1/2 whitespace-nowrap text-[10.5px] tracking-[0.14em] text-ink-3"
             style={{ transform: 'translate3d(424px, -66px, -44px) translateX(-50%)' }}
           >
             THEN → CREATE
@@ -1372,7 +1399,7 @@ function RunStage({
                 >
                   <span className="absolute inset-x-0 top-0 h-[2px]" style={{ background: tone, opacity: dim ? 0.35 : 1, transition: 'opacity 320ms ease' }} aria-hidden="true" />
                   <div className="flex items-center gap-[7px]">
-                    <span className="mono text-[9px] tracking-[0.14em]" style={{ color: tone }}>{station.tag}</span>
+                    <span className="mono text-[10.5px] tracking-[0.14em]" style={{ color: tone }}>{station.tag}</span>
                     <span className="ml-auto flex h-3 w-3 items-center justify-center">
                       {station.status === 'working' && !paused ? (
                         <WorkArc size={12} />
@@ -1384,8 +1411,8 @@ function RunStage({
                     </span>
                   </div>
                   <p className="mt-[7px] truncate text-[13.5px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink">{station.name}</p>
-                  <p className="mono mt-0.5 truncate text-[9.5px] text-ink-3">{station.sub}</p>
-                  <p className="mono absolute inset-x-[13px] bottom-[9px] truncate text-[9.5px]" style={{ color: tone }}>{station.figure}</p>
+                  <p className="mono mt-0.5 truncate text-[11px] text-ink-3">{station.sub}</p>
+                  <p className="mono absolute inset-x-[13px] bottom-[9px] truncate text-[11px]" style={{ color: tone }}>{station.figure}</p>
                 </div>
                 <div className="absolute inset-x-0 top-full h-2 rounded-b-[10px] opacity-50" style={{ background: 'linear-gradient(to bottom, color-mix(in srgb, black 70%, transparent), transparent)' }} aria-hidden="true" />
               </div>
@@ -1544,14 +1571,14 @@ function FeedItem({
             </span>
           )}
         </span>
-        <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3">
+        <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10.5px] uppercase tracking-[0.08em] text-ink-3">
           {laneLabel}
         </span>
         <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2">{row.keyword}</span>
         {row.status === 'running' ? (
-          <span className="mono text-[9.5px] uppercase tracking-[0.08em] text-accent-bright">capturing</span>
+          <span className="mono text-[11px] uppercase tracking-[0.08em] text-accent-bright">capturing</span>
         ) : row.status === 'warn' ? (
-          <span className="mono truncate text-[9.5px] uppercase tracking-[0.08em] text-warn" title={row.reason ?? undefined}>
+          <span className="mono truncate text-[11px] uppercase tracking-[0.08em] text-warn" title={row.reason ?? undefined}>
             nothing captured{row.reason === null ? '' : ` · ${row.reason}`}
           </span>
         ) : (
@@ -1573,12 +1600,12 @@ function FeedItem({
           row.held ? 'border-line bg-surface opacity-70' : 'border-line-strong'
         }`}
       >
-        <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3">
+        <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10.5px] uppercase tracking-[0.08em] text-ink-3">
           {row.keyword}
         </span>
         <span className="flex h-3 w-3 shrink-0 items-center justify-center">
           {row.platform === null ? (
-            <span className="mono text-[8px] uppercase tracking-[0.06em] text-ink-3" title="Read from the open web, not a platform lane">
+            <span className="mono text-[10px] uppercase tracking-[0.06em] text-ink-3" title="Read from the open web, not a platform lane">
               web
             </span>
           ) : (
@@ -1593,7 +1620,7 @@ function FeedItem({
         </span>
         {row.held ? (
           <span
-            className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3"
+            className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10.5px] uppercase tracking-[0.08em] text-ink-3"
             title={row.held.originalTitle ? `On record as “${row.held.originalTitle}”` : undefined}
           >
             held · {timeAgo(row.held.since)}
@@ -1626,13 +1653,13 @@ function FeedItem({
       <div style={enter} className="rounded-[10px] border border-hud-strong bg-accent/6 px-3 py-2">
         <div className="flex items-center gap-2">
           <WorkArc size={11} />
-          <span className="mono shrink-0 text-[9px] uppercase tracking-[0.1em] text-accent-bright">scoring</span>
+          <span className="mono shrink-0 text-[10.5px] uppercase tracking-[0.1em] text-accent-bright">scoring</span>
           <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{row.title}</span>
         </div>
         <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
           {bars.map((bar, i) => (
             <div key={bar.label} className="flex items-center gap-2">
-              <span className="mono w-[52px] shrink-0 text-[9px] uppercase tracking-[0.06em] text-ink-3">
+              <span className="mono w-[52px] shrink-0 text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
                 {bar.label.slice(0, 4)}
               </span>
               <span className="block h-[3px] flex-1 overflow-hidden rounded-[2px] bg-surface-3">
@@ -1677,14 +1704,14 @@ function FeedItem({
           {row.title}
         </span>
         <span
-          className="mono shrink-0 rounded-[3px] px-1.5 py-px text-[9px] uppercase tracking-[0.08em]"
+          className="mono shrink-0 rounded-[3px] px-1.5 py-px text-[10.5px] uppercase tracking-[0.08em]"
           style={{ color: style.tone, background: `color-mix(in srgb, ${style.tone} 12%, transparent)` }}
         >
           {style.label}
         </span>
         {row.onRecord ? (
           <span
-            className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-ink-3"
+            className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10.5px] uppercase tracking-[0.08em] text-ink-3"
             title="Reached by an earlier run. Not re-scored this run."
           >
             on record · {row.onRecord}
@@ -1701,7 +1728,7 @@ function FeedItem({
 
       {row.verdict === 'needs_review' ? (
         decision ? (
-          <p className="mono mt-1.5 flex items-center gap-1.5 text-[9.5px] uppercase tracking-[0.08em] text-good-ink">
+          <p className="mono mt-1.5 flex items-center gap-1.5 text-[11px] uppercase tracking-[0.08em] text-good-ink">
             <Commit size={12} tone="var(--color-good)" /> {decision} by you
           </p>
         ) : (
@@ -1764,11 +1791,11 @@ function CompletionPanel({
       </p>
 
       <div className="mt-3">
-        <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">Top 5 keywords</p>
+        <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">Top 5 keywords</p>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {trending.map((item) => (
             <span key={item.term} className="flex items-center gap-1.5 rounded-full border border-hud-strong bg-accent/10 px-2.5 py-1 text-[11px]">
-              <span className="mono text-[9.5px] text-ink-3">{item.rank}</span>
+              <span className="mono text-[11px] text-ink-3">{item.rank}</span>
               <span className="font-medium text-ink">{item.term}</span>
               <span className="mono text-[10px] text-accent-bright">{item.score}</span>
             </span>
@@ -1777,7 +1804,7 @@ function CompletionPanel({
       </div>
 
       <div className="mt-3">
-        <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">
+        <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
           Top {topHashtags.length} hashtags · consolidated
         </p>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -1800,7 +1827,7 @@ function CompletionPanel({
             <p className="mono text-[19px] leading-none" style={{ color: bucket.tone }}>
               {bucket.count}
             </p>
-            <p className="mono mt-1 text-[9px] uppercase tracking-[0.08em] text-ink-3">{bucket.label}</p>
+            <p className="mono mt-1 text-[10.5px] uppercase tracking-[0.08em] text-ink-3">{bucket.label}</p>
           </button>
         ))}
       </div>
@@ -1831,7 +1858,7 @@ function CompletionPanel({
 
       {newTrendIdeas.length > 0 ? (
         <div className="mt-3">
-          <p className="mono text-[9px] uppercase tracking-[0.12em] text-ink-3">New trends added to the calendar</p>
+          <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">New trends added to the calendar</p>
           <ul className="mt-1.5 space-y-1">
             {newTrendIdeas.map((idea) => (
               <li key={idea.id} className="flex flex-wrap items-center gap-2 rounded-md border border-line-strong px-2.5 py-1.5">

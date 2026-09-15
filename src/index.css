@@ -13,11 +13,17 @@
   --color-surface: #151a28;
   --color-surface-2: #1c2235;
   --color-surface-3: #232a40;
-  --color-line: rgba(238, 0, 238, 0.14);
+  /*
+   * The hairline carries the brand magenta, but at 14% on every border in the
+   * product it read as a glowing purple wireframe around each panel. Pulled
+   * toward the accent and quieter, so the lines divide without announcing.
+   */
+  --color-line: rgba(196, 72, 220, 0.11);
   --color-line-strong: rgba(122, 153, 209, 0.28);
   --color-ink: #ffffff;
   --color-ink-2: #c5cbe9;
-  --color-ink-3: #8a8fa5;
+  /* Lifted a step: the tertiary ink sits under 10–11px labels everywhere. */
+  --color-ink-3: #969bb1;
   --color-accent: #7a99d1;
   --color-accent-bright: #a7bfe8;
   --color-magenta: #ee00ee;
@@ -70,11 +76,11 @@
   --color-surface: #ffffff;
   --color-surface-2: #f3f1f9;
   --color-surface-3: #e9e6f3;
-  --color-line: rgba(192, 0, 192, 0.14);
+  --color-line: rgba(150, 60, 175, 0.12);
   --color-line-strong: rgba(83, 78, 125, 0.3);
   --color-ink: #1b1930;
   --color-ink-2: #4a4763;
-  --color-ink-3: #767390;
+  --color-ink-3: #6b6886;
   --color-accent: #5470c2;
   --color-accent-bright: #3b56a8;
   --color-magenta: #c000c0;
@@ -117,7 +123,54 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /*
+   * Optical sizing and kerning are what make Inter look drawn rather than
+   * merely rendered at these sizes: the product runs from 9.5px labels to a
+   * 38px wordmark off one family, and without `font-optical-sizing` the small
+   * uppercase labels inherit stem weights meant for the large sizes.
+   */
+  font-optical-sizing: auto;
+  font-kerning: normal;
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
   overflow: hidden; /* the page never scrolls; panes scroll */}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SCROLLING — every pane, one behaviour
+   Thirty-odd `overflow-y-auto` panes exist across the product. Their scrolling
+   is a property of the platform, not of each pane, so it is set once here
+   rather than repeated as utility classes that can drift apart.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+* {
+  /*
+   * `scrollbar-gutter: stable` is the one that matters most for a smooth look.
+   * A pane whose content grows past its height gains a scrollbar, and without a
+   * reserved gutter every child reflows a few pixels sideways at that moment —
+   * a visible jolt in a live feed that appends rows. The gutter is reserved
+   * whether or not the bar is showing, so appending a row never moves anything.
+   */
+  scrollbar-gutter: stable;
+  /*
+   * Scroll chaining is the other jolt: reaching the end of the approvals list
+   * must not start scrolling whatever is behind it. `contain` stops the scroll
+   * at the pane's own boundary and suppresses the rubber-band overscroll that
+   * would otherwise flash the page background behind a dialog.
+   */
+  overscroll-behavior: contain;
+}
+
+/*
+ * Programmatic scrolling — `scrollIntoView` on a new feed row, the assistant
+ * transcript following its own output — eases instead of jumping. Only
+ * script-driven scrolls are affected; a wheel or trackpad gesture is never
+ * smoothed, because interposing an ease between a finger and the surface it is
+ * dragging feels like lag, not polish. The reduced-motion block below turns
+ * this off outright.
+ */
+html {
+  scroll-behavior: smooth;
+}
 
 /*
  * FORM CONTROLS DO NOT INHERIT THE FONT.
@@ -155,6 +208,78 @@ optgroup {
   border-radius: 4px;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   INTERACTION — one easing for everything that responds to a pointer
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Every control in the product changes colour on hover, and the ones that
+ * declare a `transition` were each given their own duration by hand. The ones
+ * that forgot snap. This supplies the default so nothing snaps, and it is
+ * deliberately limited to the four paint-only properties: no `transform`, no
+ * `all`. A blanket `transition: all` would put an ease on layout properties and
+ * on the transforms the keyframes drive, which is exactly how a UI starts
+ * fighting its own animations.
+ *
+ * Per-element declarations still win — they come later in the cascade and are
+ * more specific — so the deliberate 180ms and 260ms timings already written
+ * against `--dur-fast` and `--dur-base` are untouched.
+ */
+a,
+button,
+summary,
+label,
+input,
+select,
+textarea,
+[role='button'],
+[role='radio'],
+[role='tab'],
+[role='option'],
+[role='menuitem'],
+[role='switch'] {
+  transition-property: color, background-color, border-color, box-shadow, opacity;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-out-soft);
+}
+
+/*
+ * THE TILT IS UNTRANSITIONED WHILE THE POINTER DRIVES IT.
+ *
+ * `.tilt-surface` carries a 260ms ease on `transform` so the surface settles
+ * home when the pointer leaves. While the pointer is on it, that same ease is
+ * 260ms of lag chasing the cursor. `src/components/tilt.tsx` sets this attribute
+ * for exactly as long as it is tracking, so the surface is direct under the
+ * pointer and eased on the way back.
+ */
+.tilt-surface[data-tilting='true'] {
+  transition: none;
+}
+
+/*
+ * THEME SWITCHING CROSSFADES, AND ONLY WHILE SWITCHING.
+ *
+ * Every colour in the product is a token, so flipping `data-theme` repaints the
+ * entire interface in one frame — correct, but it lands as a hard cut across
+ * every surface at once. This eases the paint-only properties through the
+ * change.
+ *
+ * The class is added by the store for the length of the fade and then removed,
+ * which is the whole reason this is safe: a permanent global colour transition
+ * would also ease the colour steps inside the keyframe animations and delay
+ * every hover by 320ms. It exists only during the switch, and `transform` is
+ * excluded throughout so nothing mid-animation is disturbed.
+ */
+:root.theme-switching,
+:root.theme-switching *,
+:root.theme-switching *::before,
+:root.theme-switching *::after {
+  transition-property: background-color, border-color, color, fill, stroke, box-shadow !important;
+  transition-duration: 320ms !important;
+  transition-timing-function: var(--ease-in-out-soft) !important;
+  transition-delay: 0s !important;
+}
+
 /* Scrollbars — themed, thin, unobtrusive */
 * {
   scrollbar-width: thin;
@@ -183,17 +308,89 @@ optgroup {
   background: var(--color-surface);
   border: 1px solid var(--color-line);
   border-radius: 14px;
+  /*
+   * A lit top edge and a faint ground shadow. This is what separates a panel
+   * from the page as an object rather than as an outlined region: the same
+   * one-pixel highlight glass and metal both carry on their upper edge.
+   */
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-ink) 5%, transparent),
+    0 1px 2px color-mix(in srgb, var(--color-page) 55%, transparent),
+    0 12px 32px -24px color-mix(in srgb, var(--color-page) 90%, transparent);
+}
+
+/* ── Dragging a card ────────────────────────────────────────────────────── */
+
+/* Set on <body> for the length of a drag: no text selection, and the hand
+   stays closed wherever the pointer goes. */
+body.is-dragging,
+body.is-dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ── The card-size slider ───────────────────────────────────────────────── */
+
+.eth-range {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  outline: none;
+  cursor: pointer;
+}
+.eth-range::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 2px solid var(--color-surface);
+  background: var(--color-accent-bright);
+  box-shadow: 0 0 0 1px var(--color-line-strong);
+  transition: transform var(--dur-fast) var(--ease-out-soft);
+}
+.eth-range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.eth-range::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 2px solid var(--color-surface);
+  background: var(--color-accent-bright);
+}
+.eth-range:focus-visible {
+  outline: 2px solid var(--color-accent-bright);
+  outline-offset: 4px;
 }
 
 @utility card-hover {
+  /*
+   * The shadow is eased slower than the movement, and cast in two layers: a
+   * tight contact shadow that stays close under the card and a wide soft one
+   * that opens up as it lifts. A single shadow eased at the same rate as the
+   * transform reads as the whole card sliding; separating the rates reads as the
+   * card leaving the surface, which is the impression the lift is for.
+   *
+   * `will-change` is declared on the base rather than on `:hover`, because the
+   * compositor layer has to exist before the first frame of the transition to be
+   * of any use — promoting on hover promotes one frame too late. It is scoped to
+   * this utility, which is on cards, not on anything that repeats per row.
+   */
+  will-change: transform, box-shadow;
   transition:
     transform var(--dur-base) var(--ease-out-soft),
-    box-shadow var(--dur-base) var(--ease-out-soft),
+    box-shadow var(--dur-slow) var(--ease-out-soft),
     border-color var(--dur-base) var(--ease-out-soft);
 
   &:hover {
     transform: translateY(-2px);
-    box-shadow: 0 12px 32px -12px var(--color-glow);
+    box-shadow:
+      0 2px 8px -4px var(--color-glow),
+      0 14px 36px -14px var(--color-glow);
     border-color: var(--color-line-strong);
   }
 }
@@ -742,13 +939,14 @@ optgroup {
 }
 
 /* The scene breathes very slowly around its own axis — a camera, not a spin. */
+/* The scale is the panel's, set by the dashboard from its measured width. */
 @keyframes eth-cam3 {
   0%,
   100% {
-    transform: translate(-50%, -50%) translateY(16px) scale(0.74) rotateY(-3.2deg);
+    transform: translate(-50%, -50%) translateY(16px) scale(var(--scene-scale, 0.74)) rotateY(-3.2deg);
   }
   50% {
-    transform: translate(-50%, -50%) translateY(16px) scale(0.74) rotateY(3.2deg);
+    transform: translate(-50%, -50%) translateY(16px) scale(var(--scene-scale, 0.74)) rotateY(3.2deg);
   }
 }
 
@@ -1426,9 +1624,18 @@ optgroup {
   from { transform: rotateY(58deg) rotateX(12deg) rotateZ(0deg); }
   to   { transform: rotateY(58deg) rotateX(12deg) rotateZ(-360deg); }
 }
+/*
+ * The page arrives on a 3D layer and then leaves it. The `to` state is `none`
+ * rather than a neutral `perspective(1400px) rotateX(0deg)`, because a transform
+ * that resolves to the identity matrix is still a transform: the browser keeps
+ * the element on its own composited layer and rasterizes the text there for as
+ * long as the fill mode holds it, which is the whole page, and text resampled
+ * on a 3D layer renders measurably softer than text on the normal layer. Ending
+ * at `none` releases the layer, so the entrance is 3D and the reading is not.
+ */
 @keyframes page-enter-3d {
   from { opacity: 0; transform: perspective(1400px) translateY(14px) rotateX(-4deg); }
-  to   { opacity: 1; transform: perspective(1400px) translateY(0) rotateX(0deg); }
+  to   { opacity: 1; transform: none; }
 }
 @keyframes float-3d {
   0%, 100% { transform: perspective(900px) rotateY(-7deg) rotateX(3deg) translateY(0); }
@@ -1534,7 +1741,7 @@ optgroup {
   user-select: none;
 }
 .orch-stage-step {
-  font-size: 9px;
+  font-size: 10.5px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--color-ink-3);
@@ -1578,7 +1785,7 @@ optgroup {
   border-radius: 999px;
   border: 1px solid var(--color-line-strong);
   background: color-mix(in srgb, var(--color-surface) 70%, transparent);
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-weight: 600;
   color: var(--color-ink-2);
   backdrop-filter: blur(6px);
@@ -1590,7 +1797,7 @@ optgroup {
   text-shadow: 0 1px 8px var(--color-page);
 }
 .orch-label-real {
-  font-size: 9.5px;
+  font-size: 10.5px;
   letter-spacing: 0.04em;
   color: var(--color-ink-3);
 }
@@ -1598,7 +1805,7 @@ optgroup {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 9.5px;
+  font-size: 10.5px;
   letter-spacing: 0.02em;
   color: var(--color-ink-3);
 }
@@ -1641,14 +1848,14 @@ optgroup {
   color: var(--color-accent-bright);
 }
 .orch-memory-sub {
-  font-size: 9.5px;
+  font-size: 10.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-ink-3);
 }
 .orch-memory-state {
   margin-top: 2px;
-  font-size: 9.5px;
+  font-size: 10.5px;
   color: var(--color-ink-3);
   transition: color var(--dur-base) var(--ease-out-soft);
 }
@@ -1779,6 +1986,44 @@ optgroup {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   SCREEN CHANGES — the View Transitions API
+   `setPage` in the store wraps the state change in `document.startViewTransition`
+   where the browser offers it. The old screen and the new one are then
+   snapshotted and crossfaded by the browser, and any element carrying a
+   `view-transition-name` is carried between its two positions rather than
+   cut — which is how the sidebar's highlight glides from one entry to the next.
+   Browsers without the API fall through to the page-enter animation alone.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes vt-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes vt-in {
+  from {
+    opacity: 0;
+  }
+}
+
+::view-transition-old(root) {
+  animation: vt-out 140ms var(--ease-in-out-soft) both;
+}
+::view-transition-new(root) {
+  animation: vt-in 220ms var(--ease-out-soft) both;
+}
+::view-transition-group(nav-active) {
+  animation-duration: 280ms;
+  animation-timing-function: var(--ease-out-expo);
+}
+/* The highlight morphs; it must not also crossfade, or it flickers mid-glide. */
+::view-transition-old(nav-active),
+::view-transition-new(nav-active) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    REDUCED MOTION — REQUIRED, NOT OPTIONAL
    Content must appear instantly and completely. Narration renders whole.
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -1790,6 +2035,29 @@ optgroup {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+
+  /*
+   * The theme crossfade is already withheld by the store under reduced motion,
+   * so this class is never applied there. It is neutralised here as well because
+   * `.theme-switching *` outranks the `*` rule above on specificity, and a
+   * guarantee this size should not rest on a single call site remembering to ask.
+   */
+  :root.theme-switching,
+  :root.theme-switching *,
+  :root.theme-switching *::before,
+  :root.theme-switching *::after {
+    transition-duration: 1ms !important;
+  }
+
+  html {
     scroll-behavior: auto !important;
   }
 
@@ -1817,13 +2085,14 @@ optgroup {
    (information moving), a packet turned back at the gate (held), a figure
    settling in, a column arriving. Each loops only while its process does. */
 
+/* The scale is the stage's, set by the theater from its measured size. */
 @keyframes eth-cam5 {
   0%,
   100% {
-    transform: translate(-50%, -50%) translateY(6px) scale(0.86) rotateY(-1.4deg) rotateX(20deg);
+    transform: translate(-50%, -50%) translateY(6px) scale(var(--scene-scale, 0.86)) rotateY(-1.4deg) rotateX(20deg);
   }
   50% {
-    transform: translate(-50%, -50%) translateY(6px) scale(0.86) rotateY(1.4deg) rotateX(20deg);
+    transform: translate(-50%, -50%) translateY(6px) scale(var(--scene-scale, 0.86)) rotateY(1.4deg) rotateX(20deg);
   }
 }
 

@@ -59,7 +59,15 @@ export function PublishedPosts() {
           subtitle="What actually went out, and what it did."
           agents={['publishing', 'analytics', 'learning']}
         />
-        <EmptyState title="Nothing published yet" body="Approved posts appear here once Leadership signs off." />
+        <EmptyState
+          title="Nothing published yet"
+          body="Approved posts appear here once Leadership signs off. The calendar is where drafts wait for that approval."
+          action={
+            <Btn variant="subtle" onClick={() => useStore.getState().setPage('calendar')}>
+              Open the calendar
+            </Btn>
+          }
+        />
       </>
     )
   }
@@ -115,7 +123,7 @@ export function PublishedPosts() {
                     aria-hidden="true"
                   />
                 ) : null}
-                <span className="tabular absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-line bg-surface px-1 text-[9px] text-ink-2">
+                <span className="tabular absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-line bg-surface px-1 text-[10.5px] text-ink-2">
                   {count}
                 </span>
               </span>

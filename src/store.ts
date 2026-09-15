@@ -8,6 +8,7 @@
  */
 
 import { create } from 'zustand'
+import { flushSync } from 'react-dom'
 import { AGENTS, AGENT_BY_ID, SKILL_BY_ID } from '@shared/agent-registry'
 import { BRAND_TOPICS, checkBrandCompliance } from '@shared/brand-voice'
 import { addressOperator } from '@shared/assistant-persona'
@@ -445,8 +446,33 @@ function readTheme(): Theme {
   return 'dark'
 }
 
+/** How long the theme crossfade runs. Must match `.theme-switching` in index.css. */
+const THEME_FADE_MS = 320
+let themeFadeTimer: number | null = null
+
 function applyTheme(theme: Theme): void {
-  document.documentElement.dataset.theme = theme
+  const root = document.documentElement
+
+  /*
+   * The switch crossfades rather than cutting. `.theme-switching` puts a 320ms
+   * ease on the paint-only properties for the length of the change and is then
+   * removed — it must not persist, because a permanent global colour transition
+   * would also ease the colour steps inside the keyframe animations and put a
+   * 320ms delay on every hover in the product.
+   *
+   * A switch during a switch restarts the timer instead of stacking one, so
+   * toggling repeatedly cannot strand the class on the element.
+   */
+  if (!prefersReducedMotion()) {
+    root.classList.add('theme-switching')
+    if (themeFadeTimer !== null) window.clearTimeout(themeFadeTimer)
+    themeFadeTimer = window.setTimeout(() => {
+      root.classList.remove('theme-switching')
+      themeFadeTimer = null
+    }, THEME_FADE_MS)
+  }
+
+  root.dataset.theme = theme
   try {
     localStorage.setItem(THEME_KEY, theme)
   } catch {
@@ -553,7 +579,9 @@ export const useStore = create<Store>((set, get) => ({
   knowledgeOpen: false,
   reviewIdeaId: null,
   theaterOpen: false,
-  sidebarCollapsed: false,
+  // Collapsed by default on a narrow screen: at 390px the open sidebar took
+  // sixty percent of the width and left the metric strip two words wide.
+  sidebarCollapsed: typeof window !== 'undefined' && window.innerWidth < 1024,
 
   apiMode: 'probing',
   apiHealth: null,
@@ -594,7 +622,25 @@ export const useStore = create<Store>((set, get) => ({
 
   /* ── SHELL ─────────────────────────────────────────────────────────────── */
 
-  setPage: (page) => set({ page, reviewIdeaId: null }),
+  setPage: (page) => {
+    const apply = (): void => set({ page, reviewIdeaId: null })
+    /*
+     * A screen change is a View Transition where the browser offers one: the
+     * outgoing screen and the incoming one are snapshotted and crossfaded, and
+     * the sidebar's highlight — which carries a `view-transition-name` — glides
+     * to the new entry instead of jumping. `flushSync` makes React commit the
+     * new screen inside the callback, which is the only place the API can see
+     * it. A browser without the API, and anyone who asked for reduced motion,
+     * gets the plain state change and the page-enter animation alone.
+     */
+    if (get().page === page) return apply()
+    const doc = document as Document & { startViewTransition?: (update: () => void) => unknown }
+    if (typeof doc.startViewTransition === 'function' && !prefersReducedMotion()) {
+      doc.startViewTransition(() => flushSync(apply))
+      return
+    }
+    apply()
+  },
 
   login: async (role, password = '') => {
     // The session is the server's: an httpOnly cookie every state-changing

@@ -55,16 +55,76 @@ function clock(time: string): string {
   return `${String(hour).padStart(2, '0')}:${match[2]}`
 }
 
+/* ── Card size: one slider, remembered ─────────────────────────────────── */
+
+const WIDTH_KEY = 'ethara.calendar.cardWidth'
+const MIN_WIDTH = 120
+const MAX_WIDTH = 320
+const DEFAULT_WIDTH = 150
+
+function readWidth(): number {
+  try {
+    const stored = Number(localStorage.getItem(WIDTH_KEY))
+    return Number.isFinite(stored) && stored >= MIN_WIDTH && stored <= MAX_WIDTH ? stored : DEFAULT_WIDTH
+  } catch {
+    return DEFAULT_WIDTH
+  }
+}
+
+/**
+ * What a card shows at a given width. Narrow cards drop the creative and
+ * keep two lines of hook; wide ones show five lines and a taller creative.
+ * The width is the one control; everything else follows from it.
+ */
+function cardShape(width: number): { hookLines: string; hookText: string; thumb: number; showAngle: boolean } {
+  return {
+    hookLines: width < 150 ? 'line-clamp-2' : width < 190 ? 'line-clamp-4' : 'line-clamp-5',
+    hookText: width < 150 ? 'text-[12px]' : width < 200 ? 'text-[13px]' : 'text-[14px]',
+    thumb: width < 150 ? 0 : width < 200 ? 84 : Math.round(width * 0.58),
+    showAngle: width >= 140,
+  }
+}
+
+/* ── Drag to reschedule ────────────────────────────────────────────────── */
+
+type DragPhase = 'start' | 'move' | 'end' | 'cancel'
+interface DragPoint {
+  x: number
+  y: number
+}
+
+/** "Wed 16", for the ghost's "Move to …" line. */
+function dayLabelOf(iso: string): string {
+  return new Date(`${iso}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' })
+}
+
+/* ── What a card leads with ─────────────────────────────────────────────── */
+
+/**
+ * The topic: the one phrase that says what a post is ABOUT. The Calendar
+ * Agent records it on every idea; the hashtag and the platform are the
+ * fallbacks for the rare row that predates it.
+ */
+function topicOf(idea: Idea): string {
+  return idea.source_topic ?? idea.hashtag_display ?? PLATFORM_LABEL[idea.platform]
+}
+
+/**
+ * The hook: the post's opening line, as it will read on the platform. The
+ * pipeline retitles a card to its draft's first line, so the title usually IS
+ * the hook — but the title is clipped, and the draft carries the whole
+ * sentence. Whichever is fuller is shown.
+ */
+function hookOf(idea: Idea): string {
+  const first = (idea.draft?.body ?? '')
+    .split('\n')
+    .map((line) => line.replace(/^[#*>\-\s]+/, '').trim())
+    .find((line) => line.length > 0)
+  return first !== undefined && first.length > idea.title.length ? first : idea.title
+}
+
 /* ── Status → tone ──────────────────────────────────────────────────────── */
 
-const STATUS_TONE: Partial<Record<IdeaStatus, string>> = {
-  approved: 'var(--color-good)',
-  scheduled: 'var(--color-good)',
-  published: 'var(--color-good)',
-  drafted: 'var(--color-accent)',
-  in_review: 'var(--color-serious)',
-  pending_leadership: 'var(--color-serious)',
-}
 const STATUS_INK: Partial<Record<IdeaStatus, string>> = {
   approved: 'var(--color-good-ink)',
   scheduled: 'var(--color-good-ink)',
@@ -104,6 +164,95 @@ export function CalendarPage() {
   })
   const [askOpen, setAskOpen] = useState(false)
   const gridRef = useRef<HTMLDivElement | null>(null)
+  const moveIdea = useStore((s) => s.moveIdea)
+
+  /* ── Card size ────────────────────────────────────────────────────── */
+  const [cardWidth, setCardWidth] = useState(readWidth)
+  const shape = cardShape(cardWidth)
+  useEffect(() => {
+    try {
+      localStorage.setItem(WIDTH_KEY, String(cardWidth))
+    } catch {
+      // Not remembering the size is acceptable; the slider still works.
+    }
+  }, [cardWidth])
+
+  /*
+   * ── Drag to reschedule ────────────────────────────────────────────────
+   *
+   * NOT the HTML5 drag API. This file's history records three failed attempts
+   * built on `draggable`, and the lesson was that `draggable` and a reliable
+   * click on the same element are incompatible. So the drag is pointer
+   * events, by hand: a press that travels more than six pixels becomes a
+   * drag; one that does not is a click that opens the card. The ghost that
+   * follows the pointer is positioned by writing to the DOM directly, once
+   * per frame, so the grid does not re-render while a card is in flight —
+   * React state changes only when the day under the pointer changes.
+   */
+  const [drag, setDrag] = useState<{ idea: Idea; overIso: string | null; width: number } | null>(null)
+  const dragRef = useRef<{ idea: Idea; overIso: string | null } | null>(null)
+  const ghostRef = useRef<HTMLDivElement | null>(null)
+  const pointRef = useRef<DragPoint>({ x: 0, y: 0 })
+  const [justMoved, setJustMoved] = useState<string | null>(null)
+
+  const place = (p: DragPoint): void => {
+    pointRef.current = p
+    const ghost = ghostRef.current
+    if (ghost) ghost.style.transform = `translate(${p.x - 20}px, ${p.y - 18}px) rotate(1.5deg)`
+  }
+  /** The day column under the pointer; the ghost is pointer-transparent, so it never gets in the way. */
+  const dayUnder = (p: DragPoint): string | null =>
+    document.elementFromPoint(p.x, p.y)?.closest<HTMLElement>('[data-day]')?.dataset.day ?? null
+
+  const onCardDrag = (idea: Idea, phase: DragPhase, p: DragPoint, rect?: DOMRect): void => {
+    if (phase === 'start') {
+      dragRef.current = { idea, overIso: null }
+      place(p)
+      setDrag({ idea, overIso: null, width: rect?.width ?? 180 })
+      document.body.classList.add('is-dragging')
+      return
+    }
+    if (phase === 'move') {
+      place(p)
+      const over = dayUnder(p)
+      if (dragRef.current && over !== dragRef.current.overIso) {
+        dragRef.current.overIso = over
+        setDrag((d) => (d ? { ...d, overIso: over } : d))
+      }
+      return
+    }
+    const current = dragRef.current
+    dragRef.current = null
+    document.body.classList.remove('is-dragging')
+    setDrag(null)
+    if (phase !== 'end' || !current) return
+    const target = dayUnder(p) ?? current.overIso
+    if (target && target !== current.idea.scheduled_date) {
+      setJustMoved(current.idea.id)
+      void moveIdea(current.idea.id, target)
+    }
+  }
+
+  // Escape lets go of a card mid-drag. The pointer-up that follows finds no
+  // drag in progress and does nothing.
+  useEffect(() => {
+    if (!drag) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      dragRef.current = null
+      document.body.classList.remove('is-dragging')
+      setDrag(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [drag])
+
+  // The landed card pops once, then settles; the flag clears itself.
+  useEffect(() => {
+    if (justMoved === null) return
+    const timer = window.setTimeout(() => setJustMoved(null), 700)
+    return () => window.clearTimeout(timer)
+  }, [justMoved])
 
   const weekStart = useMemo(() => addDays(startOfWeek(new Date()), weekOffset * 7), [weekOffset])
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart])
@@ -148,11 +297,27 @@ export function CalendarPage() {
     <div className="-mx-6 -mt-5 -mb-5 flex min-h-[calc(100vh-56px)] flex-col">
       {/* ── Command bar ─────────────────────────────────────────────────── */}
       <header className="glass relative z-20 flex min-h-[58px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
-        <h1 className="whitespace-nowrap text-[17px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
-        <span className="inline-flex items-center gap-[7px] whitespace-nowrap rounded-md border border-line-strong px-[9px] py-1 text-[9.5px] tracking-[0.1em] text-ink-3">
+        <h1 className="whitespace-nowrap text-[20px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
+        <span className="inline-flex items-center gap-[7px] whitespace-nowrap rounded-md border border-line-strong px-[9px] py-1 text-[11px] tracking-[0.1em] text-ink-3">
           TOP {cap} PER PLATFORM
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {/* The cards' size, as one slider. Everything a card shows follows
+              from its width — see `cardShape`. */}
+          <label className="flex items-center gap-2 rounded-md border border-line-strong px-2.5 py-[5px] text-[10.5px] text-ink-3">
+            <span className="whitespace-nowrap">Card size</span>
+            <input
+              type="range"
+              min={MIN_WIDTH}
+              max={MAX_WIDTH}
+              step={10}
+              value={cardWidth}
+              onChange={(event) => setCardWidth(Number(event.target.value))}
+              aria-label="Card size"
+              aria-valuetext={`${cardWidth} pixels wide`}
+              className="eth-range w-24"
+            />
+          </label>
           <div className="flex items-center overflow-hidden rounded-md border border-line-strong">
             <button type="button" onClick={() => setWeekOffset(weekOffset - 1)} aria-label="Previous week" className="px-[9px] py-[5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink">
               <ChevronLeft size={13} />
@@ -179,7 +344,7 @@ export function CalendarPage() {
                 <span className="block text-[12.5px] font-semibold tracking-[-0.01em] text-ink">Ask Ethara</span>
                 <span className="mt-px block text-[10.5px] text-ink-3">Happy to move slots or redraft</span>
               </span>
-              <span className="shrink-0 rounded-[4px] border border-line-strong px-[5px] text-[9.5px] text-ink-3">⌘K</span>
+              <span className="shrink-0 rounded-[4px] border border-line-strong px-[5px] text-[11px] text-ink-3">⌘K</span>
             </button>
 
             {askOpen ? (
@@ -189,7 +354,7 @@ export function CalendarPage() {
                 className="absolute right-0 top-[calc(100%+10px)] z-30 w-[420px] max-w-[calc(100vw-48px)] origin-top-right overflow-hidden rounded-[14px] border border-line-strong bg-surface shadow-2xl"
                 style={{ animation: `eth-pop 380ms ${EASE} both` }}
               >
-                <div className="flex items-center gap-2 border-b border-line px-3.5 py-2 text-[9.5px] tracking-[0.1em] text-ink-3">
+                <div className="flex items-center gap-2 border-b border-line px-3.5 py-2 text-[11px] tracking-[0.1em] text-ink-3">
                   SCOPED TO {weekLabel} · PLANS BEFORE IT RUNS
                   <button type="button" onClick={() => setAskOpen(false)} aria-label="Close" className="ml-auto text-ink-3 transition-colors hover:text-ink">✕</button>
                 </div>
@@ -203,22 +368,40 @@ export function CalendarPage() {
       </header>
 
       {/* ── The week, and the queue ─────────────────────────────────────── */}
-      <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
+      {/*
+       * The queue sits BESIDE the week only where both fit — from 1536px up.
+       * At a 1440px laptop the two together left seven day-columns 118px wide,
+       * which is what made every title a tower of single words. Below that
+       * width the queue stacks under a full-width week instead: the whole week
+       * is visible without scrolling, and the queue is one scroll away.
+       */}
+      <div className="flex min-h-0 flex-1 flex-col 2xl:flex-row">
         <section
-          className="relative min-w-0 flex-1 overflow-hidden border-r border-line px-[18px] py-3.5"
+          className="relative min-w-0 flex-1 overflow-auto border-b border-line px-[14px] py-3.5 2xl:border-b-0 2xl:border-r"
         >
           <div className="relative z-10 mb-2.5 flex items-center gap-2.5">
             <h2 className="text-[13.5px] font-semibold tracking-[-0.015em] text-ink">
               {totalPlaced} slot{totalPlaced === 1 ? '' : 's'} placed
             </h2>
-            <span className="text-[10px] text-ink-3">
-              {totalFree} of {cap * PLATFORMS.length} slots free · open a card to edit it or move its day
+            <span className="text-[10.5px] text-ink-3">
+              {totalFree} of {cap * PLATFORMS.length} slots free · drag a card to another day, or open it to edit
             </span>
           </div>
 
+          {/*
+           * SEVEN COLUMNS THAT NEVER GET NARROWER THAN A TITLE CAN READ.
+           *
+           * The week is a fixed shape — seven days — so it must not reflow into
+           * fewer columns the way a card grid would: a Wednesday stacked under a
+           * Monday is not a calendar. Below the width where seven readable
+           * columns fit, the week scrolls sideways instead, which is what every
+           * calendar a person has used does. The floor is what stopped a title
+           * from becoming a tower of single words at 1440px and below.
+           */}
           <div
             ref={gridRef}
-            className="grid grid-cols-2 items-start gap-[9px] md:grid-cols-4 xl:grid-cols-7"
+            className="grid items-start gap-2"
+            style={{ gridTemplateColumns: `repeat(7, minmax(${cardWidth}px, 1fr))` }}
           >
               {days.map((day, i) => {
                 const iso = isoDate(day)
@@ -226,32 +409,64 @@ export function CalendarPage() {
                   .filter((idea) => idea.scheduled_date === iso)
                   .sort((a, b) => timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
                 const isToday = iso === todayIso
+                const platformsToday = [...new Set(dayIdeas.map((idea) => idea.platform))]
+                const isDropTarget = drag !== null && drag.overIso === iso && drag.idea.scheduled_date !== iso
                 return (
                   <div
                     key={iso}
-                    className="flex min-w-0 flex-col gap-[7px]"
+                    data-day={iso}
+                    // Today is a lit column, not just a label — the eye finds it
+                    // from anywhere on the grid. A column under a dragged card
+                    // lights the same way, brighter, so the drop reads before it lands.
+                    className={`flex min-w-0 flex-col gap-2 rounded-[12px] px-1 pb-1 transition-[background-color,box-shadow] duration-[var(--dur-fast)] ${
+                      isDropTarget
+                        ? 'bg-accent/[0.12] ring-2 ring-accent/60'
+                        : isToday
+                          ? 'bg-accent/[0.06] ring-1 ring-accent/25'
+                          : drag !== null
+                            ? 'ring-1 ring-line-strong'
+                            : ''
+                    }`}
                     style={{ animation: `eth-rise 420ms ${EASE} ${120 + i * 50}ms both` }}
                   >
-                    <header className="flex items-baseline gap-1.5 px-0.5 pb-0.5">
-                      <span className={`text-[9.5px] tracking-[0.12em] ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}>
-                        {day.toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase()}
-                      </span>
-                      <span className={`text-[11px] ${isToday ? 'text-ink' : 'text-ink-3'}`}>{day.getDate()}</span>
-                      {isToday ? <span className="ml-auto text-[8.5px] tracking-[0.1em] text-accent-bright">TODAY</span> : null}
+                    <header className="px-1 pt-1">
+                      <div className="flex items-baseline gap-1.5">
+                        <span className={`text-[11px] font-medium tracking-[0.12em] ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}>
+                          {day.toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase()}
+                        </span>
+                        <span className={`text-[14px] font-semibold ${isToday ? 'text-ink' : 'text-ink-2'}`}>{day.getDate()}</span>
+                        {isToday ? <span className="ml-auto rounded-[4px] bg-accent/15 px-1.5 py-px text-[10px] font-semibold tracking-[0.1em] text-accent-bright">TODAY</span> : null}
+                      </div>
+                      {/* The day's shape before its cards: how many, on which
+                          platforms — a dot per platform in its own colour. */}
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-ink-3">
+                        <span>{dayIdeas.length === 0 ? 'no posts' : `${dayIdeas.length} post${dayIdeas.length === 1 ? '' : 's'}`}</span>
+                        {platformsToday.map((p) => (
+                          <span key={p} className="h-1.5 w-1.5 rounded-full" style={{ background: PLATFORM_TOKEN[p] }} title={PLATFORM_LABEL[p]} aria-label={PLATFORM_LABEL[p]} />
+                        ))}
+                      </div>
                     </header>
 
                     {dayIdeas.map((idea) => (
                       <SlotCard
                         key={idea.id}
                         idea={idea}
+                        shape={shape}
+                        dragging={drag?.idea.id === idea.id}
+                        landed={justMoved === idea.id}
                         onOpen={() => openReview(idea.id)}
+                        onDrag={onCardDrag}
                       />
                     ))}
 
-                    {/* A day with room left says so. It is a label, not a drop
-                        target — nothing on this grid is draggable. */}
-                    <div className="flex min-h-[84px] items-center justify-center rounded-[9px] border border-dashed border-line-strong text-[9px] tracking-[0.1em] text-ink-3">
-                      {dayIdeas.length === 0 ? 'NO SLOT TAKEN' : 'ROOM FOR MORE'}
+                    {/* A day with room left says so — and while a card is in
+                        flight it says where the card would land. */}
+                    <div
+                      className={`flex min-h-[52px] items-center justify-center rounded-[9px] border border-dashed text-[10.5px] tracking-[0.1em] transition-colors duration-[var(--dur-fast)] ${
+                        isDropTarget ? 'border-accent text-accent-bright' : 'border-line-strong text-ink-3'
+                      }`}
+                    >
+                      {isDropTarget ? 'MOVE HERE' : dayIdeas.length === 0 ? 'NO SLOT TAKEN' : 'ROOM FOR MORE'}
                     </div>
                   </div>
                 )
@@ -261,6 +476,31 @@ export function CalendarPage() {
 
         <Queue queued={queued} capacity={capacity} weekPrimary={weekPrimary} cap={cap} />
       </div>
+
+      {/* The card in flight. Pointer-transparent, so the day under the pointer
+          is always the day under the card. */}
+      {drag ? (
+        <div
+          ref={ghostRef}
+          aria-hidden="true"
+          className="pointer-events-none fixed left-0 top-0 z-[120] rounded-[10px] border border-accent bg-surface px-3 py-2.5"
+          style={{
+            width: Math.max(180, Math.min(280, drag.width)),
+            transform: `translate(${pointRef.current.x - 20}px, ${pointRef.current.y - 18}px) rotate(1.5deg)`,
+            boxShadow: '0 24px 60px -18px var(--color-glow), 0 8px 24px -12px rgba(0, 0, 0, 0.6)',
+          }}
+        >
+          <p className="line-clamp-1 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-accent-bright">{topicOf(drag.idea)}</p>
+          <p className="mt-1 line-clamp-2 text-[12.5px] font-semibold leading-snug text-ink">{hookOf(drag.idea)}</p>
+          <p className={`mt-1.5 text-[10.5px] font-medium ${drag.overIso && drag.overIso !== drag.idea.scheduled_date ? 'text-accent-bright' : 'text-ink-3'}`}>
+            {drag.overIso === null
+              ? 'Drop on a day'
+              : drag.overIso === drag.idea.scheduled_date
+                ? 'Already on this day'
+                : `Move to ${dayLabelOf(drag.overIso)}`}
+          </p>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -269,11 +509,96 @@ export function CalendarPage() {
    THE CARD — a title, with a small creative under it
    ═══════════════════════════════════════════════════════════════════════════ */
 
-function SlotCard({ idea, onOpen }: { idea: Idea; onOpen: () => void }) {
-  const bar = STATUS_TONE[idea.status] ?? 'var(--color-line-strong)'
+function SlotCard({
+  idea,
+  shape,
+  dragging,
+  landed,
+  onOpen,
+  onDrag,
+}: {
+  idea: Idea
+  shape: ReturnType<typeof cardShape>
+  dragging: boolean
+  landed: boolean
+  onOpen: () => void
+  onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
+}) {
   const ink = STATUS_INK[idea.status] ?? 'var(--color-ink-3)'
   const chip = STATUS_CHIP[idea.status] ?? idea.status.toUpperCase()
   const colour = PLATFORM_TOKEN[idea.platform]
+  const topic = topicOf(idea)
+  const hook = hookOf(idea)
+  const angle = typeof idea.analysis.angle === 'string' ? idea.analysis.angle : null
+
+  /*
+   * PRESS, THEN EITHER A CLICK OR A DRAG — NEVER BOTH.
+   *
+   * The press is recorded on pointer-down and decided on movement: six pixels
+   * of travel makes it a drag, and the card takes pointer capture so the
+   * gesture keeps reporting even when the pointer leaves it. A press that
+   * ends without that travel is a click, and opens the card. A finger is
+   * held to a higher bar — 220ms of stillness first — because on a touch
+   * screen the same gesture is how a person scrolls, and scrolling must win.
+   */
+  const node = useRef<HTMLElement | null>(null)
+  const press = useRef<{ id: number; x: number; y: number; dragging: boolean; timer: number | null } | null>(null)
+
+  const begin = (x: number, y: number): void => {
+    const p = press.current
+    const el = node.current
+    if (!p || !el || p.dragging) return
+    p.dragging = true
+    if (p.timer !== null) {
+      window.clearTimeout(p.timer)
+      p.timer = null
+    }
+    try {
+      el.setPointerCapture(p.id)
+    } catch {
+      // The pointer is already gone; the drag simply will not start.
+    }
+    onDrag(idea, 'start', { x, y }, el.getBoundingClientRect())
+  }
+  const onPointerDown = (event: React.PointerEvent<HTMLElement>): void => {
+    if (event.button !== 0) return
+    press.current = { id: event.pointerId, x: event.clientX, y: event.clientY, dragging: false, timer: null }
+    if (event.pointerType === 'touch') {
+      const { clientX, clientY } = event
+      press.current.timer = window.setTimeout(() => begin(clientX, clientY), 220)
+    }
+  }
+  const onPointerMove = (event: React.PointerEvent<HTMLElement>): void => {
+    const p = press.current
+    if (!p) return
+    if (p.dragging) {
+      onDrag(idea, 'move', { x: event.clientX, y: event.clientY })
+      return
+    }
+    if (Math.hypot(event.clientX - p.x, event.clientY - p.y) < 6) return
+    if (event.pointerType === 'touch') {
+      // Moved before the hold completed: this is a scroll, not a drag.
+      if (p.timer !== null) window.clearTimeout(p.timer)
+      press.current = null
+      return
+    }
+    begin(event.clientX, event.clientY)
+  }
+  const onPointerUp = (event: React.PointerEvent<HTMLElement>): void => {
+    const p = press.current
+    press.current = null
+    if (!p) return
+    if (p.timer !== null) window.clearTimeout(p.timer)
+    if (p.dragging) onDrag(idea, 'end', { x: event.clientX, y: event.clientY })
+    else onOpen()
+  }
+  const onPointerCancel = (): void => {
+    const p = press.current
+    press.current = null
+    if (!p) return
+    if (p.timer !== null) window.clearTimeout(p.timer)
+    if (p.dragging) onDrag(idea, 'cancel', { x: 0, y: 0 })
+  }
 
   /*
    * OPENING A CARD THAT IS ALSO DRAGGABLE.
@@ -308,29 +633,71 @@ function SlotCard({ idea, onOpen }: { idea: Idea; onOpen: () => void }) {
    */
   return (
     <article
-      onClick={onOpen}
+      ref={node}
       role="button"
       tabIndex={0}
-      aria-label={`Open “${idea.title}” for editing`}
+      aria-label={`Open “${idea.title}” for editing. Drag to another day to reschedule it.`}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
           onOpen()
         }
       }}
-      className="group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-[9px] border border-line-strong bg-surface py-2 pl-[11px] pr-[9px] transition-[border-color,transform,opacity,box-shadow] duration-[320ms] ease-[var(--ease-out-soft)] hover:-translate-y-0.5 hover:border-accent/60"
+      className={`group relative flex cursor-grab select-none flex-col overflow-hidden rounded-[9px] border bg-surface py-2 pl-[11px] pr-[9px] transition-[border-color,transform,opacity,box-shadow] duration-[320ms] ease-[var(--ease-out-soft)] active:cursor-grabbing ${
+        dragging
+          ? 'border-dashed border-accent/50 opacity-35'
+          : 'border-line-strong hover:-translate-y-0.5 hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]'
+      } ${landed ? 'anim-pop-in' : ''}`}
+      style={{ touchAction: 'manipulation' }}
     >
-      <span aria-hidden="true" className="absolute inset-y-0 left-0 w-0.5" style={{ background: bar }} />
-      <div className="flex items-center gap-1.5">
-        <PlatformIcon platform={idea.platform} size={11} />
-        <span className="text-[9.5px] text-ink-3">{clock(idea.scheduled_time)}</span>
-        {idea.is_new_trend ? <span className="text-[8.5px] tracking-[0.1em] text-magenta">NEW</span> : null}
-        <span className="ml-auto text-[9.5px]" style={{ color: ink }}>{idea.confidence}</span>
+      {/* The rail is the PLATFORM, so the week's mix reads across the grid
+          at a glance. Status lives on the chip over the creative. */}
+      <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[3px]" style={{ background: colour }} />
+
+      {/* TOPIC FIRST, ON ITS OWN LINE. The one phrase that says what the post
+          is about, before anything else on the card is read. It wraps rather
+          than truncates — a topic clipped to "AG…" says nothing — and the NEW
+          flag flows after it so the two never fight for the width. */}
+      <p className="line-clamp-2 text-[10.5px] font-semibold uppercase leading-snug tracking-[0.12em] text-accent-bright" title={topic}>
+        {topic}
+        {idea.is_new_trend ? <span className="ml-1.5 text-magenta">NEW</span> : null}
+      </p>
+
+      {/* THE HOOK. The post's opening line, as it will read on the platform —
+          enough to know what the post says without opening it. */}
+      <p className={`mt-1.5 font-semibold leading-[1.35] text-ink ${shape.hookLines} ${shape.hookText}`} title={hook}>
+        {hook}
+      </p>
+
+      {/* THE ANGLE. The direction the post takes, in the agent's own words. */}
+      {angle && shape.showAngle ? (
+        <p className="mt-1.5 line-clamp-2 text-[11.5px] leading-snug text-ink-2" title={angle}>
+          <span className="text-ink-3" aria-hidden="true">↳ </span>
+          {angle}
+        </p>
+      ) : null}
+
+      {/* The platform is the rail, the icon, and the dot in the day header —
+          named in full on the overview strip. Spelling it out here too clipped
+          to "Faceb…" at every width, which said less than the icon does. */}
+      <div className="mt-2 flex items-center gap-1.5 text-[10.5px] text-ink-3">
+        <PlatformIcon platform={idea.platform} size={12} className="shrink-0" />
+        <span className="sr-only">{PLATFORM_LABEL[idea.platform]}</span>
+        <span className="tabular shrink-0">{clock(idea.scheduled_time)}</span>
+        <span className="tabular ml-auto shrink-0 font-medium" style={{ color: ink }} title="Confidence">
+          {idea.confidence}
+        </span>
       </div>
-      <div className="mt-1.5 text-[11.5px] font-semibold leading-snug text-ink">{idea.title}</div>
+
       <div
-        className="relative mt-2 h-[54px] overflow-hidden rounded-md"
+        className="relative mt-2 overflow-hidden rounded-md"
         style={{
+          height: shape.thumb,
+          display: shape.thumb === 0 ? 'none' : undefined,
           background: idea.media?.dataUri ? undefined : `linear-gradient(135deg, var(--color-surface-3) 0%, ${colour} 100%)`,
           boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 6%, transparent)',
         }}
@@ -354,13 +721,13 @@ function SlotCard({ idea, onOpen }: { idea: Idea; onOpen: () => void }) {
         ) : (
           <>
             <span aria-hidden="true" className="absolute inset-0" style={{ background: 'radial-gradient(120% 90% at 100% 0%, rgba(255, 255, 255, 0.18), transparent 60%)' }} />
-            <span className="absolute bottom-[5px] left-[7px] text-[7.5px] tracking-[0.12em] text-white/85">
+            <span className="absolute bottom-[5px] left-[7px] text-[10px] tracking-[0.12em] text-white/85">
               {idea.media?.model ? idea.media.model.toUpperCase() : 'ETHARA · NO CREATIVE YET'}
             </span>
           </>
         )}
         <span
-          className="absolute right-1.5 top-[5px] rounded-[3px] px-[5px] py-px text-[8px] tracking-[0.08em]"
+          className="absolute right-1.5 top-[5px] rounded-[3px] px-[5px] py-px text-[10px] tracking-[0.08em]"
           style={{ color: ink, background: 'color-mix(in srgb, var(--color-page) 55%, transparent)' }}
         >
           {chip}
@@ -391,7 +758,7 @@ function Queue({
   const [armed, setArmed] = useState<string | null>(null)
 
   return (
-    <section className="flex w-full shrink-0 flex-col bg-surface-2 xl:sticky xl:top-0 xl:h-[calc(100vh-56px)] xl:w-[400px]" aria-label="Ranked queue">
+    <section className="flex w-full shrink-0 flex-col bg-surface-2 2xl:sticky 2xl:top-0 2xl:h-[calc(100vh-56px)] 2xl:w-[340px]" aria-label="Ranked queue">
       <div className="min-h-0 flex-1 overflow-y-auto">
         {queued.length === 0 ? (
           <div className="px-4 py-8">
@@ -410,8 +777,8 @@ function Queue({
               <div className="sticky top-0 z-[2] flex items-center gap-2 border-y border-line bg-surface-2 px-3.5 py-[9px]">
                 <PlatformIcon platform={c.platform} size={12} />
                 <span className="text-[12px] font-semibold tracking-[-0.01em] text-ink">{PLATFORM_LABEL[c.platform]}</span>
-                <span className="text-[9.5px] text-ink-3">{rows.length} waiting</span>
-                <span className={`ml-auto text-[9.5px] tracking-[0.08em] ${c.free > 0 ? 'text-serious' : 'text-ink-3'}`}>
+                <span className="text-[11px] text-ink-3">{rows.length} waiting</span>
+                <span className={`ml-auto text-[11px] tracking-[0.08em] ${c.free > 0 ? 'text-serious' : 'text-ink-3'}`}>
                   {c.free > 0 ? `${c.free} SLOT${c.free === 1 ? '' : 'S'} FREE` : 'FULL'}
                 </span>
               </div>
@@ -423,32 +790,46 @@ function Queue({
                     className="border-t border-line px-3.5 py-2.5 transition-colors duration-200 hover:bg-surface-3"
                     style={{ animation: `eth-row-stream 200ms ${EASE} ${i * 40}ms both` }}
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="w-[18px] shrink-0 text-[10px] text-ink-3">#{idea.platform_rank ?? '–'}</span>
-                      <PlatformIcon platform={idea.platform} size={11} />
-                      <button type="button" onClick={() => openReview(idea.id)} className="min-w-0 flex-1 text-left text-[11.5px] font-medium leading-snug text-ink hover:text-accent-bright">
-                        {idea.title}
-                      </button>
-                      <span className="text-[10px] text-ink-3">{idea.confidence}%</span>
+                    <div className="flex items-start gap-2">
+                      <span className="tabular w-[22px] shrink-0 pt-px text-[10.5px] text-ink-3">#{idea.platform_rank ?? '–'}</span>
+                      <div className="min-w-0 flex-1">
+                        {/* Topic first, here as on the calendar cards. */}
+                        <div className="flex items-center gap-1.5">
+                          <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-accent-bright" title={topicOf(idea)}>
+                            {topicOf(idea)}
+                          </span>
+                          <PlatformIcon platform={idea.platform} size={10} className="shrink-0" />
+                          <span className="tabular ml-auto shrink-0 text-[10.5px] text-ink-3">{idea.confidence}%</span>
+                        </div>
+                        <button type="button" onClick={() => openReview(idea.id)} className="mt-0.5 block w-full text-left text-[12px] font-medium leading-snug text-ink hover:text-accent-bright">
+                          {idea.title}
+                        </button>
+                        {typeof idea.analysis.angle === 'string' ? (
+                          <p className="mt-0.5 line-clamp-1 text-[11px] leading-snug text-ink-3" title={idea.analysis.angle}>
+                            <span aria-hidden="true">↳ </span>
+                            {idea.analysis.angle}
+                          </p>
+                        ) : null}
+                      </div>
                     </div>
 
                     {isArmed ? (
                       <div className={`mt-2 border-l pl-[9px] ${c.free > 0 ? 'border-good/60' : 'border-serious/60'}`} style={{ animation: `eth-row-stream 260ms ${EASE} both` }}>
                         {c.free > 0 ? (
                           <>
-                            <div className="text-[9px] tracking-[0.12em] text-good-ink">A SLOT IS FREE</div>
+                            <div className="text-[10.5px] tracking-[0.12em] text-good-ink">A SLOT IS FREE</div>
                             <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">Takes the first open slot on {PLATFORM_LABEL[c.platform]}. Nothing is displaced.</div>
                           </>
                         ) : (
                           <>
-                            <div className="text-[9px] tracking-[0.12em] text-serious">PROMOTING THIS DISPLACES</div>
+                            <div className="text-[10.5px] tracking-[0.12em] text-serious">PROMOTING THIS DISPLACES</div>
                             <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">
                               #{cap} <strong className="font-semibold">“{weakest?.title ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
                             </div>
                           </>
                         )}
                         {idea.status === 'suggested' ? (
-                          <div className="mt-1 text-[9.5px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
+                          <div className="mt-1 text-[11px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
                         ) : null}
                       </div>
                     ) : null}

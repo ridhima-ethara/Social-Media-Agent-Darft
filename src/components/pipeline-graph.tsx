@@ -130,7 +130,7 @@ export function PipelineGraph({
           x={(SCRAPE_X + VALIDATE_X) / 2}
           y={midY - 11}
           textAnchor="middle"
-          fontSize={8.5}
+          fontSize={10}
           fill="var(--color-ink-3)"
           className="mono"
           letterSpacing="0.06em"
@@ -179,7 +179,7 @@ export function PipelineGraph({
             <text x={0} y={-2} textAnchor="middle" fontSize={10} fontWeight={500} fill="var(--color-ink)">
               {source.label.length > 16 ? `${source.label.slice(0, 16)}…` : source.label}
             </text>
-            <text x={0} y={10} textAnchor="middle" fontSize={8.5} fill="var(--color-ink-3)" className="mono" letterSpacing="0.06em">
+            <text x={0} y={10} textAnchor="middle" fontSize={10} fill="var(--color-ink-3)" className="mono" letterSpacing="0.06em">
               {source.count} KEPT
             </text>
           </g>
@@ -216,7 +216,7 @@ export function PipelineGraph({
             <text x={0} y={-3} textAnchor="middle" fontSize={15} fill={filled ? bucket.tone : 'var(--color-ink-3)'} className="mono">
               {bucket.count}
             </text>
-            <text x={0} y={12} textAnchor="middle" fontSize={7.5} fill="var(--color-ink-3)" className="mono" letterSpacing="0.08em">
+            <text x={0} y={12} textAnchor="middle" fontSize={10} fill="var(--color-ink-3)" className="mono" letterSpacing="0.08em">
               {bucket.label.toUpperCase()}
             </text>
             {/* A human is required: the one bucket that cannot clear itself. */}
@@ -292,10 +292,10 @@ function AgentNode({
       <text x={0} y={-2} textAnchor="middle" fontSize={11} fontWeight={600} fill="var(--color-ink)">
         {name}
       </text>
-      <text x={0} y={11} textAnchor="middle" fontSize={7.5} fill="var(--color-ink-3)" className="mono" letterSpacing="0.08em">
+      <text x={0} y={11} textAnchor="middle" fontSize={10} fill="var(--color-ink-3)" className="mono" letterSpacing="0.08em">
         {role.toUpperCase()}
       </text>
-      <text x={0} y={AGENT_R + 17} textAnchor="middle" fontSize={8.5} fill={colour} className="mono" letterSpacing="0.08em">
+      <text x={0} y={AGENT_R + 17} textAnchor="middle" fontSize={10} fill={colour} className="mono" letterSpacing="0.08em">
         {label.toUpperCase()}
       </text>
     </g>

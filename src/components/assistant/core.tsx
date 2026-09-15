@@ -161,7 +161,7 @@ export function AssistantCore({
     badge !== undefined && badge > 0 ? (
       <span className="relative inline-block">
         {core}
-        <span className="tabular absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-serious px-1 text-[9px] font-semibold text-page">
+        <span className="tabular absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-serious px-1 text-[10.5px] font-semibold text-page">
           {badge > 9 ? '9+' : badge}
         </span>
       </span>

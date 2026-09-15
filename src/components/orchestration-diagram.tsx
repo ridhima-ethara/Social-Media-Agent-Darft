@@ -304,7 +304,7 @@ export function OrchestrationDiagram({ agents, focused, focusExplicit, commandAc
                 </svg>
               ) : null}
               <AgentIcon agentId={node.id} size={node.id === 'assistant' ? 22 : 18} className="relative text-ink-2" />
-              <span className="tabular absolute -left-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-line bg-page px-1 text-[9.5px] text-ink-3">
+              <span className="tabular absolute -left-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-line bg-page px-1 text-[11px] text-ink-3">
                 {node.index}
               </span>
             </span>
