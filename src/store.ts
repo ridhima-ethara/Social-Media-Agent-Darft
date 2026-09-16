@@ -373,12 +373,21 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   setIdeaTime: (ideaId: string, time: string) => Promise<void>
   setIdeaPlatform: (ideaId: string, platform: Platform) => Promise<void>
   promoteIdea: (ideaId: string) => Promise<void>
+  /** Promote a suggestion onto the calendar AND land it on a specific day. */
+  scheduleIdeaOnDay: (ideaId: string, date: string) => Promise<void>
   demoteIdea: (ideaId: string) => Promise<void>
   duplicateIdea: (ideaId: string) => void
   deleteIdea: (ideaId: string) => Promise<void>
 
   approveIdea: (ideaId: string) => Promise<void>
   leadershipApprove: (ideaId: string) => Promise<void>
+  /**
+   * Leadership's one-click path: record the final approval AND publish in the
+   * same action, skipping the separate "approved → publish" hop. Respects the
+   * same demo-mode gate as publishing — a disabled publisher records the
+   * approval and stops at `approved` rather than faking a dispatch.
+   */
+  leadershipPublish: (ideaId: string) => Promise<void>
   leadershipReject: (ideaId: string, reason: string) => Promise<void>
   /**
    * Whether a real publication can happen right now.
@@ -1657,6 +1666,58 @@ export const useStore = create<Store>((set, get) => ({
     else get().toast(`'${idea.title}' promoted to the calendar.`, 'good')
   },
 
+  /*
+   * Dropping a suggestion onto a calendar day: promote it to a primary slot AND
+   * land it on that day, in ONE PATCH. The server enforces the per-platform cap
+   * in the same call — promoting past it demotes the weakest primary and says
+   * so — so this cannot open a hole the calendar view would misread.
+   */
+  scheduleIdeaOnDay: async (ideaId, date) => {
+    const idea = get().ideas.find((i) => i.id === ideaId)
+    if (!idea) return
+    // Already placed: this is a plain reschedule, not a promotion.
+    if (idea.calendar_slot === 'primary') {
+      await get().moveIdea(ideaId, date)
+      return
+    }
+
+    const cap = get().settings.topPerPlatform
+    const primaries = get()
+      .ideas.filter((i) => i.platform === idea.platform && i.calendar_slot === 'primary')
+      .sort((a, b) => b.priority_score - a.priority_score)
+
+    let demoted: Idea | null = null
+    if (primaries.length >= cap) demoted = primaries[primaries.length - 1] ?? null
+
+    set({
+      ideas: get().ideas.map((i) => {
+        if (i.id === ideaId)
+          return { ...i, calendar_slot: 'primary', calendarSlot: 'primary', scheduled_date: date }
+        if (demoted && i.id === demoted.id)
+          return { ...i, calendar_slot: 'suggestion', calendarSlot: 'suggestion' }
+        return i
+      }),
+    })
+
+    if (get().apiMode === 'connected') {
+      try {
+        const result = await api.updateIdea(ideaId, { calendarSlot: 'primary', date })
+        if (result.demoted) {
+          get().toast(`'${result.demoted.title}' moved to More suggestions to make room.`, 'neutral')
+        }
+        await get().refreshState()
+        return
+      } catch (error) {
+        get().toast(error instanceof Error ? error.message : 'That schedule did not save.', 'critical')
+        await get().refreshState()
+        return
+      }
+    }
+
+    if (demoted) get().toast(`'${demoted.title}' moved to More suggestions to make room.`, 'neutral')
+    else get().toast(`'${idea.title}' scheduled on the calendar.`, 'good')
+  },
+
   demoteIdea: async (ideaId) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
@@ -1784,6 +1845,101 @@ export const useStore = create<Store>((set, get) => ({
       autoPublish ? 'Approved and published. The outcome is written to the Knowledge Base.' : 'Approved. Ready to publish.',
       'good',
     )
+  },
+
+  /*
+   * LEADERSHIP PUBLISHES DIRECTLY.
+   *
+   * Leadership does not "send for approval" — they are the approval. So their
+   * one action records the final decision and publishes in the same step, via
+   * the server's leadership/approve with publish=true, which is the endpoint
+   * that both signs off and dispatches.
+   *
+   * Demo mode still refuses a real dispatch, and that refusal is the one that
+   * matters: rather than play a publish sequence for something that will not
+   * happen, this records the leadership approval (status → approved) and says
+   * publishing is off. Live mode plays the five phases and publishes for real.
+   */
+  leadershipPublish: async (ideaId) => {
+    const idea = get().ideas.find((i) => i.id === ideaId)
+    if (!idea) return
+    const by = get().user?.name ?? 'Arjun Mehta'
+
+    if (!get().publishingEnabled()) {
+      // Record the sign-off so the decision is not lost, then stop at approved.
+      set({
+        ideas: get().ideas.map((i) =>
+          i.id === ideaId
+            ? {
+                ...i,
+                status: 'approved' as IdeaStatus,
+                leadership_decision: { decision: 'approved', by, at: new Date().toISOString(), published: false },
+              }
+            : i,
+        ),
+      })
+      if (get().apiMode === 'connected') {
+        try {
+          await api.leadershipApprove(ideaId, by, false)
+          await get().refreshState()
+        } catch (error) {
+          get().toast(error instanceof Error ? error.message : 'That decision did not save.', 'critical')
+          await get().refreshState()
+          return
+        }
+      }
+      get().toast(
+        'Approved. Publishing is disabled in demo mode, so nothing was dispatched.',
+        'warn',
+        'Set PUBLISH_MODE=live on the server and supply the platform token to publish for real.',
+      )
+      return
+    }
+
+    // Live: play the same five phases publishing shows, then approve+publish.
+    for (const phase of PUBLISH_PHASES) {
+      set({ publishPhase: phase })
+      get().setAgent('publishing', { status: 'running', current_task: phase ?? 'Publishing' })
+      await sleep(850)
+    }
+
+    set({
+      ideas: get().ideas.map((i) =>
+        i.id === ideaId
+          ? {
+              ...i,
+              status: 'published' as IdeaStatus,
+              leadership_decision: { decision: 'approved', by, at: new Date().toISOString(), published: true },
+            }
+          : i,
+      ),
+    })
+
+    if (get().apiMode === 'connected') {
+      try {
+        await api.leadershipApprove(ideaId, by, true)
+        await get().refreshState()
+      } catch (error) {
+        set({ publishPhase: null })
+        get().setAgent('publishing', { status: 'failed', current_task: 'Publish failed' })
+        get().toast(error instanceof Error ? error.message : 'Publishing failed.', 'critical')
+        await get().refreshState()
+        return
+      }
+    }
+
+    get().setAgent('publishing', { status: 'completed', current_task: 'Idle' })
+    get().pushActivity({
+      agent_id: 'publishing',
+      message: `"${idea.title}" approved and published to ${idea.platform} by ${by}.`,
+      status: 'ok',
+      entity_type: 'idea',
+      entity_id: ideaId,
+    })
+    get().toast('Approved and published. The outcome is written to the Knowledge Base.', 'good')
+
+    await sleep(600)
+    set({ publishPhase: null })
   },
 
   leadershipReject: async (ideaId, reason) => {

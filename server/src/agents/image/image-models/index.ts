@@ -20,6 +20,7 @@ import {
 import { withRetry } from '../../../integrations/adapter'
 import { renderBrandSvg, svgToDataUri } from './brand-svg'
 import { flux2KleinPainter } from './flux2-klein'
+import { geminiImagePainter } from './gcp-gemini-image'
 import { imagenPainter } from './gcp-imagen'
 import type { BackgroundPainter, RenderRequest, RenderResult } from './types'
 import { zImagePainter } from './z-image-turbo'
@@ -30,6 +31,7 @@ export { renderBrandSvg, svgToDataUri } from './brand-svg'
 /** The painters that actually paint. `brand-svg` is absent by design. */
 const PAINTERS: Partial<Record<ImageModelId, BackgroundPainter>> = {
   'gcp-imagen': imagenPainter,
+  'gcp-gemini-image': geminiImagePainter,
   'z-image-turbo': zImagePainter,
   'flux2-klein': flux2KleinPainter,
 }
@@ -49,7 +51,7 @@ const PAINTERS: Partial<Record<ImageModelId, BackgroundPainter>> = {
  * choice. `brand-svg` is still what a caller GETS when nothing is configured —
  * it just is not what a caller ASKS for by default.
  */
-const PAINTER_PREFERENCE: ImageModelId[] = ['gcp-imagen', 'flux2-klein', 'z-image-turbo']
+const PAINTER_PREFERENCE: ImageModelId[] = ['gcp-imagen', 'gcp-gemini-image', 'flux2-klein', 'z-image-turbo']
 
 export function preferredImageModel(): ImageModelId {
   for (const id of PAINTER_PREFERENCE) {

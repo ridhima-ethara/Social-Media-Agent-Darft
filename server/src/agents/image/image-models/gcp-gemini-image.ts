@@ -1,20 +1,27 @@
 /**
- * IMAGEN — a background painter, and nothing more.
+ * GEMINI IMAGE — a background painter, and nothing more.
  *
- * It receives a prompt describing an abstract field and returns pixels. It is
- * never asked for brand text; the headline, kicker, logomark and footer are
- * composited over the result as vectors by the brand renderer (invariant 21).
+ * The Gemini image family ("Nano Banana") reached through Google's
+ * `:generateContent` shape rather than Imagen's `:predict`. The gcp.image
+ * adapter already branches on the model name for the endpoint, the request body
+ * and the response parsing, so this painter's whole job is to name a Gemini
+ * model and hand it the same wordless-background prompt Imagen gets.
+ *
+ * Invariant 21 still holds: the model paints a BACKGROUND only, and the brand
+ * layer (headline, kicker, logomark, footer) is composited over it locally as
+ * vectors. It is never asked for text.
  */
 
 import { config } from '../../../config'
-import { DEFAULT_GCP_IMAGE_MODEL } from '../../../../../shared/image-models'
+import { DEFAULT_GCP_GEMINI_IMAGE_MODEL } from '../../../../../shared/image-models'
 import { gcpImage } from '../../../integrations/gcp-llm'
 import type { BackgroundPainter, RenderRequest } from './types'
 
-export const imagenPainter: BackgroundPainter = {
-  id: 'gcp-imagen',
+export const geminiImagePainter: BackgroundPainter = {
+  id: 'gcp-gemini-image',
 
   isConfigured(): boolean {
+    // Same Google credential as Imagen — one adapter, two model families.
     return gcpImage.isConfigured()
   },
 
@@ -24,13 +31,12 @@ export const imagenPainter: BackgroundPainter = {
 
   async paint(request: RenderRequest): Promise<{ base64: string; mimeType: string }> {
     /*
-     * Force an IMAGEN model even if GCP_IMAGE_MODEL names a Gemini one. This
-     * painter IS the Imagen choice — an operator who picked it should get
-     * Imagen, not whatever the env happens to default to. If the env already
-     * names an Imagen model it is honoured; otherwise the Imagen default.
+     * Force a GEMINI model even if GCP_IMAGE_MODEL names an Imagen one. This
+     * painter IS the Gemini choice. If the env already names a Gemini image
+     * model it is honoured; otherwise the Gemini default.
      */
     const configured = config.gcp.imageModel
-    const model = configured.toLowerCase().startsWith('imagen') ? configured : DEFAULT_GCP_IMAGE_MODEL
+    const model = configured.toLowerCase().startsWith('gemini') ? configured : DEFAULT_GCP_GEMINI_IMAGE_MODEL
     return gcpImage.run({
       prompt: buildPrompt(request),
       width: request.width,
@@ -44,9 +50,10 @@ export const imagenPainter: BackgroundPainter = {
 /**
  * The background prompt.
  *
- * Deliberately constrained: a technical, abstract field in the brand palette,
- * with an explicit instruction against any lettering. The concept name steers
- * the composition so the picture relates to what the caption argues.
+ * Identical intent to Imagen's: a technical, abstract field in the brand
+ * palette. The gcp.image adapter appends the family-specific wording that keeps
+ * a Gemini image model from returning an empty candidate, so this states the
+ * composition and leaves the "wordless" phrasing to the adapter.
  */
 function buildPrompt(request: RenderRequest): string {
   const conceptDirection: Record<string, string> = {

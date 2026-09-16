@@ -44,7 +44,7 @@ export function LeadershipReview() {
   const knowledge = useStore((s) => s.knowledge)
   const user = useStore((s) => s.user)
   const publishPhase = useStore((s) => s.publishPhase)
-  const leadershipApprove = useStore((s) => s.leadershipApprove)
+  const leadershipPublish = useStore((s) => s.leadershipPublish)
   const leadershipReject = useStore((s) => s.leadershipReject)
   const ensureDraft = useStore((s) => s.ensureDraft)
   const ensureImage = useStore((s) => s.ensureImage)
@@ -265,7 +265,7 @@ export function LeadershipReview() {
                     </ul>
                   ) : (
                     <div className="mt-2 space-y-2">
-                      <Btn variant="primary" className="w-full" onClick={() => void leadershipApprove(selected.id)}>
+                      <Btn variant="primary" className="w-full" onClick={() => void leadershipPublish(selected.id)}>
                         <Check size={13} /> Approve &amp; publish
                       </Btn>
                       <Btn variant="danger" className="w-full" onClick={() => setRejecting(true)}>

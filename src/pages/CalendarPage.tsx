@@ -30,6 +30,26 @@ const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'
  */
 const SUGGESTION_ROWS = 5
 
+/*
+ * ── Column width, shared across the whole week ──────────────────────────────
+ *
+ * The seven day-columns share ONE width. Resizing any column's edge writes this
+ * single number, so every column changes together — a week is not a week if
+ * Tuesday is wider than Wednesday. Zero means "auto": the responsive grid
+ * decides, which is the original behaviour. Any positive value pins every column
+ * to that pixel width and the week scrolls sideways when the total overflows.
+ *
+ * The floor is the narrowest a title stays readable; the ceiling is wide enough
+ * to show a whole hook and topic without opening the card, which is the point of
+ * being able to widen it at all.
+ */
+const COLUMN_MIN = 150
+const COLUMN_MAX = 460
+const COLUMN_WIDTH_KEY = 'ethara.calendar.columnWidth'
+
+/** Above this width a card stops clamping and shows the whole topic and hook. */
+const WIDE_CARD_AT = 260
+
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /* ── Dates: local calendar days, never UTC midnight ─────────────────────── */
@@ -152,11 +172,73 @@ export function CalendarPage() {
   const [askOpen, setAskOpen] = useState(false)
   const gridRef = useRef<HTMLDivElement | null>(null)
   const moveIdea = useStore((s) => s.moveIdea)
+  const scheduleIdeaOnDay = useStore((s) => s.scheduleIdeaOnDay)
   const deleteIdea = useStore((s) => s.deleteIdea)
 
   /* ── Card size ────────────────────────────────────────────────────── */
   /** So a day with room can point at the only place a post reaches a slot. */
   const queueRef = useRef<HTMLElement | null>(null)
+
+  /*
+   * ── Column width, one value for all seven columns ──────────────────────
+   *
+   * Restored from localStorage so a chosen width survives a reload. Zero is the
+   * responsive "auto" default. A resize handle on any column's edge writes here,
+   * and every column reads from it — so widening one widens the week.
+   */
+  const [columnWidth, setColumnWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0
+    const stored = Number(window.localStorage.getItem(COLUMN_WIDTH_KEY))
+    if (!Number.isFinite(stored) || stored <= 0) return 0
+    return Math.min(COLUMN_MAX, Math.max(COLUMN_MIN, stored))
+  })
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (columnWidth <= 0) window.localStorage.removeItem(COLUMN_WIDTH_KEY)
+    else window.localStorage.setItem(COLUMN_WIDTH_KEY, String(columnWidth))
+  }, [columnWidth])
+
+  /*
+   * The resize gesture. Grabbing a column edge captures the pointer and maps
+   * horizontal travel to the shared width, clamped to a readable range. It reads
+   * the grabbed column's real rendered width first, so a drag that starts in
+   * "auto" mode continues smoothly from wherever the layout had placed it rather
+   * than jumping to a default.
+   */
+  const resizeRef = useRef<{ id: number; startX: number; startWidth: number } | null>(null)
+  const beginResize = (event: React.PointerEvent<HTMLElement>): void => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    const column = event.currentTarget.closest<HTMLElement>('[data-day]')
+    const startWidth = columnWidth > 0 ? columnWidth : (column?.getBoundingClientRect().width ?? COLUMN_MIN)
+    resizeRef.current = { id: event.pointerId, startX: event.clientX, startWidth }
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Pointer already released; the resize simply will not start.
+    }
+    document.body.classList.add('is-resizing')
+  }
+  const onResizeMove = (event: React.PointerEvent<HTMLElement>): void => {
+    const r = resizeRef.current
+    if (!r) return
+    const next = Math.min(COLUMN_MAX, Math.max(COLUMN_MIN, r.startWidth + (event.clientX - r.startX)))
+    setColumnWidth(next)
+  }
+  const endResize = (event: React.PointerEvent<HTMLElement>): void => {
+    if (!resizeRef.current) return
+    resizeRef.current = null
+    document.body.classList.remove('is-resizing')
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch {
+      // Capture already gone.
+    }
+  }
+  // Only an explicitly-widened column shows the whole topic and hook; "auto"
+  // keeps the original responsive clamp so a narrow laptop still reads cleanly.
+  const isWide = columnWidth >= WIDE_CARD_AT
 
   /*
    * ── Drag to reschedule ────────────────────────────────────────────────
@@ -208,7 +290,15 @@ export function CalendarPage() {
     setDrag(null)
     if (phase !== 'end' || !current) return
     const target = dayUnder(p) ?? current.overIso
-    if (target && target !== current.idea.scheduled_date) {
+    if (!target) return
+    const isSuggestion = current.idea.calendar_slot !== 'primary'
+    // A suggestion promotes onto the day even when its stored date already
+    // matches — it was never on the grid. A primary only counts as a move when
+    // the day actually changes.
+    if (isSuggestion) {
+      setJustMoved(current.idea.id)
+      void scheduleIdeaOnDay(current.idea.id, target)
+    } else if (target !== current.idea.scheduled_date) {
       setJustMoved(current.idea.id)
       void moveIdea(current.idea.id, target)
     }
@@ -354,8 +444,19 @@ export function CalendarPage() {
               {totalPlaced} slot{totalPlaced === 1 ? '' : 's'} placed
             </h2>
             <span className="text-[10.5px] text-ink-3">
-              {totalFree} of {cap * PLATFORMS.length} slots free · drag a card to another day, or open it to edit
+              {totalFree} of {cap * PLATFORMS.length} slots free · drag a card to another day, or drag a column edge to resize
             </span>
+            <span className="flex-1" />
+            {columnWidth > 0 ? (
+              <button
+                type="button"
+                onClick={() => setColumnWidth(0)}
+                title="Return every column to the automatic width"
+                className="mono rounded-[6px] border border-line-strong px-2 py-[3px] text-[8.5px] uppercase tracking-[0.08em] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+              >
+                {columnWidth}px · reset width
+              </button>
+            ) : null}
           </div>
 
           {/*
@@ -368,21 +469,34 @@ export function CalendarPage() {
            * calendar a person has used does. The floor is what stopped a title
            * from becoming a tower of single words at 1440px and below.
            */}
-          <div ref={gridRef} className="grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7">
+          <div
+            ref={gridRef}
+            className={
+              columnWidth > 0
+                ? 'grid items-start gap-2 overflow-x-auto pb-1'
+                : 'grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7'
+            }
+            style={columnWidth > 0 ? { gridTemplateColumns: `repeat(7, ${columnWidth}px)` } : undefined}
+          >
             {days.map((day, i) => {
               const iso = isoDate(day)
               const dayIdeas = primary
                 .filter((idea) => idea.scheduled_date === iso)
                 .sort((a, b) => timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
               const isToday = iso === todayIso
-              const isDropTarget = drag !== null && drag.overIso === iso && drag.idea.scheduled_date !== iso
+              // A suggestion is not on the grid, so any day under it is a valid
+              // drop; a primary only highlights a day other than the one it holds.
+              const isDropTarget =
+                drag !== null &&
+                drag.overIso === iso &&
+                (drag.idea.calendar_slot !== 'primary' || drag.idea.scheduled_date !== iso)
               return (
                 <div
                   key={iso}
                   data-day={iso}
                   /* Today is a lit column and a dragged card lights the one
                      under it, brighter — the drop reads before it lands. */
-                  className={`flex min-w-0 flex-col gap-[7px] rounded-[13px] p-1.5 transition-[background-color,box-shadow] duration-[var(--dur-fast)] ${
+                  className={`group/day relative flex min-w-0 flex-col gap-[7px] rounded-[13px] p-1.5 transition-[background-color,box-shadow] duration-[var(--dur-fast)] ${
                     isDropTarget
                       ? 'bg-accent/[0.14] ring-2 ring-accent/60'
                       : isToday
@@ -412,6 +526,7 @@ export function CalendarPage() {
                     <SlotCard
                       key={idea.id}
                       idea={idea}
+                      wide={isWide}
                       dragging={drag?.idea.id === idea.id}
                       landed={justMoved === idea.id}
                       onOpen={() => openReview(idea.id)}
@@ -432,6 +547,25 @@ export function CalendarPage() {
                   >
                     {isDropTarget ? 'move here' : dayIdeas.length === 0 ? 'no posts · promote one' : 'promote one'}
                   </button>
+
+                  {/* RESIZE HANDLE — the right edge of every column is a grip,
+                      and all seven write the same shared width, so widening one
+                      widens the week. It sits half over the gap between columns,
+                      is faint until the column is hovered, and never starts a
+                      card drag because it stops the pointer at its own edge. */}
+                  <span
+                    role="separator"
+                    aria-label="Resize calendar columns"
+                    aria-orientation="vertical"
+                    title="Drag to resize every column"
+                    onPointerDown={beginResize}
+                    onPointerMove={onResizeMove}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                    className="absolute -right-1 top-0 z-20 flex h-full w-2 cursor-col-resize touch-none items-center justify-center opacity-0 transition-opacity duration-[var(--dur-fast)] group-hover/day:opacity-100"
+                  >
+                    <span className="h-10 w-[3px] rounded-full bg-line-strong transition-colors hover:bg-accent" aria-hidden="true" />
+                  </span>
                 </div>
               )
             })}
@@ -439,7 +573,15 @@ export function CalendarPage() {
           </div>
         </section>
 
-        <Queue queueRef={queueRef} queued={queued} capacity={capacity} weekPrimary={weekPrimary} cap={cap} />
+        <Queue
+          queueRef={queueRef}
+          queued={queued}
+          capacity={capacity}
+          weekPrimary={weekPrimary}
+          cap={cap}
+          onDrag={onCardDrag}
+          draggingId={drag?.idea.id ?? null}
+        />
       </div>
 
       {/* The card in flight. Pointer-transparent, so the day under the pointer
@@ -460,9 +602,11 @@ export function CalendarPage() {
           <p className={`mt-1.5 text-[10.5px] font-medium ${drag.overIso && drag.overIso !== drag.idea.scheduled_date ? 'text-accent-bright' : 'text-ink-3'}`}>
             {drag.overIso === null
               ? 'Drop on a day'
-              : drag.overIso === drag.idea.scheduled_date
-                ? 'Already on this day'
-                : `Move to ${dayLabelOf(drag.overIso)}`}
+              : drag.idea.calendar_slot !== 'primary'
+                ? `Schedule on ${dayLabelOf(drag.overIso)}`
+                : drag.overIso === drag.idea.scheduled_date
+                  ? 'Already on this day'
+                  : `Move to ${dayLabelOf(drag.overIso)}`}
           </p>
         </div>
       ) : null}
@@ -476,6 +620,7 @@ export function CalendarPage() {
 
 function SlotCard({
   idea,
+  wide,
   dragging,
   landed,
   onOpen,
@@ -483,6 +628,7 @@ function SlotCard({
   onWithdraw,
 }: {
   idea: Idea
+  wide: boolean
   dragging: boolean
   landed: boolean
   onOpen: () => void
@@ -655,15 +801,16 @@ function SlotCard({
         </span>
       </div>
 
-      {/* the hook, two lines at most */}
-      <p className="mt-[7px] line-clamp-2 text-[11px] font-medium leading-[1.35] text-ink" title={hook}>
+      {/* The hook. Clamped to two lines at the default width; a widened column
+          drops the clamp so the whole opening line reads without opening the card. */}
+      <p className={`mt-[7px] text-[11px] font-medium leading-[1.35] text-ink ${wide ? '' : 'line-clamp-2'}`} title={hook}>
         {hook}
         {idea.is_new_trend ? <span className="mono ml-1.5 text-[8px] text-magenta">NEW</span> : null}
       </p>
 
       {/* the angle the agent took, and its confidence */}
       <div className="mt-[7px] flex items-center gap-1.5">
-        <span className="mono min-w-0 flex-1 truncate text-[8px] text-ink-3" title={angle ?? topic}>
+        <span className={`mono min-w-0 flex-1 text-[8px] text-ink-3 ${wide ? '' : 'truncate'}`} title={angle ?? topic}>
           <span aria-hidden="true">↳ </span>
           {angle ?? topic}
         </span>
@@ -683,12 +830,16 @@ function Queue({
   capacity,
   weekPrimary,
   cap,
+  onDrag,
+  draggingId,
 }: {
   queueRef: React.Ref<HTMLElement>
   queued: Idea[]
   capacity: Array<{ platform: Platform; placed: number; free: number; waiting: number }>
   weekPrimary: Idea[]
   cap: number
+  onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
+  draggingId: string | null
 }) {
   const promoteIdea = useStore((s) => s.promoteIdea)
   const deleteIdea = useStore((s) => s.deleteIdea)
@@ -725,7 +876,7 @@ function Queue({
         <span className="text-[10px] text-ink-3">
           {queued.length === 0
             ? 'everything the agents formed is on the calendar'
-            : `${queued.length} ranked below the cut · promote one to take a slot`}
+            : `${queued.length} ranked below the cut · drag one onto a day, or promote it`}
         </span>
         <span className="flex-1" />
         <span className="mono text-[7.5px] uppercase tracking-[0.06em] text-ink-3">slots free</span>
@@ -773,109 +924,28 @@ function Queue({
               const isArmed = armed === idea.id
               const seat = seats.get(idea.platform)
               const free = seat?.free ?? 0
-              const angle = typeof idea.analysis.angle === 'string' ? idea.analysis.angle : topicOf(idea)
-              const colour = PLATFORM_TOKEN[idea.platform]
               return (
-                <article
+                <QueueRow
                   key={idea.id}
-                  className="rounded-[11px] border border-line bg-surface px-2.5 py-[7px] transition-colors duration-200 hover:border-accent/60"
-                  style={{ animation: `eth-row-stream 200ms ${EASE} ${i * 40}ms both` }}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span className="tabular w-[22px] shrink-0 text-[8.5px] text-ink-3" title="Rank on its platform">
-                      #{idea.platform_rank ?? '–'}
-                    </span>
-
-                    <button
-                      type="button"
-                      onClick={() => openReview(idea.id)}
-                      className="min-w-0 flex-1 text-left"
-                      title={idea.title}
-                    >
-                      <span className="block truncate text-[11px] font-medium text-ink transition-colors hover:text-accent-bright">
-                        {idea.title}
-                      </span>
-                      <span className="mono mt-0.5 block truncate text-[8px] text-ink-3" title={angle}>
-                        <span aria-hidden="true">↳ </span>{angle}
-                      </span>
-                    </button>
-
-                    <span
-                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px]"
-                      style={{ background: `color-mix(in srgb, ${colour} 14%, transparent)`, border: `1px solid color-mix(in srgb, ${colour} 35%, transparent)` }}
-                      title={PLATFORM_LABEL[idea.platform]}
-                    >
-                      <PlatformIcon platform={idea.platform} size={9} />
-                    </span>
-                    <span className="sr-only">{PLATFORM_LABEL[idea.platform]}</span>
-
-                    <span className="tabular w-[30px] shrink-0 text-right text-[8.5px] text-accent-bright" title="Confidence">
-                      {idea.confidence}%
-                    </span>
-
-                    {/* What promoting this one would actually do, before it is done. */}
-                    <span
-                      className={`mono hidden w-[62px] shrink-0 text-center text-[7px] uppercase tracking-[0.08em] sm:block ${free > 0 ? 'text-good-ink' : 'text-serious'}`}
-                      title={free > 0 ? `${PLATFORM_LABEL[idea.platform]} has ${free} free slot${free === 1 ? '' : 's'}` : `${PLATFORM_LABEL[idea.platform]} is full — promoting displaces the weakest placed post`}
-                    >
-                      {free > 0 ? `${free} free` : 'displaces'}
-                    </span>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!isArmed) { setArmed(idea.id); return }
-                        setArmed(null)
-                        void promoteIdea(idea.id)
-                      }}
-                      className={`shrink-0 rounded-[8px] border px-3 py-1 text-[10px] font-semibold transition-colors duration-[220ms] ${
-                        isArmed
-                          ? 'border-accent bg-accent text-on-accent hover:bg-accent-bright'
-                          : 'border-hud-strong bg-accent/12 text-accent-bright hover:border-accent'
-                      }`}
-                    >
-                      {isArmed ? 'Confirm' : 'Promote'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (isArmed) { setArmed(null); return }
-                        void deleteIdea(idea.id)
-                      }}
-                      className="shrink-0 rounded-[8px] border border-line-strong px-2.5 py-1 text-[10px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-critical/50 hover:text-critical-ink"
-                    >
-                      {isArmed ? 'Cancel' : 'Withdraw'}
-                    </button>
-                  </div>
-
-                  {/* Promotion can displace a placed post, so it states the
-                      consequence and waits. Nothing here is irreversible. */}
-                  {isArmed ? (
-                    <div
-                      className={`mt-2 border-l pl-[9px] ${free > 0 ? 'border-good/60' : 'border-serious/60'}`}
-                      style={{ animation: `eth-row-stream 260ms ${EASE} both` }}
-                    >
-                      {free > 0 ? (
-                        <>
-                          <div className="mono text-[9px] uppercase tracking-[0.12em] text-good-ink">A slot is free</div>
-                          <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
-                            Takes the first open slot on {PLATFORM_LABEL[idea.platform]}. Nothing is displaced.
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <div className="mono text-[9px] uppercase tracking-[0.12em] text-serious">Promoting this displaces</div>
-                          <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
-                            #{cap} <strong className="font-semibold">“{seat?.weakest?.title ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
-                          </div>
-                        </>
-                      )}
-                      {idea.status === 'suggested' ? (
-                        <div className="mt-1 text-[11px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </article>
+                  idea={idea}
+                  index={i}
+                  isArmed={isArmed}
+                  free={free}
+                  weakestTitle={seat?.weakest?.title ?? null}
+                  cap={cap}
+                  dragging={draggingId === idea.id}
+                  onDrag={onDrag}
+                  onOpen={() => openReview(idea.id)}
+                  onPromote={() => {
+                    if (!isArmed) { setArmed(idea.id); return }
+                    setArmed(null)
+                    void promoteIdea(idea.id)
+                  }}
+                  onWithdraw={() => {
+                    if (isArmed) { setArmed(null); return }
+                    void deleteIdea(idea.id)
+                  }}
+                />
               )
             })}
           </div>
@@ -893,6 +963,218 @@ function Queue({
         </div>
       )}
     </section>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   A QUEUE ROW — a ranked suggestion that can be dragged onto a calendar day
+   ───────────────────────────────────────────────────────────────────────────
+   Same drag mechanism as the calendar's SlotCard, and for the same reason:
+   the file's history records that the HTML5 `draggable` API and a reliable
+   click on one element are incompatible. So the drag is pointer events by
+   hand — a press that travels more than six pixels becomes a drag; one that
+   does not leaves the row's own buttons (open · promote · withdraw) to handle
+   the click. Those buttons stop pointer propagation so a press on them never
+   starts a drag. Dropping the row on a day PROMOTES it onto the calendar and
+   lands it there, via scheduleIdeaOnDay.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function QueueRow({
+  idea,
+  index,
+  isArmed,
+  free,
+  weakestTitle,
+  cap,
+  dragging,
+  onDrag,
+  onOpen,
+  onPromote,
+  onWithdraw,
+}: {
+  idea: Idea
+  index: number
+  isArmed: boolean
+  free: number
+  weakestTitle: string | null
+  cap: number
+  dragging: boolean
+  onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
+  onOpen: () => void
+  onPromote: () => void
+  onWithdraw: () => void
+}) {
+  const angle = typeof idea.analysis.angle === 'string' ? idea.analysis.angle : topicOf(idea)
+  const colour = PLATFORM_TOKEN[idea.platform]
+
+  const node = useRef<HTMLElement | null>(null)
+  const press = useRef<{ id: number; x: number; y: number; dragging: boolean; timer: number | null } | null>(null)
+
+  const begin = (x: number, y: number): void => {
+    const p = press.current
+    const el = node.current
+    if (!p || !el || p.dragging) return
+    p.dragging = true
+    if (p.timer !== null) {
+      window.clearTimeout(p.timer)
+      p.timer = null
+    }
+    try {
+      el.setPointerCapture(p.id)
+    } catch {
+      // The pointer is already gone; the drag simply will not start.
+    }
+    onDrag(idea, 'start', { x, y }, el.getBoundingClientRect())
+  }
+  const onPointerDown = (event: React.PointerEvent<HTMLElement>): void => {
+    if (event.button !== 0) return
+    press.current = { id: event.pointerId, x: event.clientX, y: event.clientY, dragging: false, timer: null }
+    if (event.pointerType === 'touch') {
+      const { clientX, clientY } = event
+      press.current.timer = window.setTimeout(() => begin(clientX, clientY), 220)
+    }
+  }
+  const onPointerMove = (event: React.PointerEvent<HTMLElement>): void => {
+    const p = press.current
+    if (!p) return
+    if (p.dragging) {
+      onDrag(idea, 'move', { x: event.clientX, y: event.clientY })
+      return
+    }
+    if (Math.hypot(event.clientX - p.x, event.clientY - p.y) < 6) return
+    if (event.pointerType === 'touch') {
+      if (p.timer !== null) window.clearTimeout(p.timer)
+      press.current = null
+      return
+    }
+    begin(event.clientX, event.clientY)
+  }
+  const onPointerUp = (event: React.PointerEvent<HTMLElement>): void => {
+    const p = press.current
+    press.current = null
+    if (!p) return
+    if (p.timer !== null) window.clearTimeout(p.timer)
+    if (p.dragging) onDrag(idea, 'end', { x: event.clientX, y: event.clientY })
+  }
+  const onPointerCancel = (): void => {
+    const p = press.current
+    press.current = null
+    if (!p) return
+    if (p.timer !== null) window.clearTimeout(p.timer)
+    if (p.dragging) onDrag(idea, 'cancel', { x: 0, y: 0 })
+  }
+
+  // The row's own controls: a press that lands on one must not begin a drag,
+  // so each stops the pointer at its edge and keeps its ordinary click.
+  const stop = {
+    onPointerDown: (event: React.PointerEvent) => event.stopPropagation(),
+    onPointerUp: (event: React.PointerEvent) => event.stopPropagation(),
+  }
+
+  return (
+    <article
+      ref={node}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      aria-label={`${idea.title}. Drag onto a day to schedule it, or use the buttons.`}
+      className={`cursor-grab select-none rounded-[11px] border bg-surface px-2.5 py-[7px] transition-colors duration-200 active:cursor-grabbing ${
+        dragging ? 'border-dashed border-accent/50 opacity-35' : 'border-line hover:border-accent/60'
+      }`}
+      style={{ animation: `eth-row-stream 200ms ${EASE} ${index * 40}ms both`, touchAction: 'manipulation' }}
+    >
+      <div className="flex items-center gap-2.5">
+        <span className="tabular w-[22px] shrink-0 text-[8.5px] text-ink-3" title="Rank on its platform">
+          #{idea.platform_rank ?? '–'}
+        </span>
+
+        <button
+          type="button"
+          {...stop}
+          onClick={onOpen}
+          className="min-w-0 flex-1 text-left"
+          title={idea.title}
+        >
+          <span className="block truncate text-[11px] font-medium text-ink transition-colors hover:text-accent-bright">
+            {idea.title}
+          </span>
+          <span className="mono mt-0.5 block truncate text-[8px] text-ink-3" title={angle}>
+            <span aria-hidden="true">↳ </span>{angle}
+          </span>
+        </button>
+
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px]"
+          style={{ background: `color-mix(in srgb, ${colour} 14%, transparent)`, border: `1px solid color-mix(in srgb, ${colour} 35%, transparent)` }}
+          title={PLATFORM_LABEL[idea.platform]}
+        >
+          <PlatformIcon platform={idea.platform} size={9} />
+        </span>
+        <span className="sr-only">{PLATFORM_LABEL[idea.platform]}</span>
+
+        <span className="tabular w-[30px] shrink-0 text-right text-[8.5px] text-accent-bright" title="Confidence">
+          {idea.confidence}%
+        </span>
+
+        {/* What promoting this one would actually do, before it is done. */}
+        <span
+          className={`mono hidden w-[62px] shrink-0 text-center text-[7px] uppercase tracking-[0.08em] sm:block ${free > 0 ? 'text-good-ink' : 'text-serious'}`}
+          title={free > 0 ? `${PLATFORM_LABEL[idea.platform]} has ${free} free slot${free === 1 ? '' : 's'}` : `${PLATFORM_LABEL[idea.platform]} is full — promoting displaces the weakest placed post`}
+        >
+          {free > 0 ? `${free} free` : 'displaces'}
+        </span>
+
+        <button
+          type="button"
+          {...stop}
+          onClick={onPromote}
+          className={`shrink-0 rounded-[8px] border px-3 py-1 text-[10px] font-semibold transition-colors duration-[220ms] ${
+            isArmed
+              ? 'border-accent bg-accent text-on-accent hover:bg-accent-bright'
+              : 'border-hud-strong bg-accent/12 text-accent-bright hover:border-accent'
+          }`}
+        >
+          {isArmed ? 'Confirm' : 'Promote'}
+        </button>
+        <button
+          type="button"
+          {...stop}
+          onClick={onWithdraw}
+          className="shrink-0 rounded-[8px] border border-line-strong px-2.5 py-1 text-[10px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-critical/50 hover:text-critical-ink"
+        >
+          {isArmed ? 'Cancel' : 'Withdraw'}
+        </button>
+      </div>
+
+      {/* Promotion can displace a placed post, so it states the
+          consequence and waits. Nothing here is irreversible. */}
+      {isArmed ? (
+        <div
+          className={`mt-2 border-l pl-[9px] ${free > 0 ? 'border-good/60' : 'border-serious/60'}`}
+          style={{ animation: `eth-row-stream 260ms ${EASE} both` }}
+        >
+          {free > 0 ? (
+            <>
+              <div className="mono text-[9px] uppercase tracking-[0.12em] text-good-ink">A slot is free</div>
+              <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
+                Takes the first open slot on {PLATFORM_LABEL[idea.platform]}. Nothing is displaced.
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="mono text-[9px] uppercase tracking-[0.12em] text-serious">Promoting this displaces</div>
+              <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
+                #{cap} <strong className="font-semibold">“{weakestTitle ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
+              </div>
+            </>
+          )}
+          {idea.status === 'suggested' ? (
+            <div className="mt-1 text-[11px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
   )
 }
 

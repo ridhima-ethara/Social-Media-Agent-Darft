@@ -101,6 +101,18 @@ function FoldedCaption({
   )
 }
 
+/*
+ * The creative, shown whole inside the crop the feed uses.
+ *
+ * `object-fit: cover` filled the frame by cutting the picture down to it, so
+ * switching 1.91:1 → 4:5 sliced the sides off and the person editing could no
+ * longer see what they were approving. The frame still holds the feed's real
+ * ratio — that is the point of the control — but the image is CONTAINED in it,
+ * so the whole creative stays on screen and reshapes itself as the ratio
+ * changes. What is left over is filled by a blurred, scaled copy of the same
+ * image (the way the feeds themselves letterbox), so a contained picture reads
+ * as a deliberate frame rather than two empty bars.
+ */
 function Media({
   platform,
   media,
@@ -114,14 +126,25 @@ function Media({
   crop: PreviewCrop
   className?: string
 }) {
+  const src = media ?? gradientPlaceholder(platform, seed)
   return (
-    <img
-      src={media ?? gradientPlaceholder(platform, seed)}
-      alt=""
-      aria-hidden={media ? undefined : true}
-      className={`w-full ${className}`}
-      style={{ aspectRatio: CROP_RATIO[crop], objectFit: 'cover' }}
-    />
+    <div
+      className={`relative w-full overflow-hidden bg-[#0d0b18] ${className}`}
+      style={{ aspectRatio: CROP_RATIO[crop] }}
+    >
+      <img
+        src={src}
+        alt=""
+        aria-hidden="true"
+        className="absolute inset-0 h-full w-full scale-110 object-cover blur-2xl"
+      />
+      <img
+        src={src}
+        alt=""
+        aria-hidden={media ? undefined : true}
+        className="absolute inset-0 h-full w-full object-contain"
+      />
+    </div>
   )
 }
 

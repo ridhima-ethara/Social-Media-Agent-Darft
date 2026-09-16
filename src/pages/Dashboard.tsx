@@ -699,7 +699,7 @@ function DecisionQueue({
   const user = useStore((s) => s.user)
   const pendingConfirm = useStore((s) => s.assistant.pendingConfirm)
   const openReview = useStore((s) => s.openReview)
-  const leadershipApprove = useStore((s) => s.leadershipApprove)
+  const leadershipPublish = useStore((s) => s.leadershipPublish)
   const resolveQueueItem = useStore((s) => s.resolveQueueItem)
   const confirmPlan = useStore((s) => s.confirmPlan)
   const setPage = useStore((s) => s.setPage)
@@ -780,7 +780,7 @@ function DecisionQueue({
         ) : (
           <div className="mt-2.5 flex items-center gap-1.5">
             {user?.role === 'leadership' ? (
-              <Btn variant="primary" onClick={() => commit(idea.id, () => leadershipApprove(idea.id))}>Approve &amp; publish</Btn>
+              <Btn variant="primary" onClick={() => commit(idea.id, () => leadershipPublish(idea.id))}>Approve &amp; publish</Btn>
             ) : (
               <Btn variant="subtle" onClick={() => openReview(idea.id)}>Open</Btn>
             )}

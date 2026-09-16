@@ -11,7 +11,7 @@
 
 import type { Platform } from './agent-contract'
 
-export type ImageModelId = 'brand-svg' | 'gcp-imagen' | 'z-image-turbo' | 'flux2-klein'
+export type ImageModelId = 'brand-svg' | 'gcp-imagen' | 'gcp-gemini-image' | 'z-image-turbo' | 'flux2-klein'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE DEFAULT MODEL TAGS — ONE HOME
@@ -32,6 +32,13 @@ export const DEFAULT_OLLAMA_IMAGE_MODEL = 'x/flux2-klein:latest'
 
 /** The hosted painter, used when a Google credential is present. */
 export const DEFAULT_GCP_IMAGE_MODEL = 'imagen-4.0-generate-001'
+
+/**
+ * The hosted Gemini image model ("Nano Banana"). A different Google API family
+ * from Imagen — `:generateContent` rather than `:predict` — which the server's
+ * gcp.image adapter already handles by inspecting the model name.
+ */
+export const DEFAULT_GCP_GEMINI_IMAGE_MODEL = 'gemini-2.5-flash-image'
 
 /**
  * The mflux (MLX) weight set. 4b rather than 9b: Apache-2.0 and ungated, so a
@@ -81,6 +88,18 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     paintsBackground: true,
     drawsBrandLayerLocally: true,
     typicalMs: 6500,
+  },
+  {
+    id: 'gcp-gemini-image',
+    label: 'Gemini 2.5 Flash Image',
+    vendor: 'Google Cloud',
+    summary:
+      'Google’s Gemini image model paints the background from the concept prompt. Richer, more literal scenes than Imagen; the brand layer is composited over it locally.',
+    licence: 'Commercial · Google Cloud terms',
+    envKey: 'GCP_API_KEY',
+    paintsBackground: true,
+    drawsBrandLayerLocally: true,
+    typicalMs: 7000,
   },
   {
     id: 'flux2-klein',

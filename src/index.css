@@ -342,6 +342,15 @@ body.is-dragging * {
   -webkit-user-select: none;
 }
 
+/* Resizing the calendar columns: a column-resize cursor everywhere and no
+   text selection, so the drag reads as a resize and never highlights a title. */
+body.is-resizing,
+body.is-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* ── The card-size slider ───────────────────────────────────────────────── */
 
 .eth-range {

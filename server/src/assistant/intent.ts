@@ -462,6 +462,7 @@ export function extractEntities(utterance: string, toolId: string): Record<strin
   /* ── Image model ──────────────────────────────────────────────────────── */
   if (wants('model')) {
     if (/\bimagen\b/.test(lower)) entities.model = 'gcp-imagen'
+    else if (/\bgemini\b/.test(lower)) entities.model = 'gcp-gemini-image'
     else if (/\bz-?image\b/.test(lower)) entities.model = 'z-image-turbo'
     else if (/\bbrand\b/.test(lower)) entities.model = 'brand-svg'
   }

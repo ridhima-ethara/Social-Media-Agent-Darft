@@ -10,13 +10,15 @@ import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, ArrowRight, Check, ChevronLeft, ExternalLink, FileText, Paperclip, RefreshCw, Send, Sparkles, X } from 'lucide-react'
 import { useStore } from '../store'
 
-/* The preview column is draggable. The bounds keep it useful at both ends: a
-   narrower column stops showing a post at a believable width, and a wider one
-   starves the editor it sits beside. The chosen width outlives the dialog. */
-const PREVIEW_MIN = 320
-const PREVIEW_MAX = 760
-const PREVIEW_DEFAULT = 392
-const PREVIEW_KEY = 'ethara.review.previewWidth'
+/* The post column is draggable from its left edge. The bounds keep it useful at
+   both ends: a narrower column stops showing a post at a believable width, and a
+   wider one starves the editor it sits beside. The width outlives the dialog. */
+const POST_MIN = 260
+const POST_MAX = 720
+const POST_DEFAULT = 316
+const POST_KEY = 'ethara.review.postWidth'
+/* The agent rail is a fixed reading width; only the post is sized by hand. */
+const AGENT_WIDTH = 392
 import { ModelMenu } from '../components/model-menu'
 import { DEFAULT_CROP, PREVIEW_CROPS, PlatformPreview, type PreviewCrop } from '../components/previews'
 import { AssistantCore } from '../components/assistant/core'
@@ -185,7 +187,7 @@ export function ReviewPanel() {
   const setIdeaTime = useStore((s) => s.setIdeaTime)
   const setIdeaPlatform = useStore((s) => s.setIdeaPlatform)
   const approveIdea = useStore((s) => s.approveIdea)
-  const leadershipApprove = useStore((s) => s.leadershipApprove)
+  const leadershipPublish = useStore((s) => s.leadershipPublish)
   const publishIdea = useStore((s) => s.publishIdea)
   const leadershipReject = useStore((s) => s.leadershipReject)
   const deleteIdea = useStore((s) => s.deleteIdea)
@@ -223,32 +225,32 @@ export function ReviewPanel() {
   /** The left column, folded sideways. Open by default: it answers "why". */
   const [whyOpen, setWhyOpen] = useState(true)
 
-  /* ── the draggable preview column ── */
-  const [previewWidth, setPreviewWidth] = useState(() => {
-    if (typeof window === 'undefined') return PREVIEW_DEFAULT
-    const stored = Number(window.localStorage.getItem(PREVIEW_KEY))
-    return Number.isFinite(stored) && stored >= PREVIEW_MIN && stored <= PREVIEW_MAX ? stored : PREVIEW_DEFAULT
+  /* ── the draggable post column ── */
+  const [postWidth, setPostWidth] = useState(() => {
+    if (typeof window === 'undefined') return POST_DEFAULT
+    const stored = Number(window.localStorage.getItem(POST_KEY))
+    return Number.isFinite(stored) && stored >= POST_MIN && stored <= POST_MAX ? stored : POST_DEFAULT
   })
   const [resizing, setResizing] = useState(false)
   const resizeFrom = useRef<{ x: number; width: number } | null>(null)
-  const clampPreview = (width: number) => Math.min(PREVIEW_MAX, Math.max(PREVIEW_MIN, Math.round(width)))
+  const clampPost = (width: number) => Math.min(POST_MAX, Math.max(POST_MIN, Math.round(width)))
 
   useEffect(() => {
     /* Storage throws in private mode; a preference is not worth a crash. */
-    try { window.localStorage.setItem(PREVIEW_KEY, String(previewWidth)) } catch { /* ignored */ }
-  }, [previewWidth])
+    try { window.localStorage.setItem(POST_KEY, String(postWidth)) } catch { /* ignored */ }
+  }, [postWidth])
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
-    resizeFrom.current = { x: event.clientX, width: previewWidth }
+    resizeFrom.current = { x: event.clientX, width: postWidth }
     setResizing(true)
   }
   const moveResize = (event: React.PointerEvent<HTMLDivElement>) => {
     const from = resizeFrom.current
     if (!from) return
-    /* The handle is on the column's left edge, so dragging left widens it. */
-    setPreviewWidth(clampPreview(from.width - (event.clientX - from.x)))
+    /* The handle is on the post column's left edge, so dragging left widens it. */
+    setPostWidth(clampPost(from.width - (event.clientX - from.x)))
   }
   const endResize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!resizeFrom.current) return
@@ -259,7 +261,7 @@ export function ReviewPanel() {
   const keyResize = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
-    setPreviewWidth((width) => clampPreview(width + (event.key === 'ArrowLeft' ? 24 : -24)))
+    setPostWidth((width) => clampPost(width + (event.key === 'ArrowLeft' ? 24 : -24)))
   }
   const [restorePoint, setRestorePoint] = useState<string | null>(null)
 
@@ -493,7 +495,7 @@ export function ReviewPanel() {
               approvedBy={idea.marketing_approved_by}
               publishPhase={publishPhase}
               onApprove={() => void approveIdea(idea.id)}
-              onLeadershipApprove={() => void leadershipApprove(idea.id)}
+              onLeadershipPublish={() => setConfirmPublish(true)}
               onPublish={() => setConfirmPublish(true)}
               onReject={() => { setRejectReason(''); setRejecting(true) }}
             />
@@ -651,7 +653,10 @@ export function ReviewPanel() {
             </span>
           </div>
 
-          <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_316px]">
+          <div
+            className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_min(var(--post-w),60%)]"
+            style={{ ['--post-w' as string]: `${postWidth}px` }}
+          >
             {/* the caption */}
             <div className="flex min-w-0 flex-col overflow-y-auto border-r border-line p-4">
               <div className="flex shrink-0 flex-wrap gap-1.5">
@@ -706,12 +711,39 @@ export function ReviewPanel() {
             </div>
 
             {/* the creative, always on screen */}
-            <div className="flex min-w-0 flex-col overflow-y-auto bg-surface-2 p-3.5">
+            <div className="relative flex min-w-0 flex-col overflow-y-auto bg-surface-2 p-3.5">
+              {/* Drag this left edge to resize the post. Arrow keys do the same
+                  for anyone who cannot drag, which is why this is a focusable
+                  separator rather than a bare div with a cursor. */}
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize the post column"
+                aria-valuenow={postWidth}
+                aria-valuemin={POST_MIN}
+                aria-valuemax={POST_MAX}
+                tabIndex={0}
+                onPointerDown={startResize}
+                onPointerMove={moveResize}
+                onPointerUp={endResize}
+                onPointerCancel={endResize}
+                onKeyDown={keyResize}
+                title="Drag to resize the post · arrow keys also work"
+                className="group absolute inset-y-0 left-0 z-20 hidden w-2 cursor-col-resize outline-none xl:block"
+              >
+                <span
+                  className={`absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 transition-colors ${
+                    resizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent group-focus-visible:bg-accent'
+                  }`}
+                  aria-hidden="true"
+                />
+              </div>
               <div className="flex shrink-0 items-center gap-2">
                 <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">LIVE PREVIEW</p>
                 <span className="mono text-[10.5px] tracking-[0.1em] text-ink-3">· FEED</span>
-                {/* The crop the feed will show. The canvas is not changed — the
-                    creative card below states what was actually rendered. */}
+                {/* The crop the feed will show. The canvas is not changed, and
+                    neither is the creative — it is fitted to the ratio whole,
+                    never sliced to it. */}
                 <div className="ml-auto flex gap-0.5 rounded-md border border-line-strong p-0.5" role="group" aria-label="Preview crop">
                   {PREVIEW_CROPS.map((option) => (
                     <button
@@ -791,35 +823,9 @@ export function ReviewPanel() {
 
         {/* ── RIGHT · the agent, and the revision spine ───────────────── */}
         <aside
-          className="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line bg-surface-2 lg:w-[var(--preview-w)]"
-          style={{ ['--preview-w' as string]: `${previewWidth}px` }}
+          className="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line bg-surface-2 lg:w-[var(--agent-w)]"
+          style={{ ['--agent-w' as string]: `${AGENT_WIDTH}px` }}
         >
-          {/* Drag the edge to resize. Arrow keys do the same for anyone who
-              cannot drag, which is why this is a focusable separator rather
-              than a bare div with a cursor. */}
-          <div
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize the preview column"
-            aria-valuenow={previewWidth}
-            aria-valuemin={PREVIEW_MIN}
-            aria-valuemax={PREVIEW_MAX}
-            tabIndex={0}
-            onPointerDown={startResize}
-            onPointerMove={moveResize}
-            onPointerUp={endResize}
-            onPointerCancel={endResize}
-            onKeyDown={keyResize}
-            title="Drag to resize · arrow keys also work"
-            className="group absolute inset-y-0 left-0 z-20 hidden w-2 cursor-col-resize outline-none lg:block"
-          >
-            <span
-              className={`absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 transition-colors ${
-                resizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent group-focus-visible:bg-accent'
-              }`}
-              aria-hidden="true"
-            />
-          </div>
           <div className="flex shrink-0 items-center gap-2.5 border-b border-line px-3.5 py-3">
             <AssistantCore state={thinking ? 'thinking' : 'dormant'} size={22} className="shrink-0" />
             <div className="min-w-0 flex-1">
@@ -1131,7 +1137,12 @@ export function ReviewPanel() {
                 disabled={!canPublish}
                 onClick={() => {
                   setConfirmPublish(false)
-                  void publishIdea(idea.id)
+                  // A post already signed off by leadership just publishes.
+                  // Leadership publishing one that has NOT been signed off yet
+                  // records their final approval and publishes in one step.
+                  if (idea.status === 'approved') void publishIdea(idea.id)
+                  else if (isLeadership) void leadershipPublish(idea.id)
+                  else void publishIdea(idea.id)
                 }}
               >
                 <Send size={12} /> Publish now
@@ -1201,7 +1212,7 @@ function HeaderDecision({
   approvedBy,
   publishPhase,
   onApprove,
-  onLeadershipApprove,
+  onLeadershipPublish,
   onPublish,
   onReject,
 }: {
@@ -1210,7 +1221,7 @@ function HeaderDecision({
   approvedBy: string | null
   publishPhase: string | null
   onApprove: () => void
-  onLeadershipApprove: () => void
+  onLeadershipPublish: () => void
   onPublish: () => void
   onReject: () => void
 }) {
@@ -1231,6 +1242,31 @@ function HeaderDecision({
     return <span className="mono rounded-md border border-critical/50 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.08em] text-critical-ink">Rejected</span>
   }
 
+  if (status === 'published') {
+    return <span className="mono rounded-md border border-good/50 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.08em] text-good-ink">Published</span>
+  }
+
+  /*
+   * LEADERSHIP PUBLISHES DIRECTLY.
+   *
+   * Leadership is the final sign-off, so on any draft that has not published
+   * yet they get one action — Publish now — rather than the marketing hop of
+   * "Approve → Leadership" or the intermediate "Give final approval". The
+   * store's leadershipPublish records their approval and dispatches in the
+   * same step, and the confirmation dialog still stands between the click and
+   * a live post.
+   */
+  if (isLeadership) {
+    return (
+      <>
+        <RejectButton onReject={onReject} />
+        <Btn variant="primary" onClick={status === 'approved' ? onPublish : onLeadershipPublish} className="!py-1.5 !text-[12px]">
+          <Send size={12} /> Publish now
+        </Btn>
+      </>
+    )
+  }
+
   if (status === 'approved') {
     return (
       <Btn variant="primary" onClick={onPublish} className="!py-1.5 !text-[12px]">
@@ -1240,14 +1276,7 @@ function HeaderDecision({
   }
 
   if (status === 'pending_leadership') {
-    return isLeadership ? (
-      <>
-        <RejectButton onReject={onReject} />
-        <Btn variant="primary" onClick={onLeadershipApprove} className="!py-1.5 !text-[12px]">
-          <Check size={12} strokeWidth={2.4} /> Give final approval
-        </Btn>
-      </>
-    ) : (
+    return (
       <span className="mono max-w-[240px] truncate rounded-md border border-line-strong px-2.5 py-1.5 text-[10px] uppercase tracking-[0.08em] text-ink-3">
         With Leadership · approved by {approvedBy ?? 'Marketing'}
       </span>

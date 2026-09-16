@@ -117,6 +117,7 @@ export const TEXT_MODEL_BY_ID: Record<string, TextModelSpec> = Object.fromEntrie
 export const IMAGE_MODEL_ADAPTER: Record<string, string | null> = {
   'brand-svg': '',
   'gcp-imagen': 'gcp.image',
+  'gcp-gemini-image': 'gcp.image',
   'flux2-klein': 'ollama.image',
   'z-image-turbo': null,
 }

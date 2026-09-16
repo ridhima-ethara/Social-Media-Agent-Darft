@@ -202,6 +202,13 @@ export interface GcpImageInput {
   width: number
   height: number
   timeoutMs: number
+  /**
+   * Which Google image model to run. Absent means the configured
+   * `GCP_IMAGE_MODEL`. A painter passes this so an operator who picked Imagen
+   * gets Imagen and one who picked Gemini gets Gemini, rather than both being
+   * decided by a single env var.
+   */
+  model?: string
 }
 
 /** A base64 PNG payload, ready to composite under the vector brand layer. */
@@ -239,8 +246,7 @@ function isGeminiImageModel(model: string): boolean {
   return model.toLowerCase().startsWith('gemini')
 }
 
-function imageEndpoint(): string {
-  const model = config.gcp.imageModel
+function imageEndpoint(model: string): string {
   const action = isGeminiImageModel(model) ? 'generateContent' : 'predict'
   if (config.gcp.useVertex) {
     return (
@@ -278,7 +284,8 @@ export const gcpImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
     if (!this.isConfigured()) throw new AdapterError(this.id, this.unavailableReason())
 
     const headers = await gcpAuthHeader()
-    const gemini = isGeminiImageModel(config.gcp.imageModel)
+    const model = input.model ?? config.gcp.imageModel
+    const gemini = isGeminiImageModel(model)
 
     /*
      * Invariant 21: the model paints a BACKGROUND and is never asked for text,
@@ -320,7 +327,7 @@ export const gcpImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
           },
         }
 
-    const payload = await fetchJson<ImagenResponse & GeminiResponse>(imageEndpoint(), {
+    const payload = await fetchJson<ImagenResponse & GeminiResponse>(imageEndpoint(model), {
       method: 'POST',
       timeoutMs: input.timeoutMs,
       adapterId: 'gcp.image',
@@ -345,8 +352,8 @@ export const gcpImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
         throw new AdapterError(
           this.id,
           said === ''
-            ? `${config.gcp.imageModel} returned no image data`
-            : `${config.gcp.imageModel} returned no image, only text: ${said.slice(0, 200)}`,
+            ? `${model} returned no image data`
+            : `${model} returned no image, only text: ${said.slice(0, 200)}`,
         )
       }
 
@@ -355,7 +362,7 @@ export const gcpImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
 
     const first = payload.predictions?.[0]
     if (!first?.bytesBase64Encoded) {
-      throw new AdapterError(this.id, `${config.gcp.imageModel} returned no image data`)
+      throw new AdapterError(this.id, `${model} returned no image data`)
     }
 
     return { base64: first.bytesBase64Encoded, mimeType: first.mimeType ?? 'image/png' }
