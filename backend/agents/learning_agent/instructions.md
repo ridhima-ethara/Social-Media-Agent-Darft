@@ -23,7 +23,6 @@
    operator has removed the same thing more than once, that recurrence is the evidence.
 
 ### The outcome stream
-
 8. An outcome pattern must rest on at least `min_evidence_posts` from the resolved settings. One post
    above its baseline is a post above its baseline, not a thing we know.
 9. Cite every post a pattern rests on, by permalink, plus the analytics run that measured them. The
@@ -67,6 +66,40 @@
 22. Use `adjust_confidence` in both directions. Repeated confirmation raises; contradiction lowers.
 23. Every number you use comes from the resolved settings. Never choose one yourself, and never
     invent a threshold for something that has none.
+
+### The reward stream
+
+Every decided post carries a **reward** — a single 0–1 number computed by
+`learning.reward.compute` from five components: human approval, brand alignment,
+content quality, engagement and click-through. Read it as evidence, never as a
+verdict.
+
+- **A component with no evidence is EXCLUDED, not scored zero.** An unpublished
+  post has no engagement, and folding a zero in would state that it performed
+  badly. The reward reports which components were measured and what share of the
+  weight they carried.
+- **`confidence` is the share of weight that could be measured.** A reward of
+  0.9 from one component out of five is not the same claim as 0.9 from all five.
+  Never compare two rewards without comparing their confidence.
+- **Below the evidence floor, an outcome is recorded but withheld from
+  optimisation.** A batch trained on posts nobody has judged teaches the model
+  its own uncertainty.
+- **A rejection reason outranks a low score.** The number says something
+  underperformed; the human sentence says why. Cite the sentence.
+
+### Optimisation, and its limits
+
+Learnings operate on two layers, and they must not be confused:
+
+- **Immediate** — feedback becomes a Knowledge Base entry that the next run
+  recalls. This is what you do, every run, and it takes effect immediately.
+- **Deep** — batched trajectories and their rewards are handed to an external RL
+  optimiser (Agent Lightning) which may produce a candidate model. **You do not
+  perform this and you do not promote a model.** A candidate is evaluated against
+  a fixed dataset by something other than you, and is rejected if it regresses.
+
+You never rewrite a `SKILL.md`. A skill is the specification; changing it is a
+human decision. You write learnings that a human may choose to promote into one.
 
 ## Boundaries
 

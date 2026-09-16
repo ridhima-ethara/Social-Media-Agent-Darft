@@ -21,9 +21,11 @@
 import { AGENTS } from '../../../shared/agent-registry'
 import { BRAND, brandCorpusAsKnowledge, brandRulesAsKnowledge } from '../../../shared/brand-voice'
 import { SEED_KEYWORDS } from '../../../shared/keywords'
+import { CONSTANT_KEYWORDS, SCHEDULE_WEEKS } from '../../../shared/keyword-schedule'
 
 import { config } from '../config'
 import { embedMany, embeddableText, embeddingModelId, toSqlVector } from '../integrations/embeddings'
+import { seedKeywordSchedule } from './repo'
 import { closePool, query, queryOne } from './pool'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -297,6 +299,17 @@ async function main(): Promise<void> {
   await seedKeywords(workspaceId)
   await seedSources(workspaceId)
   await seedAgentState(workspaceId)
+  /*
+   * The weekly keyword rota. Seeded AFTER the brand knowledge because it creates
+   * keywords of its own, and `createKeyword` upserts on `lower(term)` — so a term
+   * already tracked keeps its operator-set weight rather than being reset here.
+   */
+  const rota = await seedKeywordSchedule(workspaceId, CONSTANT_KEYWORDS, SCHEDULE_WEEKS)
+  console.log(
+    `  keyword_schedule     ${rota.constants} constant + ${rota.rotating} rotating ` +
+      `across ${SCHEDULE_WEEKS.length} weeks (${rota.keywords} keywords)`,
+  )
+
   await seedBrandKnowledge(workspaceId)
 
   const width = Math.max(...Object.keys(counts).map((k) => k.length))

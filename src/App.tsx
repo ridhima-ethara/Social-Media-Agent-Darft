@@ -10,7 +10,6 @@
 import { useEffect } from 'react'
 import { useStore } from './store'
 import { Shell } from './components/layout'
-import { BootSequence } from './components/assistant/boot'
 import { ToastHost } from './components/ui'
 import { startWakeListener, type ListenHandle } from './lib/voice'
 
@@ -103,7 +102,6 @@ export default function App() {
         <CurrentPage />
       </Shell>
 
-      <BootSequence />
       <KnowledgeDrawer />
       <ReviewPanel />
       <PipelineTheater />

@@ -374,6 +374,42 @@ if (unrostered.length === 0) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   4a · THE WEEKLY KEYWORD ROTA
+
+   The rota is data, and data that nothing reads is decoration. These check that
+   it is coherent AND that the scraping agent actually consults it.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+section('Keyword rota')
+
+const rotaSource = readFileSync(join(ROOT, 'shared/keyword-schedule.ts'), 'utf8')
+const resolveSource = readFileSync(join(ROOT, 'server/src/agents/scraping/handlers.ts'), 'utf8')
+
+if (/export const SCHEDULE_WEEKS/.test(rotaSource) && /export const CONSTANT_KEYWORDS/.test(rotaSource)) {
+  const weeks = (rotaSource.match(/^\s*week: \d+,$/gm) ?? []).length
+  pass(`the rota declares ${weeks} week(s) and a constant set`)
+} else {
+  fail('shared/keyword-schedule.ts no longer exports SCHEDULE_WEEKS and CONSTANT_KEYWORDS')
+}
+
+// A rota the scraper does not read is a schedule that governs nothing.
+if (/keywordsForCycleWeek\(/.test(resolveSource) && /cycleWeekFor\(/.test(resolveSource)) {
+  pass('the scraping agent resolves keywords from the weekly rota')
+} else {
+  fail(
+    'server/src/agents/scraping/handlers.ts no longer calls keywordsForCycleWeek/cycleWeekFor — ' +
+      'the rota has stopped selecting keywords, so a run captures whatever weight ordering gives it',
+  )
+}
+
+// Which path a run took must be visible, or an empty week looks like a bug.
+if (/source === 'rota'/.test(resolveSource)) {
+  pass('the run reports which selection path it followed')
+} else {
+  fail('the keyword resolve no longer distinguishes the rota path in what it reports')
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    4b · THE SKILLS ARE THE SPECIFICATION
 
    CLAUDE.md: "Skills are the specification. Code implements them. Prompts point
@@ -465,6 +501,22 @@ for (const [folder, skill] of nodeSkills) {
 // though it binds when nothing reads it.
 const claimed = new Set<string>([...nodeSkills.values(), ...[...pythonSkills.values()].flat()])
 const orphanSkills = skillFolders.filter((skill) => !claimed.has(skill))
+// The Node caption path must READ the skill it declares, not merely name it. The
+// handler reimplements mechanical rules in TypeScript; the judgement rules come
+// from SKILL.md via withCaptionSpec. A regression here means captions silently
+// stop being governed by their specification.
+const captionHandler = existsSync(join(ROOT, 'server/src/agents/caption/handlers.ts'))
+  ? readFileSync(join(ROOT, 'server/src/agents/caption/handlers.ts'), 'utf8')
+  : ''
+if (/withCaptionSpec\(/.test(captionHandler)) {
+  pass('the Node caption handler injects its SKILL.md specification')
+} else {
+  fail(
+    'server/src/agents/caption/handlers.ts no longer calls withCaptionSpec — the caption ' +
+      'prompt has stopped reading caption-writing/SKILL.md, so the skill governs nothing at runtime',
+  )
+}
+
 if (orphanSkills.length === 0) {
   pass(`every skill is claimed by at least one agent — ${claimed.size} in use`)
 } else {

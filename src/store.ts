@@ -654,10 +654,15 @@ export const useStore = create<Store>((set, get) => ({
       if (error instanceof SignInRefused) throw error
     }
     const user = USERS[role]
+    // Straight to the command centre. The pre-flight screen sat between
+    // signing in and the work, and everything it offered — run the pipeline,
+    // open the approvals queue — is a door on the hub itself.
+    // Both roles land on the hub. Leadership's queue is one door away and
+    // carries its own count, so the approvals are not hidden by this.
     set({
       user,
-      page: role === 'leadership' ? 'leadership' : 'dashboard',
-      bootOpen: true,
+      page: 'dashboard',
+      bootOpen: false,
     })
     void get().connectToRuntime()
   },

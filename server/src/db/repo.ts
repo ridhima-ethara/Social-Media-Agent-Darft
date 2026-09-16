@@ -2670,3 +2670,132 @@ export async function embeddingCoverage(): Promise<
   }
   return out
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE KEYWORD SCHEDULE — a rotating rota of weeks
+
+   `shared/keyword-schedule.ts` is the declared rota; these functions are how it
+   reaches a run. The selection question a scrape asks is "what am I looking for
+   this week", and the answer is the constants plus the current week's set.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The keywords scheduled for one cycle week: every constant, plus that week's
+ * rotating set, ordered so a run that can only take N takes the intended N.
+ *
+ * Returns `[]` when nothing is scheduled — which the caller treats as a real
+ * finding and applies its fallback to, rather than as an error.
+ */
+export async function keywordsForCycleWeek(
+  workspaceId: string,
+  cycleWeek: number,
+): Promise<KeywordRow[]> {
+  return query<KeywordRow>(
+    `SELECT DISTINCT ON (k.id) k.*
+       FROM keyword_schedule s
+       JOIN keywords k ON k.id = s.keyword_id
+      WHERE s.workspace_id = $1
+        AND s.active = true
+        AND k.active = true
+        AND (s.cycle_week IS NULL OR s.cycle_week = $2)
+      ORDER BY k.id,
+               -- Constants first: they are the standing interests and must never
+               -- be the ones dropped when a run's ceiling is reached.
+               (s.cycle_week IS NULL) DESC,
+               s.slot_rank`,
+    [workspaceId, cycleWeek],
+  )
+}
+
+/** What a week is about, for reporting which rota a run followed. */
+export async function cycleWeekTopic(
+  workspaceId: string,
+  cycleWeek: number,
+): Promise<string> {
+  const row = await queryOne<{ topic: string }>(
+    `SELECT topic FROM keyword_schedule
+      WHERE workspace_id = $1 AND cycle_week = $2 AND topic <> ''
+      LIMIT 1`,
+    [workspaceId, cycleWeek],
+  )
+  return row?.topic ?? ''
+}
+
+/** How many rows the rota holds. Used by the gate and by Settings. */
+export async function keywordScheduleSize(workspaceId: string): Promise<{
+  constants: number
+  rotating: number
+  weeks: number
+}> {
+  const row = await queryOne<{ constants: string; rotating: string; weeks: string }>(
+    `SELECT
+       count(*) FILTER (WHERE cycle_week IS NULL)::text     AS constants,
+       count(*) FILTER (WHERE cycle_week IS NOT NULL)::text AS rotating,
+       count(DISTINCT cycle_week)::text                     AS weeks
+     FROM keyword_schedule WHERE workspace_id = $1`,
+    [workspaceId],
+  )
+  return {
+    constants: Number(row?.constants ?? 0),
+    rotating: Number(row?.rotating ?? 0),
+    weeks: Number(row?.weeks ?? 0),
+  }
+}
+
+/**
+ * Writes the declared rota, creating any keyword it references.
+ *
+ * Idempotent: the unique indexes make a re-seed an update rather than a second
+ * copy, so this is safe on every migrate. Keywords are upserted through
+ * `createKeyword`, which matches on `lower(term)` — so a term the operator
+ * already tracks keeps its own weight and category rather than being reset.
+ */
+export async function seedKeywordSchedule(
+  workspaceId: string,
+  constants: string[],
+  weeks: Array<{ week: number; topic: string; keywords: string[] }>,
+): Promise<{ keywords: number; constants: number; rotating: number }> {
+  const idFor = new Map<string, string>()
+
+  const ensure = async (term: string, weight: number): Promise<string | null> => {
+    const key = term.toLowerCase()
+    const known = idFor.get(key)
+    if (known !== undefined) return known
+    const row = await createKeyword(workspaceId, term, 'Core', weight)
+    if (!row) return null
+    idFor.set(key, row.id)
+    return row.id
+  }
+
+  let constantRows = 0
+  for (const [index, term] of constants.entries()) {
+    const id = await ensure(term, 90)
+    if (id === null) continue
+    await query(
+      `INSERT INTO keyword_schedule (workspace_id, keyword_id, kind, cycle_week, topic, slot_rank)
+       VALUES ($1, $2, 'constant', NULL, 'Every week', $3)
+       ON CONFLICT (workspace_id, keyword_id) WHERE cycle_week IS NULL
+       DO UPDATE SET slot_rank = EXCLUDED.slot_rank, active = true`,
+      [workspaceId, id, index + 1],
+    )
+    constantRows += 1
+  }
+
+  let rotatingRows = 0
+  for (const week of weeks) {
+    for (const [index, term] of week.keywords.entries()) {
+      const id = await ensure(term, 70)
+      if (id === null) continue
+      await query(
+        `INSERT INTO keyword_schedule (workspace_id, keyword_id, kind, cycle_week, topic, slot_rank)
+         VALUES ($1, $2, 'rotating', $3, $4, $5)
+         ON CONFLICT (workspace_id, cycle_week, keyword_id) WHERE cycle_week IS NOT NULL
+         DO UPDATE SET topic = EXCLUDED.topic, slot_rank = EXCLUDED.slot_rank, active = true`,
+        [workspaceId, id, week.week, week.topic, index + 1],
+      )
+      rotatingRows += 1
+    }
+  }
+
+  return { keywords: idFor.size, constants: constantRows, rotating: rotatingRows }
+}

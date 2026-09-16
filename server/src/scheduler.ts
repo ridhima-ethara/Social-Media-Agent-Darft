@@ -12,7 +12,7 @@ import cron, { type ScheduledTask } from 'node-cron'
 
 import { config } from './config'
 import { publishNotices, composeBrief, sweepForNotices } from './assistant/watch'
-import { buildKnowledge } from './orchestrator'
+import { buildKnowledge, runDiscoveryPipeline } from './orchestrator'
 import { currentWorkspaceId } from './db/repo'
 import { publishActivity } from './events'
 
@@ -76,6 +76,29 @@ function guard(id: string, fn: () => Promise<void>): () => Promise<void> {
 
 export function startScheduler(): RegisteredJob[] {
   const timezone = config.core.tz
+
+  /*
+   * DISCOVERY, ON A TIMER.
+   *
+   * Registered only when DISCOVERY_CRON is set: a run costs Apify credit and
+   * several minutes of crawling, so it is opted into rather than started by the
+   * act of installing the product.
+   *
+   * The keyword rota decides WHAT this captures; this decides WHEN. Keeping them
+   * separate means changing the cadence never rewrites the rota.
+   */
+  if (config.knowledge.discoveryCron !== '') {
+    register({
+      id: 'discovery.run',
+      description: 'Capture the keywords scheduled for the current rota week',
+      schedule: config.knowledge.discoveryCron,
+      timezone,
+      fn: async () => {
+        const workspaceId = await currentWorkspaceId()
+        await runDiscoveryPipeline({ workspaceId, trigger: 'cron' })
+      },
+    })
+  }
 
   register({
     id: 'knowledge.build',

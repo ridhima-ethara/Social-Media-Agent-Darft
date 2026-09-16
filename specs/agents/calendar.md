@@ -43,6 +43,7 @@ Places each idea on a date and time using an hour-weight table, spreading determ
 
 | Knob | Default | Description |
 |---|---|---|
+| `planningHorizonDays` | `14` | How many days ahead the calendar spreads ideas over. 7 plans one week; 14 plans a fortnight, which gives the cadence limits room to breathe rather than compressing every idea into five weekdays. Weekends are still skipped when "Avoid weekends" is on, so a 14-day horizon offers ten postable days. |
 | `preferredWindowStart` | `8` | The start of the posting window in local time. Nothing is scheduled before it. |
 | `preferredWindowEnd` | `18` | The end of the posting window. Nothing is scheduled after it. |
 | `avoidWeekends` | `true` | On, ideas are only placed Monday to Friday, where this audience is active. |
@@ -65,6 +66,7 @@ Spreads the week so no single day or platform carries the load, moving ideas rat
 
 | Knob | Default | Description |
 |---|---|---|
+| `avoidWeekends` | `true` | On, a post displaced from a full day skips Saturday and Sunday rather than landing on one. Declared here as well as on slot optimisation because this skill MOVES dates, and a rebalancer that ignored the rule would undo it at the first collision. |
 | `maxPerDay` | `3` | Across all platforms. Beyond this, ideas move to the next available day. |
 | `maxPerPlatformPerDay` | `1` | Two posts to the same platform on one day competes with itself. |
 | `targetPerWeek` | `3` | What a healthy week looks like. The ambient watcher flags a platform that falls below it. |

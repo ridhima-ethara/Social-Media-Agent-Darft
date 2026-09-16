@@ -7,8 +7,9 @@
 
 import type { Confidence } from '../../../../shared/agent-contract'
 import { similarity } from '../../../../shared/brand-voice'
-import { insertKnowledgeEntry, listIdeas, listKnowledge, listPosts, postBaseline, setKnowledgeActive, setKnowledgeConfidence, type KnowledgeEntryRow } from '../../db/repo'
+import { insertKnowledgeEntry, listDraftsForIdeas, listIdeas, listKnowledge, listPosts, postBaseline, setKnowledgeActive, setKnowledgeConfidence, type KnowledgeEntryRow } from '../../db/repo'
 import { confidenceRank, demoteConfidence, PLATFORM_LABEL, promoteConfidence } from '../corpus'
+import { computeReward, weightsFrom } from '../../learning/rewards'
 import { registerSkill } from '../runtime'
 import type { LearningPayload } from '../skills/index'
 
@@ -16,6 +17,120 @@ import type { LearningPayload } from '../skills/index'
 /* ═══════════════════════════════════════════════════════════════════════════
    LEARNING 1 · learning.pattern.detect
    ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<LearningPayload>('learning.reward.compute', async (_payload, ctx) => {
+  /*
+   * SCORES EVERY DECIDED POST INTO A REWARD.
+   *
+   * Slice 2 of the Agent Lightning architecture. This is the "Reward Engine" box
+   * in the diagram, and it is what makes the later RL layer possible: without a
+   * number derived from real outcomes there is nothing to optimise against.
+   *
+   * It reads only stored evidence — approvals, revisions, rejection reasons,
+   * measured metrics, and this account's own baseline. Nothing is estimated by a
+   * model, because a reward a model guessed at would train the next model on a
+   * guess.
+   */
+  const weights = weightsFrom(ctx.config)
+  const minConfidence = ctx.num('minConfidenceToLearn', 50) / 100
+
+  const ideas = await listIdeas(ctx.workspaceId, { limit: 200 })
+
+  /** A post is scoreable once a human has decided on it. */
+  const decided = ideas.filter(
+    (idea) => idea.marketing_approved_by !== null || idea.leadership_decision !== null,
+  )
+
+  if (decided.length === 0) {
+    ctx.log(
+      'No post has been approved or rejected yet, so there is no outcome to score. ' +
+        'The reward engine is registered and will score the first decision.',
+    )
+    return { rewards: [], scored: 0, learnable: 0, meanReward: null }
+  }
+
+  // Drafts carry the caption and the revision count — the human-effort signal.
+  const drafts = await listDraftsForIdeas(decided.map((i) => i.id))
+  const draftFor = new Map(drafts.map((d) => [`${d.idea_id}|${d.platform}`, d]))
+
+  // This account's own published captions, for the repetition check.
+  const published = await listPosts(ctx.workspaceId, { limit: 200 })
+  const priorBodies = published.map((p) => p.content).filter((b) => b !== '')
+
+  /*
+   * The baseline is per platform, because engagement rates are not comparable
+   * across them — a LinkedIn rate measured against an Instagram baseline would
+   * be a fabricated comparison.
+   */
+  const baselineFor = new Map<string, { avgEngagementRate: number; samples: number }>()
+  for (const platform of new Set(decided.map((i) => i.platform))) {
+    baselineFor.set(platform, await postBaseline(ctx.workspaceId, platform, 4))
+  }
+
+  const rewards = decided.map((idea) => {
+    const draft = draftFor.get(`${idea.id}|${idea.platform}`)
+    const base = baselineFor.get(idea.platform)
+    const body = draft?.body ?? ''
+
+    const reward = computeReward(
+      {
+        body,
+        revision: draft?.revision ?? 0,
+        marketingApproved: idea.marketing_approved_by !== null,
+        leadershipDecision: idea.leadership_decision as 'approved' | 'rejected' | null,
+        // `feedback` is a JSONB array of notes, not a sentence — the reason is
+        // read out of it rather than passed through as an object.
+        rejectionReason: Array.isArray(idea.feedback)
+          ? idea.feedback.map((f) => String((f as { note?: unknown }).note ?? f)).join('; ')
+          : null,
+        /*
+         * Engagement is left absent rather than zero. `post_metrics` is written
+         * only when a platform reports figures, and this tier publishes in demo
+         * mode — so there is nothing measured to score. The reward reports the
+         * exclusion instead of counting it against the post.
+         */
+        metrics: null,
+        baseline: {
+          engagementRate: base && base.samples > 0 ? base.avgEngagementRate / 100 : null,
+          clickRate: null,
+        },
+        priorBodies: priorBodies.filter((b) => b !== body),
+        topic: idea.source_topic ?? idea.title,
+      },
+      weights,
+    )
+
+    return { ideaId: idea.id, title: idea.title, platform: idea.platform, reward }
+  })
+
+  /*
+   * A reward computed from too little evidence is noise, and batching it into an
+   * optimisation run would teach the model from posts nobody has judged. Those
+   * are recorded but withheld — the architecture's "batch experiences" step needs
+   * a quality floor or it trains on its own uncertainty.
+   */
+  const learnable = rewards.filter((r) => r.reward.confidence >= minConfidence)
+
+  for (const row of learnable.slice(0, 5)) {
+    ctx.log(`${row.title.slice(0, 48)} — ${row.reward.summary}`)
+  }
+  if (rewards.length > learnable.length) {
+    ctx.log(
+      `${rewards.length - learnable.length} outcome(s) scored below the ` +
+        `${Math.round(minConfidence * 100)}% evidence floor and are held back from optimisation.`,
+    )
+  }
+
+  return {
+    rewards,
+    scored: rewards.length,
+    learnable: learnable.length,
+    meanReward:
+      learnable.length === 0
+        ? null
+        : Number((learnable.reduce((s, r) => s + r.reward.total, 0) / learnable.length).toFixed(4)),
+  }
+})
 
 registerSkill<LearningPayload>('learning.pattern.detect', async (_payload, ctx) => {
   const minOccurrences = ctx.num('minOccurrences', 2)

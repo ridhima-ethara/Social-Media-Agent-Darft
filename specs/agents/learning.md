@@ -10,12 +10,25 @@
 - **Id**: `learning`
 - **Stage**: `learn`
 - **Hands off to**: `knowledge`
-- **Skills**: 4
+- **Skills**: 5
 - **Handlers**: `server/src/agents/learning/handlers.ts`
 
 Detects patterns across human edit instructions and post outcomes, writes them back to the Knowledge Base, raises confidence after repeated confirmations and lowers it after contradictions. The demotion path is implemented, not optional.
 
 ## Skills
+
+### `learning.reward.compute`
+
+Turns a finished post into a reward an optimiser can learn from, over five components: human approval, brand alignment, content quality, engagement and click-through. A component with no evidence is excluded rather than scored zero, and the result reports how much of the weight could actually be measured.
+
+| Knob | Default | Description |
+|---|---|---|
+| `humanApprovalWeight` | `40` | Share of the reward carried by the two-stage approval outcome. The strongest signal the product has, and the only one that reflects a judgement rather than a measurement — which is why it is weighted highest by default. |
+| `brandAlignmentWeight` | `20` | Share carried by how little the brand-voice enforcer had to change. Computed from the rules that actually fired, never estimated by a model. |
+| `contentQualityWeight` | `15` | Share carried by structural compliance and novelty — hashtag range, the zero-emoji budget, and similarity to captions this account has already published. |
+| `engagementWeight` | `15` | Share carried by measured engagement against this account’s own trailing baseline. Excluded entirely until the platform reports figures, so an unpublished post is never scored as a poor one. |
+| `clickThroughWeight` | `10` | Share carried by click rate against this account’s own baseline. Excluded when no click figures were reported. |
+| `minConfidenceToLearn` | `50` | A reward computed from too little evidence is noise. Below this share of the total weight the outcome is recorded but withheld from optimisation, so a batch is not trained on posts nobody has judged or measured yet. |
 
 ### `learning.pattern.detect`
 

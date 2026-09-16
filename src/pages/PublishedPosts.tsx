@@ -6,7 +6,7 @@
  * reported yet is shown as `—`, never as zero.
  */
 
-import { useMemo, useState } from 'react'
+import { Suspense, lazy, useMemo, useState } from 'react'
 import { Sparkles } from 'lucide-react'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
@@ -26,7 +26,12 @@ import {
 } from '../components/ui'
 import type { Platform, PublishedPost } from '../types'
 
+/* Loaded only when the Graphs tab is opened. This is the app's single entry
+   point to Recharts, and it is heavy enough to keep off the first paint. */
+const PublishedGraphs = lazy(() => import('../components/published-graphs'))
+
 const PLATFORMS: Platform[] = ['linkedin', 'instagram', 'x', 'facebook']
+
 
 export function PublishedPosts() {
   const published = useStore((s) => s.published)
@@ -34,9 +39,45 @@ export function PublishedPosts() {
   const addKnowledge = useStore((s) => s.addKnowledge)
 
   const [platform, setPlatform] = useState<Platform>('linkedin')
+  const [view, setView] = useState<'records' | 'charts'>('records')
   const [detail, setDetail] = useState<PublishedPost | null>(null)
 
   const rows = published.filter((post) => post.platform === platform)
+
+  /*
+   * THE CHART SERIES ARE BUILT FROM REPORTED READINGS ONLY.
+   *
+   * A post whose metrics have never come back is not a zero — it is absent.
+   * Plotting it at zero would invent a flat reading the platform never made,
+   * and would drag every average down with it. Each series therefore keeps
+   * only the posts that carry that particular figure, and says how many it
+   * left out.
+   */
+  const charts = useMemo(() => {
+    const dated = [...rows]
+      .filter((post) => post.published_at !== null)
+      .sort((a, b) => String(a.published_at).localeCompare(String(b.published_at)))
+    const label = (post: PublishedPost) => formatDate(String(post.published_at))
+
+    const reach = dated
+      .filter((post) => post.reach !== null || post.impressions !== null)
+      .map((post) => ({ label: label(post), Reach: post.reach ?? 0, Impressions: post.impressions ?? 0 }))
+    const interactions = dated
+      .filter((post) => post.likes !== null || post.comments !== null || post.shares !== null)
+      .map((post) => ({ label: label(post), Likes: post.likes ?? 0, Comments: post.comments ?? 0, Shares: post.shares ?? 0 }))
+    const engagement = dated
+      .filter((post) => post.engagement_rate !== null)
+      .map((post) => ({ label: label(post), Rate: Number(post.engagement_rate) }))
+
+    return {
+      reach,
+      interactions,
+      engagement,
+      missingReach: rows.length - reach.length,
+      missingInteractions: rows.length - interactions.length,
+      missingEngagement: rows.length - engagement.length,
+    }
+  }, [rows])
 
   const stats = useMemo(() => {
     const reach = rows.reduce((sum, p) => sum + (p.reach ?? 0), 0)
@@ -133,6 +174,27 @@ export function PublishedPosts() {
         })}
       </section>
 
+      {/* Two ways to read the same posts: the record as it arrived, and the
+          shape of it. Neither adds a figure the other does not have. */}
+      <div className="mb-4 flex justify-center">
+        <div role="tablist" aria-label="How to view the published posts" className="flex gap-0.5 rounded-lg border border-line-strong p-0.5">
+          {([['records', 'Records'], ['charts', 'Graphs']] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={view === id}
+              onClick={() => setView(id)}
+              className={`rounded-[6px] px-3.5 py-1.5 text-[11.5px] transition-colors ${
+                view === id ? 'bg-accent text-on-accent' : 'text-ink-3 hover:text-ink'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* ── Expanded platform panel ───────────────────────────────────── */}
       <section className="card anim-fade-up mb-4 overflow-hidden">
         <span className="block h-1" style={{ background: PLATFORM_TOKEN[platform] }} aria-hidden="true" />
@@ -159,80 +221,94 @@ export function PublishedPosts() {
         ) : null}
       </section>
 
-      {/* ── Table ─────────────────────────────────────────────────────── */}
-      <div className="card overflow-x-auto">
-        <table className="w-full min-w-[900px] text-left text-[12px]">
-          <thead>
-            <tr className="border-b border-line text-[10px] uppercase tracking-[0.08em] text-ink-3">
-              <th className="px-4 py-2 font-medium">Post</th>
-              <th className="px-3 py-2 font-medium">Platform</th>
-              <th className="px-3 py-2 font-medium">Published</th>
-              <th className="px-3 py-2 font-medium">Reach</th>
-              <th className="px-3 py-2 font-medium">Impressions</th>
-              <th className="px-3 py-2 font-medium">Likes</th>
-              <th className="px-3 py-2 font-medium">Comments</th>
-              <th className="px-3 py-2 font-medium">Shares</th>
-              <th className="px-3 py-2 font-medium">Eng. rate</th>
-              <th className="px-3 py-2" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((post) => {
-              const rate = post.engagement_rate === null ? null : Number(post.engagement_rate)
-              return (
-                <tr
-                  key={post.id}
-                  onClick={() => setDetail(post)}
-                  className="cursor-pointer border-b border-line/60 transition-colors last:border-0 hover:bg-surface-2"
-                >
-                  <td className="max-w-[300px] truncate px-4 py-2 font-medium text-ink">{post.title}</td>
-                  <td className="px-3 py-2">
-                    <PlatformIcon platform={post.platform} size={13} />
-                  </td>
-                  <td className="tabular px-3 py-2 text-ink-3">{formatDate(post.published_at)}</td>
-                  <td className="tabular px-3 py-2 text-ink-2">{post.reach === null ? '—' : fmt(post.reach)}</td>
-                  <td className="tabular px-3 py-2 text-ink-2">{post.impressions === null ? '—' : fmt(post.impressions)}</td>
-                  <td className="tabular px-3 py-2 text-ink-2">{post.likes === null ? '—' : fmt(post.likes)}</td>
-                  <td className="tabular px-3 py-2 text-ink-2">{post.comments === null ? '—' : fmt(post.comments)}</td>
-                  <td className="tabular px-3 py-2 text-ink-2">{post.shares === null ? '—' : fmt(post.shares)}</td>
-                  <td className="px-3 py-2">
-                    {rate === null ? (
-                      <span className="text-ink-3">—</span>
-                    ) : (
-                      <span className={`tabular font-semibold ${rate >= 6 ? 'text-good-ink' : 'text-ink-2'}`}>
-                        {rate.toFixed(2)}%
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
-                    <div className="flex items-center justify-end gap-1">
-                      <button
-                        type="button"
-                        title="Ask Ethara why"
-                        aria-label={`Ask Ethara why ${post.title} performed the way it did`}
-                        onClick={() => openBar(`Why did '${post.title}' perform the way it did?`)}
-                        className="rounded-md border border-line p-1.5 text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-                      >
-                        <Sparkles size={13} />
-                      </button>
-                      <DownloadMenu
-                        compact
-                        options={[
-                          {
-                            id: 'single',
-                            label: 'This post',
-                            onSelect: (format) => exportSinglePost(post, format),
-                          },
-                        ]}
-                      />
-                    </div>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
+      {view === 'records' ? (
+        <>
+        {/* ── Table ─────────────────────────────────────────────────────── */}
+        <div className="card overflow-x-auto">
+          <table className="w-full min-w-[900px] text-left text-[12px]">
+            <thead>
+              <tr className="border-b border-line text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                <th className="px-4 py-2 font-medium">Post</th>
+                <th className="px-3 py-2 font-medium">Platform</th>
+                <th className="px-3 py-2 font-medium">Published</th>
+                <th className="px-3 py-2 font-medium">Reach</th>
+                <th className="px-3 py-2 font-medium">Impressions</th>
+                <th className="px-3 py-2 font-medium">Likes</th>
+                <th className="px-3 py-2 font-medium">Comments</th>
+                <th className="px-3 py-2 font-medium">Shares</th>
+                <th className="px-3 py-2 font-medium">Eng. rate</th>
+                <th className="px-3 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((post) => {
+                const rate = post.engagement_rate === null ? null : Number(post.engagement_rate)
+                return (
+                  <tr
+                    key={post.id}
+                    onClick={() => setDetail(post)}
+                    className="cursor-pointer border-b border-line/60 transition-colors last:border-0 hover:bg-surface-2"
+                  >
+                    <td className="max-w-[300px] truncate px-4 py-2 font-medium text-ink">{post.title}</td>
+                    <td className="px-3 py-2">
+                      <PlatformIcon platform={post.platform} size={13} />
+                    </td>
+                    <td className="tabular px-3 py-2 text-ink-3">{formatDate(post.published_at)}</td>
+                    <td className="tabular px-3 py-2 text-ink-2">{post.reach === null ? '—' : fmt(post.reach)}</td>
+                    <td className="tabular px-3 py-2 text-ink-2">{post.impressions === null ? '—' : fmt(post.impressions)}</td>
+                    <td className="tabular px-3 py-2 text-ink-2">{post.likes === null ? '—' : fmt(post.likes)}</td>
+                    <td className="tabular px-3 py-2 text-ink-2">{post.comments === null ? '—' : fmt(post.comments)}</td>
+                    <td className="tabular px-3 py-2 text-ink-2">{post.shares === null ? '—' : fmt(post.shares)}</td>
+                    <td className="px-3 py-2">
+                      {rate === null ? (
+                        <span className="text-ink-3">—</span>
+                      ) : (
+                        <span className={`tabular font-semibold ${rate >= 6 ? 'text-good-ink' : 'text-ink-2'}`}>
+                          {rate.toFixed(2)}%
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          type="button"
+                          title="Ask Ethara why"
+                          aria-label={`Ask Ethara why ${post.title} performed the way it did`}
+                          onClick={() => openBar(`Why did '${post.title}' perform the way it did?`)}
+                          className="rounded-md border border-line p-1.5 text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+                        >
+                          <Sparkles size={13} />
+                        </button>
+                        <DownloadMenu
+                          compact
+                          options={[
+                            {
+                              id: 'single',
+                              label: 'This post',
+                              onSelect: (format) => exportSinglePost(post, format),
+                            },
+                          ]}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        </>
+      ) : (
+        <Suspense
+          fallback={
+            <p className="mono py-16 text-center text-[11px] uppercase tracking-[0.1em] text-ink-3">
+              Drawing the graphs…
+            </p>
+          }
+        >
+          <PublishedGraphs charts={charts} platform={platform} total={rows.length} />
+        </Suspense>
+      )}
 
       {/* ── Detail modal ──────────────────────────────────────────────── */}
       <Modal

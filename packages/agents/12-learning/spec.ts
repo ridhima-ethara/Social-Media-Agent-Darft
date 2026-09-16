@@ -42,6 +42,9 @@ export const spec: AgentSpec = {
 
 /** The runtime skills this agent executes, in order. Storage keys — never renamed. */
 export const SKILLS = [
+  // Scores a finished post into a reward the optimiser learns from. First in
+  // order because pattern detection reads the scores it produces.
+  'learning.reward.compute',
   'learning.pattern.detect',
   'learning.knowledge.write',
   'learning.confidence.promote',

@@ -6,9 +6,17 @@
  * human shapes what the agents wrote.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, ArrowRight, Check, ChevronLeft, ExternalLink, FileText, Paperclip, RefreshCw, Send, Sparkles, X } from 'lucide-react'
 import { useStore } from '../store'
+
+/* The preview column is draggable. The bounds keep it useful at both ends: a
+   narrower column stops showing a post at a believable width, and a wider one
+   starves the editor it sits beside. The chosen width outlives the dialog. */
+const PREVIEW_MIN = 320
+const PREVIEW_MAX = 760
+const PREVIEW_DEFAULT = 392
+const PREVIEW_KEY = 'ethara.review.previewWidth'
 import { ModelMenu } from '../components/model-menu'
 import { DEFAULT_CROP, PREVIEW_CROPS, PlatformPreview, type PreviewCrop } from '../components/previews'
 import { AssistantCore } from '../components/assistant/core'
@@ -212,6 +220,47 @@ export function ReviewPanel() {
   const [view, setView] = useState<'edit' | 'preview' | 'diff'>('edit')
   /** The feed crop the preview shows the creative in. Null means the platform's own. */
   const [cropChoice, setCropChoice] = useState<PreviewCrop | null>(null)
+  /** The left column, folded sideways. Open by default: it answers "why". */
+  const [whyOpen, setWhyOpen] = useState(true)
+
+  /* ── the draggable preview column ── */
+  const [previewWidth, setPreviewWidth] = useState(() => {
+    if (typeof window === 'undefined') return PREVIEW_DEFAULT
+    const stored = Number(window.localStorage.getItem(PREVIEW_KEY))
+    return Number.isFinite(stored) && stored >= PREVIEW_MIN && stored <= PREVIEW_MAX ? stored : PREVIEW_DEFAULT
+  })
+  const [resizing, setResizing] = useState(false)
+  const resizeFrom = useRef<{ x: number; width: number } | null>(null)
+  const clampPreview = (width: number) => Math.min(PREVIEW_MAX, Math.max(PREVIEW_MIN, Math.round(width)))
+
+  useEffect(() => {
+    /* Storage throws in private mode; a preference is not worth a crash. */
+    try { window.localStorage.setItem(PREVIEW_KEY, String(previewWidth)) } catch { /* ignored */ }
+  }, [previewWidth])
+
+  const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    resizeFrom.current = { x: event.clientX, width: previewWidth }
+    setResizing(true)
+  }
+  const moveResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    const from = resizeFrom.current
+    if (!from) return
+    /* The handle is on the column's left edge, so dragging left widens it. */
+    setPreviewWidth(clampPreview(from.width - (event.clientX - from.x)))
+  }
+  const endResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!resizeFrom.current) return
+    resizeFrom.current = null
+    setResizing(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+  const keyResize = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    setPreviewWidth((width) => clampPreview(width + (event.key === 'ArrowLeft' ? 24 : -24)))
+  }
   const [restorePoint, setRestorePoint] = useState<string | null>(null)
 
   const draft = idea ? drafts[`${idea.id}|${idea.platform}`] : undefined
@@ -452,10 +501,47 @@ export function ReviewPanel() {
         </div>
       }
     >
-      <div className="grid h-full min-h-0 grid-cols-1 overflow-y-auto lg:grid-cols-[236px_minmax(0,1fr)_392px] lg:overflow-hidden">
+      {/* A flex row, not a grid: the rail animates its own width and the
+          centre takes what is left, which a fixed grid template cannot do. */}
+      <div className="flex h-full min-h-0 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
 
-        {/* ── LEFT · why this exists ──────────────────────────────────── */}
-        <aside className="flex min-h-0 flex-col overflow-y-auto border-r border-line bg-surface-2">
+        {/* ── LEFT · why this exists ────────────────────────────────────
+            The column folds sideways to a rail rather than each section
+            folding down: folding down left three truncated headings
+            ("WHY WEDN…") and still took the width. */}
+        <aside
+          className="relative flex min-h-0 flex-col border-r border-line bg-surface-2 transition-[width] duration-[var(--dur-base)] ease-[var(--ease-out-soft)] lg:overflow-hidden"
+          style={{ width: whyOpen ? 236 : 40 }}
+          aria-label="Why this post exists"
+        >
+          <button
+            type="button"
+            onClick={() => setWhyOpen((v) => !v)}
+            aria-expanded={whyOpen}
+            title={whyOpen ? 'Collapse this column' : 'Expand this column'}
+            className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2.5 text-ink-3 transition-colors hover:text-ink"
+          >
+            <ChevronLeft
+              size={12}
+              aria-hidden="true"
+              className="shrink-0"
+              style={{ transform: whyOpen ? 'none' : 'rotate(180deg)', transition: 'transform var(--dur-base) var(--ease-out-soft)' }}
+            />
+            {whyOpen ? <span className="mono truncate text-[9px] uppercase tracking-[0.12em]">Why</span> : null}
+          </button>
+
+          {/* Collapsed, the column says what it is, read bottom-up. */}
+          {whyOpen ? null : (
+            <span
+              className="mono flex flex-1 items-center justify-center whitespace-nowrap text-[9px] uppercase tracking-[0.18em] text-ink-3"
+              style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
+              aria-hidden="true"
+            >
+              Why this post exists
+            </span>
+          )}
+
+          <div className="min-h-0 flex-1 overflow-y-auto" style={{ display: whyOpen ? undefined : 'none' }}>
           <div className="border-b border-line px-3.5 py-3">
             <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">WHY THIS POST EXISTS</p>
             <p className="mt-1.5 text-[12px] leading-relaxed text-ink-2">
@@ -472,7 +558,7 @@ export function ReviewPanel() {
 
           <div className="border-b border-line px-3.5 py-3">
             <div className="flex items-center gap-2">
-              <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">
+              <p className="mono min-w-0 flex-1 text-[10.5px] tracking-[0.14em] text-ink-3">
                 WHY {new Date(idea.scheduled_date).toLocaleDateString('en-GB', { weekday: 'long' }).toUpperCase()} {idea.scheduled_time}
               </p>
               <Select
@@ -482,7 +568,6 @@ export function ReviewPanel() {
                 ariaLabel="Posting time"
                 mono
                 size="xs"
-                className="ml-auto"
               />
             </div>
             {slotReasons.length > 0 ? (
@@ -533,10 +618,12 @@ export function ReviewPanel() {
               )}
             </div>
           </div>
+          </div>
         </aside>
 
-        {/* ── CENTRE · edit against the preview ───────────────────────── */}
-        <div className="flex min-h-0 min-w-0 flex-col">
+        {/* ── CENTRE · edit against the preview ─────────────────────────
+            Takes whatever the rail gives back. */}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-2.5">
             <div className="flex gap-0.5 rounded-md border border-line-strong p-0.5">
               {(['edit', 'preview', 'diff'] as const).map((v) => (
@@ -703,7 +790,36 @@ export function ReviewPanel() {
         </div>
 
         {/* ── RIGHT · the agent, and the revision spine ───────────────── */}
-        <aside className="flex min-h-0 flex-col overflow-hidden border-l border-line bg-surface-2">
+        <aside
+          className="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line bg-surface-2 lg:w-[var(--preview-w)]"
+          style={{ ['--preview-w' as string]: `${previewWidth}px` }}
+        >
+          {/* Drag the edge to resize. Arrow keys do the same for anyone who
+              cannot drag, which is why this is a focusable separator rather
+              than a bare div with a cursor. */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize the preview column"
+            aria-valuenow={previewWidth}
+            aria-valuemin={PREVIEW_MIN}
+            aria-valuemax={PREVIEW_MAX}
+            tabIndex={0}
+            onPointerDown={startResize}
+            onPointerMove={moveResize}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+            onKeyDown={keyResize}
+            title="Drag to resize · arrow keys also work"
+            className="group absolute inset-y-0 left-0 z-20 hidden w-2 cursor-col-resize outline-none lg:block"
+          >
+            <span
+              className={`absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 transition-colors ${
+                resizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent group-focus-visible:bg-accent'
+              }`}
+              aria-hidden="true"
+            />
+          </div>
           <div className="flex shrink-0 items-center gap-2.5 border-b border-line px-3.5 py-3">
             <AssistantCore state={thinking ? 'thinking' : 'dormant'} size={22} className="shrink-0" />
             <div className="min-w-0 flex-1">
@@ -1068,6 +1184,7 @@ function ReferenceField({ idea }: { idea: Idea }) {
     </div>
   )
 }
+
 
 
 /**

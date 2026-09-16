@@ -22,6 +22,7 @@ import {
 } from '../../integrations'
 import { listKnowledge } from '../../db/repo'
 import { clampChars, clampWords, PLATFORM_LABEL, similarity } from '../corpus'
+import { withCaptionSpec } from '../skills/skill-spec'
 import { registerSkill } from '../runtime'
 import { retrieveKnowledge, toGroundingEntry } from '../knowledge/handlers'
 import type { CaptionPayload, GroundingEntry } from '../skills/index'
@@ -176,7 +177,7 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
     Observation: 'Report the specific change you have observed, with its subject named.',
   }
 
-  const systemInstruction = [
+  const systemInstructionRaw = [
     payload.voiceInstruction ?? '',
     HUMAN_VOICE,
     grounding.length > 0
@@ -185,6 +186,7 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
   ]
     .filter(Boolean)
     .join('\n\n')
+  const systemInstruction = withCaptionSpec(systemInstructionRaw)
 
   const prompt = [
     `Write ONLY the first line of a ${PLATFORM_LABEL[payload.platform]} post about ${topic}.`,
@@ -276,7 +278,7 @@ registerSkill<CaptionPayload>('generation.caption.problem', async (payload, ctx)
    * The template is kept as the fallback, so an unreachable model still produces
    * a complete post — labelled, as every degraded path is.
    */
-  const systemInstruction = [
+  const systemInstructionRaw = [
     payload.voiceInstruction ?? '',
     HUMAN_VOICE,
     grounding.length > 0
@@ -285,6 +287,7 @@ registerSkill<CaptionPayload>('generation.caption.problem', async (payload, ctx)
   ]
     .filter(Boolean)
     .join('\n\n')
+  const systemInstruction = withCaptionSpec(systemInstructionRaw)
 
   const prompt = [
     `Write the problem section of a ${PLATFORM_LABEL[payload.platform]} post about ${payload.sourceTopic}.`,
@@ -408,7 +411,7 @@ registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, 
   const citeGrounding = ctx.bool('citeGrounding', true)
 
   const grounding = payload.grounding ?? []
-  const systemInstruction = [
+  const systemInstructionRaw = [
     payload.voiceInstruction ?? '',
     // The declared per-platform difference. Without it the same finding came
     // back as near-identical copy on all four channels.
@@ -422,6 +425,7 @@ registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, 
   ]
     .filter(Boolean)
     .join('\n\n')
+  const systemInstruction = withCaptionSpec(systemInstructionRaw)
 
   const prompt = [
     `Write the mechanism section of a ${payload.writingMode ?? 'Long-form'} ${PLATFORM_LABEL[payload.platform]} post.`,
@@ -526,7 +530,8 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
 
   const wantsQuestion = closeStyle === 'Open question'
 
-  const systemInstruction = [payload.voiceInstruction ?? '', HUMAN_VOICE].filter(Boolean).join('\n\n')
+  const systemInstructionRaw = [payload.voiceInstruction ?? '', HUMAN_VOICE].filter(Boolean).join('\n\n')
+  const systemInstruction = withCaptionSpec(systemInstructionRaw)
 
   const prompt = [
     `Write ONLY the closing line of a ${PLATFORM_LABEL[payload.platform]} post about ${payload.sourceTopic}.`,

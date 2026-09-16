@@ -272,6 +272,14 @@ export const config = {
   /* ── Knowledge build schedule ───────────────────────────────────────────── */
   knowledge: {
     /** Sunday 06:00 in TZ. */
+    get discoveryCron(): string {
+      /*
+       * Blank means NOT SCHEDULED, deliberately. A discovery run costs Apify
+       * credit and several minutes of crawling, so it must be opted into rather
+       * than started by the act of installing the product.
+       */
+      return str('DISCOVERY_CRON')
+    },
     get buildCron(): string {
       return str('KNOWLEDGE_BUILD_CRON', '0 6 * * 0')
     },

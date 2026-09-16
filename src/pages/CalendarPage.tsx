@@ -12,14 +12,24 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { useStore } from '../store'
 import { CalendarAssistant } from '../components/assistant/calendar-assistant'
 import { PlatformIcon, PLATFORM_LABEL, PLATFORM_TOKEN } from '../components/ui'
+import { BackToHub } from '../components/layout'
 import type { Idea, IdeaStatus, Platform } from '../types'
 
 const PLATFORMS: Platform[] = ['linkedin', 'instagram', 'x', 'facebook']
 const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'
+/**
+ * How many suggestions a platform column shows before it scrolls.
+ *
+ * Five, matching the five calendar slots per platform: a column that shows
+ * exactly as many candidates as there are slots reads as "these are the ones
+ * that could go up next". Nothing is removed from the list — the rest scroll.
+ */
+const SUGGESTION_ROWS = 5
+
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /* ── Dates: local calendar days, never UTC midnight ─────────────────────── */
@@ -55,35 +65,12 @@ function clock(time: string): string {
   return `${String(hour).padStart(2, '0')}:${match[2]}`
 }
 
-/* ── Card size: one slider, remembered ─────────────────────────────────── */
-
-const WIDTH_KEY = 'ethara.calendar.cardWidth'
-const MIN_WIDTH = 120
-const MAX_WIDTH = 320
-const DEFAULT_WIDTH = 150
-
-function readWidth(): number {
-  try {
-    const stored = Number(localStorage.getItem(WIDTH_KEY))
-    return Number.isFinite(stored) && stored >= MIN_WIDTH && stored <= MAX_WIDTH ? stored : DEFAULT_WIDTH
-  } catch {
-    return DEFAULT_WIDTH
-  }
-}
 
 /**
  * What a card shows at a given width. Narrow cards drop the creative and
  * keep two lines of hook; wide ones show five lines and a taller creative.
  * The width is the one control; everything else follows from it.
  */
-function cardShape(width: number): { hookLines: string; hookText: string; thumb: number; showAngle: boolean } {
-  return {
-    hookLines: width < 150 ? 'line-clamp-2' : width < 190 ? 'line-clamp-4' : 'line-clamp-5',
-    hookText: width < 150 ? 'text-[12px]' : width < 200 ? 'text-[13px]' : 'text-[14px]',
-    thumb: width < 150 ? 0 : width < 200 ? 84 : Math.round(width * 0.58),
-    showAngle: width >= 140,
-  }
-}
 
 /* ── Drag to reschedule ────────────────────────────────────────────────── */
 
@@ -165,17 +152,11 @@ export function CalendarPage() {
   const [askOpen, setAskOpen] = useState(false)
   const gridRef = useRef<HTMLDivElement | null>(null)
   const moveIdea = useStore((s) => s.moveIdea)
+  const deleteIdea = useStore((s) => s.deleteIdea)
 
   /* ── Card size ────────────────────────────────────────────────────── */
-  const [cardWidth, setCardWidth] = useState(readWidth)
-  const shape = cardShape(cardWidth)
-  useEffect(() => {
-    try {
-      localStorage.setItem(WIDTH_KEY, String(cardWidth))
-    } catch {
-      // Not remembering the size is acceptable; the slider still works.
-    }
-  }, [cardWidth])
+  /** So a day with room can point at the only place a post reaches a slot. */
+  const queueRef = useRef<HTMLElement | null>(null)
 
   /*
    * ── Drag to reschedule ────────────────────────────────────────────────
@@ -293,31 +274,21 @@ export function CalendarPage() {
       : `${label(weekStart)} ${monthOf(weekStart)}–${label(addDays(weekStart, 6))} ${monthOf(addDays(weekStart, 6))}`
 
 
+  /*
+   * The page grows with its content and `main` scrolls it. Inner scrollers
+   * here trapped the height: the week section held `flex-1 overflow-auto`, so
+   * it consumed the viewport, never grew, and the suggestions beneath it
+   * could not be reached by scrolling the page.
+   */
   return (
     <div className="-mx-6 -mt-5 -mb-5 flex min-h-[calc(100vh-56px)] flex-col">
       {/* ── Command bar ─────────────────────────────────────────────────── */}
       <header className="glass relative z-20 flex min-h-[58px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
-        <h1 className="whitespace-nowrap text-[20px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
-        <span className="inline-flex items-center gap-[7px] whitespace-nowrap rounded-md border border-line-strong px-[9px] py-1 text-[11px] tracking-[0.1em] text-ink-3">
-          TOP {cap} PER PLATFORM
-        </span>
+        <div className="min-w-0">
+          <BackToHub className="!mb-0.5" />
+          <h1 className="whitespace-nowrap text-[20px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
+        </div>
         <div className="ml-auto flex items-center gap-2">
-          {/* The cards' size, as one slider. Everything a card shows follows
-              from its width — see `cardShape`. */}
-          <label className="flex items-center gap-2 rounded-md border border-line-strong px-2.5 py-[5px] text-[10.5px] text-ink-3">
-            <span className="whitespace-nowrap">Card size</span>
-            <input
-              type="range"
-              min={MIN_WIDTH}
-              max={MAX_WIDTH}
-              step={10}
-              value={cardWidth}
-              onChange={(event) => setCardWidth(Number(event.target.value))}
-              aria-label="Card size"
-              aria-valuetext={`${cardWidth} pixels wide`}
-              className="eth-range w-24"
-            />
-          </label>
           <div className="flex items-center overflow-hidden rounded-md border border-line-strong">
             <button type="button" onClick={() => setWeekOffset(weekOffset - 1)} aria-label="Previous week" className="px-[9px] py-[5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink">
               <ChevronLeft size={13} />
@@ -375,10 +346,9 @@ export function CalendarPage() {
        * width the queue stacks under a full-width week instead: the whole week
        * is visible without scrolling, and the queue is one scroll away.
        */}
-      <div className="flex min-h-0 flex-1 flex-col 2xl:flex-row">
-        <section
-          className="relative min-w-0 flex-1 overflow-auto border-b border-line px-[14px] py-3.5 2xl:border-b-0 2xl:border-r"
-        >
+      <div className="flex flex-1 flex-col">
+        <section className="relative min-w-0 px-[18px] pb-3.5 pt-3.5">
+          <div className="glass-panel rounded-[18px] px-4 py-3.5">
           <div className="relative z-10 mb-2.5 flex items-center gap-2.5">
             <h2 className="text-[13.5px] font-semibold tracking-[-0.015em] text-ink">
               {totalPlaced} slot{totalPlaced === 1 ? '' : 's'} placed
@@ -398,83 +368,78 @@ export function CalendarPage() {
            * calendar a person has used does. The floor is what stopped a title
            * from becoming a tower of single words at 1440px and below.
            */}
-          <div
-            ref={gridRef}
-            className="grid items-start gap-2"
-            style={{ gridTemplateColumns: `repeat(7, minmax(${cardWidth}px, 1fr))` }}
-          >
-              {days.map((day, i) => {
-                const iso = isoDate(day)
-                const dayIdeas = primary
-                  .filter((idea) => idea.scheduled_date === iso)
-                  .sort((a, b) => timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
-                const isToday = iso === todayIso
-                const platformsToday = [...new Set(dayIdeas.map((idea) => idea.platform))]
-                const isDropTarget = drag !== null && drag.overIso === iso && drag.idea.scheduled_date !== iso
-                return (
-                  <div
-                    key={iso}
-                    data-day={iso}
-                    // Today is a lit column, not just a label — the eye finds it
-                    // from anywhere on the grid. A column under a dragged card
-                    // lights the same way, brighter, so the drop reads before it lands.
-                    className={`flex min-w-0 flex-col gap-2 rounded-[12px] px-1 pb-1 transition-[background-color,box-shadow] duration-[var(--dur-fast)] ${
-                      isDropTarget
-                        ? 'bg-accent/[0.12] ring-2 ring-accent/60'
-                        : isToday
-                          ? 'bg-accent/[0.06] ring-1 ring-accent/25'
-                          : drag !== null
-                            ? 'ring-1 ring-line-strong'
-                            : ''
-                    }`}
-                    style={{ animation: `eth-rise 420ms ${EASE} ${120 + i * 50}ms both` }}
+          <div ref={gridRef} className="grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7">
+            {days.map((day, i) => {
+              const iso = isoDate(day)
+              const dayIdeas = primary
+                .filter((idea) => idea.scheduled_date === iso)
+                .sort((a, b) => timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
+              const isToday = iso === todayIso
+              const isDropTarget = drag !== null && drag.overIso === iso && drag.idea.scheduled_date !== iso
+              return (
+                <div
+                  key={iso}
+                  data-day={iso}
+                  /* Today is a lit column and a dragged card lights the one
+                     under it, brighter — the drop reads before it lands. */
+                  className={`flex min-w-0 flex-col gap-[7px] rounded-[13px] p-1.5 transition-[background-color,box-shadow] duration-[var(--dur-fast)] ${
+                    isDropTarget
+                      ? 'bg-accent/[0.14] ring-2 ring-accent/60'
+                      : isToday
+                        ? 'bg-accent/[0.08] ring-1 ring-accent/35'
+                        : drag !== null
+                          ? 'ring-1 ring-line'
+                          : ''
+                  }`}
+                  style={{ animation: `eth-rise 420ms ${EASE} ${120 + i * 50}ms both` }}
+                >
+                  <header className="flex items-baseline gap-[5px] px-0.5">
+                    <span className={`mono text-[8px] uppercase ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}>
+                      {day.toLocaleDateString('en-GB', { weekday: 'short' })}
+                    </span>
+                    <span className="text-[13px] font-bold text-ink">{day.getDate()}</span>
+                    <span className="flex-1" />
+                    {isToday ? (
+                      <span className="mono rounded-[5px] bg-accent px-1.5 py-px text-[7px] uppercase tracking-[0.08em] text-on-accent">today</span>
+                    ) : (
+                      <span className="mono text-[7.5px] uppercase text-ink-3">
+                        {dayIdeas.length === 0 ? '—' : `${dayIdeas.length} post${dayIdeas.length === 1 ? '' : 's'}`}
+                      </span>
+                    )}
+                  </header>
+
+                  {dayIdeas.map((idea) => (
+                    <SlotCard
+                      key={idea.id}
+                      idea={idea}
+                      dragging={drag?.idea.id === idea.id}
+                      landed={justMoved === idea.id}
+                      onOpen={() => openReview(idea.id)}
+                      onDrag={onCardDrag}
+                      onWithdraw={() => void deleteIdea(idea.id)}
+                    />
+                  ))}
+
+                  {/* A day with room. It says where a dragged card would land,
+                      and otherwise points at the queue — which is the only way
+                      a post actually reaches a slot. */}
+                  <button
+                    type="button"
+                    onClick={() => queueRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                    className={`mono rounded-[9px] border border-dashed py-[7px] text-center text-[7.5px] uppercase tracking-[0.08em] transition-colors duration-[var(--dur-fast)] ${
+                      isDropTarget ? 'border-accent text-accent-bright' : 'border-line-strong text-ink-3 hover:border-accent hover:text-accent-bright'
+                    } ${dayIdeas.length === 0 ? 'py-[22px]' : ''}`}
                   >
-                    <header className="px-1 pt-1">
-                      <div className="flex items-baseline gap-1.5">
-                        <span className={`text-[11px] font-medium tracking-[0.12em] ${isToday ? 'text-accent-bright' : 'text-ink-3'}`}>
-                          {day.toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase()}
-                        </span>
-                        <span className={`text-[14px] font-semibold ${isToday ? 'text-ink' : 'text-ink-2'}`}>{day.getDate()}</span>
-                        {isToday ? <span className="ml-auto rounded-[4px] bg-accent/15 px-1.5 py-px text-[10px] font-semibold tracking-[0.1em] text-accent-bright">TODAY</span> : null}
-                      </div>
-                      {/* The day's shape before its cards: how many, on which
-                          platforms — a dot per platform in its own colour. */}
-                      <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-ink-3">
-                        <span>{dayIdeas.length === 0 ? 'no posts' : `${dayIdeas.length} post${dayIdeas.length === 1 ? '' : 's'}`}</span>
-                        {platformsToday.map((p) => (
-                          <span key={p} className="h-1.5 w-1.5 rounded-full" style={{ background: PLATFORM_TOKEN[p] }} title={PLATFORM_LABEL[p]} aria-label={PLATFORM_LABEL[p]} />
-                        ))}
-                      </div>
-                    </header>
-
-                    {dayIdeas.map((idea) => (
-                      <SlotCard
-                        key={idea.id}
-                        idea={idea}
-                        shape={shape}
-                        dragging={drag?.idea.id === idea.id}
-                        landed={justMoved === idea.id}
-                        onOpen={() => openReview(idea.id)}
-                        onDrag={onCardDrag}
-                      />
-                    ))}
-
-                    {/* A day with room left says so — and while a card is in
-                        flight it says where the card would land. */}
-                    <div
-                      className={`flex min-h-[52px] items-center justify-center rounded-[9px] border border-dashed text-[10.5px] tracking-[0.1em] transition-colors duration-[var(--dur-fast)] ${
-                        isDropTarget ? 'border-accent text-accent-bright' : 'border-line-strong text-ink-3'
-                      }`}
-                    >
-                      {isDropTarget ? 'MOVE HERE' : dayIdeas.length === 0 ? 'NO SLOT TAKEN' : 'ROOM FOR MORE'}
-                    </div>
-                  </div>
-                )
-              })}
+                    {isDropTarget ? 'move here' : dayIdeas.length === 0 ? 'no posts · promote one' : 'promote one'}
+                  </button>
+                </div>
+              )
+            })}
+          </div>
           </div>
         </section>
 
-        <Queue queued={queued} capacity={capacity} weekPrimary={weekPrimary} cap={cap} />
+        <Queue queueRef={queueRef} queued={queued} capacity={capacity} weekPrimary={weekPrimary} cap={cap} />
       </div>
 
       {/* The card in flight. Pointer-transparent, so the day under the pointer
@@ -511,18 +476,18 @@ export function CalendarPage() {
 
 function SlotCard({
   idea,
-  shape,
   dragging,
   landed,
   onOpen,
   onDrag,
+  onWithdraw,
 }: {
   idea: Idea
-  shape: ReturnType<typeof cardShape>
   dragging: boolean
   landed: boolean
   onOpen: () => void
   onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
+  onWithdraw: () => void
 }) {
   const ink = STATUS_INK[idea.status] ?? 'var(--color-ink-3)'
   const chip = STATUS_CHIP[idea.status] ?? idea.status.toUpperCase()
@@ -647,91 +612,62 @@ function SlotCard({
           onOpen()
         }
       }}
-      className={`group relative flex cursor-grab select-none flex-col overflow-hidden rounded-[9px] border bg-surface py-2 pl-[11px] pr-[9px] transition-[border-color,transform,opacity,box-shadow] duration-[320ms] ease-[var(--ease-out-soft)] active:cursor-grabbing ${
+      className={`group relative flex cursor-grab select-none flex-col overflow-hidden rounded-[11px] border bg-surface-2/60 px-2.5 py-2.5 transition-[border-color,translate,box-shadow,opacity] duration-[var(--dur-base)] active:cursor-grabbing ${
         dragging
           ? 'border-dashed border-accent/50 opacity-35'
-          : 'border-line-strong hover:-translate-y-0.5 hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]'
+          : 'border-line hover:!translate-y-[-2px] hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]'
       } ${landed ? 'anim-pop-in' : ''}`}
       style={{ touchAction: 'manipulation' }}
     >
-      {/* The rail is the PLATFORM, so the week's mix reads across the grid
-          at a glance. Status lives on the chip over the creative. */}
-      <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[3px]" style={{ background: colour }} />
-
-      {/* TOPIC FIRST, ON ITS OWN LINE. The one phrase that says what the post
-          is about, before anything else on the card is read. It wraps rather
-          than truncates — a topic clipped to "AG…" says nothing — and the NEW
-          flag flows after it so the two never fight for the width. */}
-      <p className="line-clamp-2 text-[10.5px] font-semibold uppercase leading-snug tracking-[0.12em] text-accent-bright" title={topic}>
-        {topic}
-        {idea.is_new_trend ? <span className="ml-1.5 text-magenta">NEW</span> : null}
-      </p>
-
-      {/* THE HOOK. The post's opening line, as it will read on the platform —
-          enough to know what the post says without opening it. */}
-      <p className={`mt-1.5 font-semibold leading-[1.35] text-ink ${shape.hookLines} ${shape.hookText}`} title={hook}>
-        {hook}
-      </p>
-
-      {/* THE ANGLE. The direction the post takes, in the agent's own words. */}
-      {angle && shape.showAngle ? (
-        <p className="mt-1.5 line-clamp-2 text-[11.5px] leading-snug text-ink-2" title={angle}>
-          <span className="text-ink-3" aria-hidden="true">↳ </span>
-          {angle}
-        </p>
-      ) : null}
-
-      {/* The platform is the rail, the icon, and the dot in the day header —
-          named in full on the overview strip. Spelling it out here too clipped
-          to "Faceb…" at every width, which said less than the icon does. */}
-      <div className="mt-2 flex items-center gap-1.5 text-[10.5px] text-ink-3">
-        <PlatformIcon platform={idea.platform} size={12} className="shrink-0" />
-        <span className="sr-only">{PLATFORM_LABEL[idea.platform]}</span>
-        <span className="tabular shrink-0">{clock(idea.scheduled_time)}</span>
-        <span className="tabular ml-auto shrink-0 font-medium" style={{ color: ink }} title="Confidence">
-          {idea.confidence}
-        </span>
-      </div>
-
-      <div
-        className="relative mt-2 overflow-hidden rounded-md"
-        style={{
-          height: shape.thumb,
-          display: shape.thumb === 0 ? 'none' : undefined,
-          background: idea.media?.dataUri ? undefined : `linear-gradient(135deg, var(--color-surface-3) 0%, ${colour} 100%)`,
-          boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 6%, transparent)',
-        }}
+      {/* Taking a card out of the week. The platform never destroys a post:
+          this withdraws it, which frees the slot and keeps the idea and its
+          lineage on record. It is revealed on hover so the week stays calm,
+          and it stops the press from starting a drag or opening the editor. */}
+      <button
+        type="button"
+        title={`Withdraw “${idea.title}” from this slot`}
+        aria-label={`Withdraw “${idea.title}” from this slot. The post is kept on record, not deleted.`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onPointerUp={(event) => event.stopPropagation()}
+        onClick={(event) => { event.stopPropagation(); onWithdraw() }}
+        onKeyDown={(event) => event.stopPropagation()}
+        className="absolute right-1.5 top-1.5 z-10 flex h-[18px] w-[18px] items-center justify-center rounded-md border border-line-strong bg-surface text-ink-3 opacity-0 transition-[opacity,color,border-color] duration-[var(--dur-fast)] hover:border-critical hover:text-critical focus-visible:opacity-100 group-hover:opacity-100"
       >
-        {idea.media?.dataUri ? (
-          <img
-            src={idea.media.dataUri}
-            alt=""
-            /*
-             * NOT DRAGGABLE, AND NOT A POINTER TARGET.
-             *
-             * An `<img>` is natively draggable. Pressing on one starts an image
-             * drag, so `pointerup` never reached the card and the post did not
-             * open — which is why only the cards a person happened to click by
-             * the TEXT appeared to work. The preview is decoration; the card owns
-             * the interaction.
-             */
-            draggable={false}
-            className="pointer-events-none h-full w-full object-cover"
-          />
-        ) : (
-          <>
-            <span aria-hidden="true" className="absolute inset-0" style={{ background: 'radial-gradient(120% 90% at 100% 0%, rgba(255, 255, 255, 0.18), transparent 60%)' }} />
-            <span className="absolute bottom-[5px] left-[7px] text-[10px] tracking-[0.12em] text-white/85">
-              {idea.media?.model ? idea.media.model.toUpperCase() : 'ETHARA · NO CREATIVE YET'}
-            </span>
-          </>
-        )}
+        <X size={10} aria-hidden="true" />
+      </button>
+
+      {/* platform · time · status — the design's top row */}
+      <div className="flex items-center gap-1.5">
         <span
-          className="absolute right-1.5 top-[5px] rounded-[3px] px-[5px] py-px text-[10px] tracking-[0.08em]"
-          style={{ color: ink, background: 'color-mix(in srgb, var(--color-page) 55%, transparent)' }}
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px]"
+          style={{ background: `color-mix(in srgb, ${colour} 14%, transparent)`, border: `1px solid color-mix(in srgb, ${colour} 35%, transparent)` }}
+        >
+          <PlatformIcon platform={idea.platform} size={9} />
+        </span>
+        <span className="sr-only">{PLATFORM_LABEL[idea.platform]}</span>
+        <span className="mono text-[8.5px] text-accent-bright">{clock(idea.scheduled_time)}</span>
+        <span className="flex-1" />
+        <span
+          className="mono shrink-0 rounded-[5px] px-[5px] py-px text-[7px] uppercase tracking-[0.08em]"
+          style={{ color: ink, background: `color-mix(in srgb, ${ink} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${ink} 34%, transparent)` }}
         >
           {chip}
         </span>
+      </div>
+
+      {/* the hook, two lines at most */}
+      <p className="mt-[7px] line-clamp-2 text-[11px] font-medium leading-[1.35] text-ink" title={hook}>
+        {hook}
+        {idea.is_new_trend ? <span className="mono ml-1.5 text-[8px] text-magenta">NEW</span> : null}
+      </p>
+
+      {/* the angle the agent took, and its confidence */}
+      <div className="mt-[7px] flex items-center gap-1.5">
+        <span className="mono min-w-0 flex-1 truncate text-[8px] text-ink-3" title={angle ?? topic}>
+          <span aria-hidden="true">↳ </span>
+          {angle ?? topic}
+        </span>
+        <span className="mono shrink-0 text-[8.5px] text-accent-bright" title="Confidence">{idea.confidence}</span>
       </div>
     </article>
   )
@@ -742,11 +678,13 @@ function SlotCard({
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function Queue({
+  queueRef,
   queued,
   capacity,
   weekPrimary,
   cap,
 }: {
+  queueRef: React.Ref<HTMLElement>
   queued: Idea[]
   capacity: Array<{ platform: Platform; placed: number; free: number; waiting: number }>
   weekPrimary: Idea[]
@@ -757,123 +695,203 @@ function Queue({
   const openReview = useStore((s) => s.openReview)
   const [armed, setArmed] = useState<string | null>(null)
 
+  /* One ranked line per idea, strongest rank first. */
+  const ranked = [...queued].sort(
+    (a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence,
+  )
+  /* What each platform has free, and what a promotion there would displace. */
+  const seats = new Map(
+    capacity.map((c) => {
+      const placed = weekPrimary.filter((i) => i.platform === c.platform)
+      return [
+        c.platform,
+        {
+          free: c.free,
+          weakest: placed.length >= cap && placed.length > 0
+            ? placed.reduce((lo, i) => (i.confidence < lo.confidence ? i : lo))
+            : null,
+        },
+      ] as const
+    }),
+  )
+  const emptyPlatforms = capacity
+    .filter((c) => !queued.some((i) => i.platform === c.platform))
+    .map((c) => c.platform)
+
   return (
-    <section className="flex w-full shrink-0 flex-col bg-surface-2 2xl:sticky 2xl:top-0 2xl:h-[calc(100vh-56px)] 2xl:w-[340px]" aria-label="Ranked queue">
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {queued.length === 0 ? (
-          <div className="px-4 py-8">
-            <p className="text-[13px] font-medium text-ink">Nothing below the cut</p>
-            <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">Every idea the agents formed is on the calendar. Run discovery and Dora will rank more.</p>
+    <section ref={queueRef} className="flex w-full shrink-0 flex-col border-t border-line bg-surface-2" aria-label="Ranked queue">
+      <header className="flex flex-wrap items-center gap-2.5 px-[18px] pb-2 pt-3.5">
+        <h2 className="text-[12.5px] font-bold text-ink">More suggestions</h2>
+        <span className="text-[10px] text-ink-3">
+          {queued.length === 0
+            ? 'everything the agents formed is on the calendar'
+            : `${queued.length} ranked below the cut · promote one to take a slot`}
+        </span>
+        <span className="flex-1" />
+        <span className="mono text-[7.5px] uppercase tracking-[0.06em] text-ink-3">slots free</span>
+        {capacity.map((c) => (
+          <span
+            key={c.platform}
+            className="mono inline-flex items-center gap-1 rounded-[5px] px-1.5 py-px text-[8px]"
+            style={{
+              color: PLATFORM_TOKEN[c.platform],
+              background: `color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} 13%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} 32%, transparent)`,
+            }}
+            title={`${PLATFORM_LABEL[c.platform]}: ${c.free} of ${cap} slots free`}
+          >
+            <PlatformIcon platform={c.platform} size={8} />
+            {c.free}
+          </span>
+        ))}
+      </header>
+      {queued.length === 0 ? (
+        <div className="px-[18px] pb-5">
+          <p className="text-[13px] font-medium text-ink">Nothing below the cut</p>
+          <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">Every idea the agents formed is on the calendar. Run discovery and Dora will rank more.</p>
+        </div>
+      ) : (
+        /*
+         * ONE RANKED LIST, THE WAY THE DESIGN DRAWS IT.
+         *
+         * This was four per-platform columns. The design is a single ranked
+         * line-per-idea list, and it does not lose the platform: each row
+         * carries its own badge, the header counts free slots per platform,
+         * and the footer names the platforms holding nothing. A flat list also
+         * stops the tallest platform dictating the height of three empty
+         * neighbours.
+         */
+        <div className="flex flex-col gap-2.5 px-[18px] pb-5">
+          <div
+            className="flex flex-col gap-1.5 overflow-y-auto overscroll-contain"
+            style={{ maxHeight: `calc(${SUGGESTION_ROWS} * 4.25rem)` }}
+            tabIndex={0}
+            role="group"
+            aria-label="Ranked suggestions, scrollable"
+          >
+            {ranked.map((idea, i) => {
+              const isArmed = armed === idea.id
+              const seat = seats.get(idea.platform)
+              const free = seat?.free ?? 0
+              const angle = typeof idea.analysis.angle === 'string' ? idea.analysis.angle : topicOf(idea)
+              const colour = PLATFORM_TOKEN[idea.platform]
+              return (
+                <article
+                  key={idea.id}
+                  className="rounded-[11px] border border-line bg-surface px-2.5 py-[7px] transition-colors duration-200 hover:border-accent/60"
+                  style={{ animation: `eth-row-stream 200ms ${EASE} ${i * 40}ms both` }}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <span className="tabular w-[22px] shrink-0 text-[8.5px] text-ink-3" title="Rank on its platform">
+                      #{idea.platform_rank ?? '–'}
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={() => openReview(idea.id)}
+                      className="min-w-0 flex-1 text-left"
+                      title={idea.title}
+                    >
+                      <span className="block truncate text-[11px] font-medium text-ink transition-colors hover:text-accent-bright">
+                        {idea.title}
+                      </span>
+                      <span className="mono mt-0.5 block truncate text-[8px] text-ink-3" title={angle}>
+                        <span aria-hidden="true">↳ </span>{angle}
+                      </span>
+                    </button>
+
+                    <span
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px]"
+                      style={{ background: `color-mix(in srgb, ${colour} 14%, transparent)`, border: `1px solid color-mix(in srgb, ${colour} 35%, transparent)` }}
+                      title={PLATFORM_LABEL[idea.platform]}
+                    >
+                      <PlatformIcon platform={idea.platform} size={9} />
+                    </span>
+                    <span className="sr-only">{PLATFORM_LABEL[idea.platform]}</span>
+
+                    <span className="tabular w-[30px] shrink-0 text-right text-[8.5px] text-accent-bright" title="Confidence">
+                      {idea.confidence}%
+                    </span>
+
+                    {/* What promoting this one would actually do, before it is done. */}
+                    <span
+                      className={`mono hidden w-[62px] shrink-0 text-center text-[7px] uppercase tracking-[0.08em] sm:block ${free > 0 ? 'text-good-ink' : 'text-serious'}`}
+                      title={free > 0 ? `${PLATFORM_LABEL[idea.platform]} has ${free} free slot${free === 1 ? '' : 's'}` : `${PLATFORM_LABEL[idea.platform]} is full — promoting displaces the weakest placed post`}
+                    >
+                      {free > 0 ? `${free} free` : 'displaces'}
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!isArmed) { setArmed(idea.id); return }
+                        setArmed(null)
+                        void promoteIdea(idea.id)
+                      }}
+                      className={`shrink-0 rounded-[8px] border px-3 py-1 text-[10px] font-semibold transition-colors duration-[220ms] ${
+                        isArmed
+                          ? 'border-accent bg-accent text-on-accent hover:bg-accent-bright'
+                          : 'border-hud-strong bg-accent/12 text-accent-bright hover:border-accent'
+                      }`}
+                    >
+                      {isArmed ? 'Confirm' : 'Promote'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isArmed) { setArmed(null); return }
+                        void deleteIdea(idea.id)
+                      }}
+                      className="shrink-0 rounded-[8px] border border-line-strong px-2.5 py-1 text-[10px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-critical/50 hover:text-critical-ink"
+                    >
+                      {isArmed ? 'Cancel' : 'Withdraw'}
+                    </button>
+                  </div>
+
+                  {/* Promotion can displace a placed post, so it states the
+                      consequence and waits. Nothing here is irreversible. */}
+                  {isArmed ? (
+                    <div
+                      className={`mt-2 border-l pl-[9px] ${free > 0 ? 'border-good/60' : 'border-serious/60'}`}
+                      style={{ animation: `eth-row-stream 260ms ${EASE} both` }}
+                    >
+                      {free > 0 ? (
+                        <>
+                          <div className="mono text-[9px] uppercase tracking-[0.12em] text-good-ink">A slot is free</div>
+                          <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
+                            Takes the first open slot on {PLATFORM_LABEL[idea.platform]}. Nothing is displaced.
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="mono text-[9px] uppercase tracking-[0.12em] text-serious">Promoting this displaces</div>
+                          <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
+                            #{cap} <strong className="font-semibold">“{seat?.weakest?.title ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
+                          </div>
+                        </>
+                      )}
+                      {idea.status === 'suggested' ? (
+                        <div className="mt-1 text-[11px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </article>
+              )
+            })}
           </div>
-        ) : null}
-        {capacity.map((c) => {
-          const rows = queued.filter((i) => i.platform === c.platform).sort((a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99))
-          if (rows.length === 0) return null
-          // The weakest placed post on this platform is the one a promotion displaces.
-          const placed = weekPrimary.filter((i) => i.platform === c.platform)
-          const weakest = placed.length >= cap ? placed.reduce((lo, i) => (i.confidence < lo.confidence ? i : lo)) : null
-          return (
-            <div key={c.platform}>
-              <div className="sticky top-0 z-[2] flex items-center gap-2 border-y border-line bg-surface-2 px-3.5 py-[9px]">
-                <PlatformIcon platform={c.platform} size={12} />
-                <span className="text-[12px] font-semibold tracking-[-0.01em] text-ink">{PLATFORM_LABEL[c.platform]}</span>
-                <span className="text-[11px] text-ink-3">{rows.length} waiting</span>
-                <span className={`ml-auto text-[11px] tracking-[0.08em] ${c.free > 0 ? 'text-serious' : 'text-ink-3'}`}>
-                  {c.free > 0 ? `${c.free} SLOT${c.free === 1 ? '' : 'S'} FREE` : 'FULL'}
-                </span>
-              </div>
-              {rows.map((idea, i) => {
-                const isArmed = armed === idea.id
-                return (
-                  <article
-                    key={idea.id}
-                    className="border-t border-line px-3.5 py-2.5 transition-colors duration-200 hover:bg-surface-3"
-                    style={{ animation: `eth-row-stream 200ms ${EASE} ${i * 40}ms both` }}
-                  >
-                    <div className="flex items-start gap-2">
-                      <span className="tabular w-[22px] shrink-0 pt-px text-[10.5px] text-ink-3">#{idea.platform_rank ?? '–'}</span>
-                      <div className="min-w-0 flex-1">
-                        {/* Topic first, here as on the calendar cards. */}
-                        <div className="flex items-center gap-1.5">
-                          <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-accent-bright" title={topicOf(idea)}>
-                            {topicOf(idea)}
-                          </span>
-                          <PlatformIcon platform={idea.platform} size={10} className="shrink-0" />
-                          <span className="tabular ml-auto shrink-0 text-[10.5px] text-ink-3">{idea.confidence}%</span>
-                        </div>
-                        <button type="button" onClick={() => openReview(idea.id)} className="mt-0.5 block w-full text-left text-[12px] font-medium leading-snug text-ink hover:text-accent-bright">
-                          {idea.title}
-                        </button>
-                        {typeof idea.analysis.angle === 'string' ? (
-                          <p className="mt-0.5 line-clamp-1 text-[11px] leading-snug text-ink-3" title={idea.analysis.angle}>
-                            <span aria-hidden="true">↳ </span>
-                            {idea.analysis.angle}
-                          </p>
-                        ) : null}
-                      </div>
-                    </div>
 
-                    {isArmed ? (
-                      <div className={`mt-2 border-l pl-[9px] ${c.free > 0 ? 'border-good/60' : 'border-serious/60'}`} style={{ animation: `eth-row-stream 260ms ${EASE} both` }}>
-                        {c.free > 0 ? (
-                          <>
-                            <div className="text-[10.5px] tracking-[0.12em] text-good-ink">A SLOT IS FREE</div>
-                            <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">Takes the first open slot on {PLATFORM_LABEL[c.platform]}. Nothing is displaced.</div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="text-[10.5px] tracking-[0.12em] text-serious">PROMOTING THIS DISPLACES</div>
-                            <div className="mt-1 text-[11.5px] leading-relaxed text-ink-2">
-                              #{cap} <strong className="font-semibold">“{weakest?.title ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
-                            </div>
-                          </>
-                        )}
-                        {idea.status === 'suggested' ? (
-                          <div className="mt-1 text-[11px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
-                        ) : null}
-                      </div>
-                    ) : null}
-
-                    <div className="mt-[9px] flex gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!isArmed) {
-                            setArmed(idea.id)
-                            return
-                          }
-                          setArmed(null)
-                          void promoteIdea(idea.id)
-                        }}
-                        className={`rounded-[5px] border px-2.5 py-1 text-[11px] font-semibold transition-colors duration-[220ms] ${
-                          isArmed
-                            ? 'border-accent bg-accent text-on-accent hover:bg-accent-bright'
-                            : 'border-hud-strong bg-accent/12 text-accent-bright hover:border-accent'
-                        }`}
-                      >
-                        {isArmed ? 'Confirm promotion' : 'Promote'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (isArmed) {
-                            setArmed(null)
-                            return
-                          }
-                          void deleteIdea(idea.id)
-                        }}
-                        className="rounded-[5px] border border-line-strong px-2.5 py-1 text-[11px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-critical/50 hover:text-critical-ink"
-                      >
-                        {isArmed ? 'Cancel' : 'Withdraw'}
-                      </button>
-                    </div>
-                  </article>
-                )
-              })}
-            </div>
-          )
-        })}
-      </div>
+          {/* What the list is not showing, said plainly. */}
+          <footer className="mono flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-[9px] text-[8px] uppercase tracking-[0.06em] text-ink-3">
+            <span>
+              {emptyPlatforms.length === 0
+                ? 'every platform has something ranked below the cut'
+                : `nothing ranked below the cut for ${emptyPlatforms.map((pl) => PLATFORM_LABEL[pl]).join(' · ')}`}
+            </span>
+            <span className="flex-1" />
+            <span>{ranked.length} waiting · scroll for the full queue</span>
+          </footer>
+        </div>
+      )}
     </section>
   )
 }

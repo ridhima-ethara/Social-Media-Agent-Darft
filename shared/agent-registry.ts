@@ -548,6 +548,12 @@ const SCRAPING_SKILLS: SkillSpec[] = [
     enabledByDefault: true,
     critical: true,
     config: [
+      bool('useWeekSchedule', 'Follow the weekly keyword rota', true,
+        'On, a run captures the keywords scheduled for the current cycle week — every constant plus that week\u2019s rotating set. Off, the rota is ignored and the run falls back to the top-weighted active keywords, which is what you want for a one-off catch-up.'),
+      text('scheduleAnchorDate', 'Rota start date', '2026-09-14',
+        'The calendar date that week 1 of the rota begins, as YYYY-MM-DD. Moving it shifts the whole cycle without editing a single row. A Monday is conventional but not required \u2014 the cycle simply counts seven-day blocks from here.'),
+      text('scheduleFallback', 'When the week has no rota', 'weighted',
+        '`weighted` falls back to the top-weighted active keywords, so a gap in the rota never costs a run. `skip` captures nothing and says so \u2014 honest, but a missing week then silently costs a week of capture.'),
       num('maxKeywordsPerRun', 'Keywords per run', 12,
         'How many keywords a single run scrapes. Each one is a separate scrape call, so this is the main lever on run time and cost.',
         { min: 1, max: 40, step: 1 }),
@@ -2194,6 +2200,39 @@ const ANALYTICS_SKILLS: SkillSpec[] = [
 
 /** ── 11 · Learning Agent · 4 skills ─────────────────────────────────────── */
 const LEARNING_SKILLS: SkillSpec[] = [
+  {
+    id: 'learning.reward.compute',
+    agentId: 'learning',
+    order: 0,
+    enabledByDefault: true,
+    section: 'Detection',
+    name: 'Score the outcome',
+    summary:
+      'Turns a finished post into a reward an optimiser can learn from, over five components: human approval, brand alignment, content quality, engagement and click-through. A component with no evidence is excluded rather than scored zero, and the result reports how much of the weight could actually be measured.',
+    inputs: ['A published or decided post', 'Its approvals, revisions and metrics'],
+    outputs: ['A 0–1 reward with a per-component reason and a confidence'],
+    critical: false,
+    config: [
+      num('humanApprovalWeight', 'Human approval weight', 40,
+        'Share of the reward carried by the two-stage approval outcome. The strongest signal the product has, and the only one that reflects a judgement rather than a measurement — which is why it is weighted highest by default.',
+        { min: 0, max: 100, step: 5, unit: '%' }),
+      num('brandAlignmentWeight', 'Brand alignment weight', 20,
+        'Share carried by how little the brand-voice enforcer had to change. Computed from the rules that actually fired, never estimated by a model.',
+        { min: 0, max: 100, step: 5, unit: '%' }),
+      num('contentQualityWeight', 'Content quality weight', 15,
+        'Share carried by structural compliance and novelty — hashtag range, the zero-emoji budget, and similarity to captions this account has already published.',
+        { min: 0, max: 100, step: 5, unit: '%' }),
+      num('engagementWeight', 'Engagement weight', 15,
+        'Share carried by measured engagement against this account\u2019s own trailing baseline. Excluded entirely until the platform reports figures, so an unpublished post is never scored as a poor one.',
+        { min: 0, max: 100, step: 5, unit: '%' }),
+      num('clickThroughWeight', 'Click-through weight', 10,
+        'Share carried by click rate against this account\u2019s own baseline. Excluded when no click figures were reported.',
+        { min: 0, max: 100, step: 5, unit: '%' }),
+      num('minConfidenceToLearn', 'Minimum measured weight to learn from', 50,
+        'A reward computed from too little evidence is noise. Below this share of the total weight the outcome is recorded but withheld from optimisation, so a batch is not trained on posts nobody has judged or measured yet.',
+        { min: 0, max: 100, step: 5, unit: '%' }),
+    ],
+  },
   {
     id: 'learning.pattern.detect',
     agentId: 'learning',

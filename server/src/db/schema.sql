@@ -725,3 +725,50 @@ CREATE INDEX IF NOT EXISTS scraped_items_unembedded_idx
   ON scraped_items (workspace_id) WHERE embedding IS NULL;
 CREATE INDEX IF NOT EXISTS knowledge_entries_unembedded_idx
   ON knowledge_entries (workspace_id) WHERE embedding IS NULL;
+
+-- ── keyword_schedule · which keywords a given cycle week captures ───────────
+-- A rotating rota of WEEKS, seeded from shared/keyword-schedule.ts and editable
+-- thereafter. Two kinds of row, and the nullable `cycle_week` is what separates
+-- them:
+--
+--   constant  cycle_week IS NULL  — captured every week, without exception
+--   rotating  cycle_week = 1..N   — captured only during that week of the cycle
+--
+-- Held this way rather than repeating the constants across every week: that would
+-- be N copies of each standing keyword which must all be edited together, and the
+-- first time one was missed the trend series would break silently.
+--
+-- References `keywords(id)` rather than storing the term as text, because a
+-- schedule row holding a string that no longer matches a keyword is a silent
+-- no-op — the run would simply capture less and report nothing wrong.
+CREATE TABLE IF NOT EXISTS keyword_schedule (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  keyword_id   UUID NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL CHECK (kind IN ('constant','rotating')),
+  cycle_week   SMALLINT CHECK (cycle_week IS NULL OR cycle_week BETWEEN 1 AND 260),
+  -- What the week is about. Operator-facing only; never used for matching.
+  topic        TEXT NOT NULL DEFAULT '',
+  -- Ordering within a week, so a run that can only take N keywords takes the
+  -- intended N rather than an arbitrary N.
+  slot_rank    SMALLINT NOT NULL DEFAULT 1,
+  active       BOOLEAN NOT NULL DEFAULT true,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- The two kinds are mutually exclusive by construction, so a 'constant' row
+  -- cannot acquire a week and start behaving like a rotating one.
+  CONSTRAINT keyword_schedule_kind_week CHECK (
+    (kind = 'constant' AND cycle_week IS NULL) OR
+    (kind = 'rotating' AND cycle_week IS NOT NULL)
+  )
+);
+
+-- One row per keyword per week. `cycle_week` is NULL for constants, and NULLs are
+-- distinct in a UNIQUE index, so constants are keyed separately below.
+CREATE UNIQUE INDEX IF NOT EXISTS keyword_schedule_rotating_key
+  ON keyword_schedule (workspace_id, cycle_week, keyword_id)
+  WHERE cycle_week IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS keyword_schedule_constant_key
+  ON keyword_schedule (workspace_id, keyword_id)
+  WHERE cycle_week IS NULL;
+CREATE INDEX IF NOT EXISTS keyword_schedule_week_idx
+  ON keyword_schedule (workspace_id, cycle_week, slot_rank);

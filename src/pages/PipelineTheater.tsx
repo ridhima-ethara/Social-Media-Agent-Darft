@@ -15,7 +15,7 @@ import type { GraphBucket } from '../components/pipeline-graph'
 import { Badge, Btn, PlatformIcon, fmt, timeAgo } from '../components/ui'
 import { PLATFORMS } from '../../shared/agent-contract'
 import { defaultSkillConfig } from '../../shared/agent-registry'
-import type { Platform, ValidationVerdict } from '../types'
+import type { LiveLane, Platform, ValidationVerdict } from '../types'
 
 /**
  * The two capture knobs this screen can reason about, read from the registry
@@ -860,8 +860,10 @@ export function PipelineTheater() {
             </div>
           </header>
 
-          <RunStage
+          <NeuralStage
             stations={stations}
+            buckets={buckets}
+            lanes={liveLanes}
             rails={rails}
             selected={stationIndex}
             paused={paused}
@@ -1170,27 +1172,85 @@ const STATION_WORD: Record<StationStatus, string> = {
   attention: 'HELD AT THE GATE',
   record: 'ON RECORD',
 }
-const RAIL_TONE: Record<RailKind, string> = {
-  idle: 'var(--color-line-strong)',
-  working: 'var(--color-accent)',
-  done: 'var(--color-good)',
-  held: 'var(--color-serious)',
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE NEURAL VIEW — GEOMETRY
+
+   The run drawn the way it actually behaves: the keyword lanes fan IN to the
+   Scraping Agent, one trunk carries the kept pages to the Validation Agent,
+   and the Validation Agent BIFURCATES into the four verdict buckets. Only the
+   validated branch continues to the Calendar Agent.
+
+   Every coordinate is the design's own, inside a fixed stage that is then
+   scaled to whatever frame it is handed. Scaling the whole composition —
+   rather than leaving fixed-size cards adrift in a large frame — is what keeps
+   it tight instead of stranding it in the middle of an empty floor, which is
+   exactly how the previous station strip failed.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const NEURAL_W = 1310
+const NEURAL_H = 654
+
+/** A keyword card and the point its synapse leaves from. */
+const KEYWORD_SLOT = [
+  { top: 158, out: [188, 190] as const },
+  { top: 268, out: [188, 300] as const },
+  { top: 378, out: [188, 410] as const },
+]
+/** Which slots one, two or three keyword cards occupy, so the fan stays even. */
+const KEYWORD_LAYOUT: Record<number, number[]> = { 0: [], 1: [1], 2: [0, 2], 3: [0, 1, 2] }
+
+const SCRAPE_IN = [262, 300] as const
+const SCRAPE_OUT = [452, 300] as const
+const VALIDATE_IN = [556, 300] as const
+const VALIDATE_OUT = [762, 300] as const
+
+/** A verdict bucket and the point its synapse arrives at. */
+const BUCKET_SLOT = [
+  { top: 108, into: [886, 140] as const },
+  { top: 218, into: [886, 250] as const },
+  { top: 328, into: [886, 360] as const },
+  { top: 438, into: [886, 470] as const },
+]
+const VALIDATED_OUT = [1086, 140] as const
+const CALENDAR_IN = [1126, 140] as const
+
+/** The token each verdict is drawn in. Canvas cannot read `var()`, so the
+    colour is resolved from the token through a probe and re-read on theme
+    change — the palette still lives in one place. */
+const BUCKET_TOKEN: Record<ValidationVerdict, string> = {
+  validated: '--color-good',
+  needs_review: '--color-warn',
+  duplicate: '--color-accent',
+  rejected: '--color-critical',
+  pending: '--color-line-strong',
+}
+/** What each bucket means for the operator, in the design's own words. */
+const BUCKET_NOTE: Record<ValidationVerdict, string> = {
+  validated: 'QUEUED FOR CALENDAR',
+  needs_review: 'WAITING ON YOU',
+  duplicate: 'MERGED WITH EXISTING',
+  rejected: 'BELOW THRESHOLD',
+  pending: 'AWAITING A VERDICT',
 }
 
-/** Where each station stands, from the frame: x, depth, and the turn toward the camera. */
-const STATION_POSE = [
-  { x: -424, z: -44, ry: 5.3 },
-  { x: -212, z: 22, ry: 2.6 },
-  { x: 0, z: 58, ry: 0 },
-  { x: 212, z: 22, ry: -2.6 },
-  { x: 424, z: -44, ry: -5.3 },
-] as const
-const RAIL_POSE = [
-  { x: -424, z: -44, ry: -17.29, len: 222 },
-  { x: -212, z: 22, ry: -9.64, len: 215 },
-  { x: 0, z: 58, ry: 9.64, len: 215 },
-  { x: 212, z: 22, ry: 17.29, len: 222 },
-] as const
+const NEURAL_TOKENS = [
+  '--color-accent',
+  '--color-accent-bright',
+  '--color-good',
+  '--color-warn',
+  '--color-critical',
+  '--color-line-strong',
+]
+
+type RGB = [number, number, number]
+
+/** A computed `color` is always `rgb(...)`, so this only guards a parse failure.
+    The fallback is a neutral grey, never a brand colour standing in for one. */
+function parseRGB(value: string): RGB {
+  const parts = value.match(/[\d.]+/g)
+  if (!parts || parts.length < 3) return [140, 140, 150]
+  return [Number(parts[0]), Number(parts[1]), Number(parts[2])]
+}
 
 function formatSeconds(total: number): string {
   const m = Math.floor(total / 60)
@@ -1198,226 +1258,402 @@ function formatSeconds(total: number): string {
   return m > 0 ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`
 }
 
-function RunStage({
+function NeuralStage({
   stations,
+  buckets,
+  lanes,
   rails,
   selected,
   paused,
   onSelect,
 }: {
   stations: Station[]
+  buckets: GraphBucket[]
+  lanes: LiveLane[]
   rails: RailKind[]
   selected: number
   paused: boolean
   onSelect: (index: number) => void
 }) {
   const reduced = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  const play = paused || reduced ? 'paused' : 'running'
+  const frameRef = useRef<HTMLDivElement | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const [scale, setScale] = useState(1)
 
-  /*
-   * THE STAGE FILLS ITS FRAME.
-   *
-   * The five stations sit at fixed 3D coordinates about 1000px across, and the
-   * camera used to shrink them by a constant 0.86 whatever the frame. The scale
-   * now follows the frame's measured size — bounded by width or height,
-   * whichever runs out first — so on a wide display the stations grow to meet
-   * it instead of huddling in the middle of a dark stage.
-   */
-  const stageRef = useRef<HTMLDivElement | null>(null)
-  const [stageScale, setStageScale] = useState(0.86)
+  /* The stage is a fixed drawing; the frame decides how big it is shown. */
   useEffect(() => {
-    const el = stageRef.current
+    const el = frameRef.current
     if (!el) return
     const observer = new ResizeObserver((entries) => {
       const rect = entries[0]?.contentRect
       if (!rect || rect.width === 0) return
-      setStageScale(Math.max(0.8, Math.min(1.35, (rect.width - 40) / 1000, (rect.height - 40) / 560)))
+      setScale(Math.min(rect.width / NEURAL_W, rect.height / NEURAL_H))
     })
     observer.observe(el)
     return () => observer.disconnect()
   }, [])
 
+  /* One card per keyword actually crawled, heaviest first. A replay opens no
+     lanes, so it falls back to the single source card the run recorded. */
+  const keywordCards = useMemo(() => {
+    const byKeyword = new Map<string, { kept: number; lanes: number; running: boolean }>()
+    for (const lane of lanes) {
+      const entry = byKeyword.get(lane.keyword) ?? { kept: 0, lanes: 0, running: false }
+      entry.kept += lane.kept ?? 0
+      entry.lanes += 1
+      entry.running = entry.running || lane.status === 'running'
+      byKeyword.set(lane.keyword, entry)
+    }
+    return [...byKeyword.entries()]
+      .sort((a, b) => b[1].kept - a[1].kept)
+      .slice(0, 3)
+      .map(([keyword, value]) => ({ keyword, ...value }))
+  }, [lanes])
+
+  const source = stations[0]
+  const sourceCards = keywordCards.length > 0
+    ? keywordCards
+    : source
+      ? [{ keyword: source.name, kept: 0, lanes: 0, running: false, fallback: true }]
+      : []
+  const slots = KEYWORD_LAYOUT[Math.min(sourceCards.length, 3)] ?? []
+
+  /** Verdicts counted at all. Zero means not measured, so the buckets read "—". */
+  const verdictTotal = buckets.reduce((total, bucket) => total + bucket.count, 0)
+
+  /* The draw loop reads live values through refs, so changing the run does not
+     tear down and restart the animation. */
+  const frozen = useRef(paused || reduced)
+  useEffect(() => { frozen.current = paused || reduced }, [paused, reduced])
+
+  const sceneRef = useRef({ slots, buckets, rails, verdictTotal })
+  useEffect(() => { sceneRef.current = { slots, buckets, rails, verdictTotal } })
+
+  const paletteRef = useRef<Record<string, RGB>>({})
+  useEffect(() => {
+    const frame = frameRef.current
+    if (!frame) return
+    const probe = document.createElement('span')
+    probe.setAttribute('aria-hidden', 'true')
+    probe.style.cssText = 'position:absolute;width:0;height:0;opacity:0;pointer-events:none'
+    frame.appendChild(probe)
+    const read = () => {
+      const next: Record<string, RGB> = {}
+      for (const token of NEURAL_TOKENS) {
+        probe.style.color = `var(${token})`
+        next[token] = parseRGB(getComputedStyle(probe).color)
+      }
+      paletteRef.current = next
+    }
+    read()
+    const observer = new MutationObserver(read)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => { observer.disconnect(); probe.remove() }
+  }, [])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx) return
+    let raf = 0
+    let last = 0
+    let clock = 0
+
+    const rgba = (c: RGB, a: number) => `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a})`
+    const tone = (token: string): RGB => paletteRef.current[token] ?? [140, 140, 150]
+    const curve = (a: readonly number[], b: readonly number[]) => [
+      a,
+      [a[0] + (b[0] - a[0]) * 0.45, a[1]],
+      [a[0] + (b[0] - a[0]) * 0.55, b[1]],
+      b,
+    ] as const
+    const at = (c: ReturnType<typeof curve>, u: number) => {
+      const v = 1 - u
+      return [
+        v * v * v * c[0][0] + 3 * v * v * u * c[1][0] + 3 * v * u * u * c[2][0] + u * u * u * c[3][0],
+        v * v * v * c[0][1] + 3 * v * v * u * c[1][1] + 3 * v * u * u * c[2][1] + u * u * u * c[3][1],
+      ]
+    }
+
+    /** One synapse. `alive` decides whether anything is actually travelling it. */
+    const flow = (a: readonly number[], b: readonly number[], colour: RGB, pulses: number, speed: number, alive: boolean) => {
+      const c = curve(a, b)
+      ctx.beginPath()
+      ctx.moveTo(c[0][0], c[0][1])
+      ctx.bezierCurveTo(c[1][0], c[1][1], c[2][0], c[2][1], c[3][0], c[3][1])
+      ctx.strokeStyle = rgba(colour, 0.1)
+      ctx.lineWidth = 3.5
+      ctx.stroke()
+      ctx.strokeStyle = rgba(colour, alive ? 0.5 : 0.2)
+      ctx.lineWidth = 1.3
+      ctx.stroke()
+      if (!alive) return
+      for (let k = 0; k < pulses; k++) {
+        const u = (clock * speed + k / pulses + a[1] * 0.013) % 1
+        const point = at(c, u)
+        const glow = ctx.createRadialGradient(point[0], point[1], 0, point[0], point[1], 6.5)
+        glow.addColorStop(0, rgba(colour, 0.9))
+        glow.addColorStop(1, rgba(colour, 0))
+        ctx.fillStyle = glow
+        ctx.beginPath()
+        ctx.arc(point[0], point[1], 6.5, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+
+    const draw = (ts: number) => {
+      raf = requestAnimationFrame(draw)
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      if (canvas.width !== Math.round(NEURAL_W * dpr)) {
+        canvas.width = Math.round(NEURAL_W * dpr)
+        canvas.height = Math.round(NEURAL_H * dpr)
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, NEURAL_W, NEURAL_H)
+      const delta = last ? Math.min((ts - last) / 1000, 0.05) : 0.016
+      last = ts
+      if (!frozen.current) clock += delta
+
+      const scene = sceneRef.current
+      const accent = tone('--color-accent')
+      const bright = tone('--color-accent-bright')
+      const grid = tone('--color-accent')
+
+      /* The floor, in perspective. It is meant to be felt rather than read —
+         at line-strength it competed with the synapses for attention. */
+      ctx.strokeStyle = rgba(grid, 0.16)
+      ctx.lineWidth = 1
+      for (let i = 0; i < 9; i++) {
+        const y = NEURAL_H * 0.66 + i * i * 4.2
+        ctx.beginPath()
+        ctx.moveTo(0, y)
+        ctx.lineTo(NEURAL_W, y)
+        ctx.stroke()
+      }
+      for (let i = 0; i <= 12; i++) {
+        const x = (i / 12) * NEURAL_W
+        ctx.beginPath()
+        ctx.moveTo(NEURAL_W / 2 + (x - NEURAL_W / 2) * 0.55, NEURAL_H * 0.66)
+        ctx.lineTo(x, NEURAL_H)
+        ctx.stroke()
+      }
+
+      /* light where the two agents meet */
+      const pool = ctx.createRadialGradient(659, 300, 0, 659, 300, 140)
+      pool.addColorStop(0, rgba(accent, 0.1))
+      pool.addColorStop(1, rgba(accent, 0))
+      ctx.fillStyle = pool
+      ctx.fillRect(509, 150, 300, 300)
+
+      /* keyword lanes fan in */
+      const scraping = scene.rails[0] === 'working'
+      for (const slot of scene.slots) {
+        const anchor = KEYWORD_SLOT[slot]
+        if (anchor) flow(anchor.out, SCRAPE_IN, accent, 2, 0.3, scraping)
+      }
+      /* the hand-off */
+      flow(SCRAPE_OUT, VALIDATE_IN, accent, 3, 0.34, scene.rails[1] === 'working')
+      /* and the bifurcation, each branch in its verdict's colour */
+      scene.buckets.forEach((bucket, i) => {
+        const anchor = BUCKET_SLOT[i]
+        if (!anchor) return
+        flow(VALIDATE_OUT, anchor.into, tone(BUCKET_TOKEN[bucket.id]), 2, 0.28, bucket.count > 0)
+      })
+      /* only what validated continues */
+      flow(VALIDATED_OUT, CALENDAR_IN, tone('--color-good'), 2, 0.3, scene.rails[3] !== 'idle')
+
+      ctx.fillStyle = rgba(bright, 0.6)
+      for (const point of [SCRAPE_IN, VALIDATE_IN, CALENDAR_IN, ...scene.slots.map((s) => KEYWORD_SLOT[s]?.out), ...BUCKET_SLOT.map((s) => s.into)]) {
+        if (!point) continue
+        ctx.beginPath()
+        ctx.arc(point[0], point[1], 2.2, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+
+    raf = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  const card = 'glass-panel absolute rounded-[12px] text-left outline-none transition-[border-color,box-shadow] duration-200'
+  const agentCard = (index: number) =>
+    `${card} rounded-[14px] px-[13px] py-[11px] ${selected === index ? 'border-accent' : 'hover:border-accent'}`
+
+  const scraping = stations[1]
+  const validation = stations[2]
+  const calendar = stations[4]
+
   return (
-    <div ref={stageRef} className="relative mt-2 min-h-0 flex-1 overflow-hidden rounded-[10px] bg-page">
-      {/* light from above, and the edges held */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
-        <span
-          className="absolute left-1/2 top-[-30%] h-[620px] w-[1100px] -translate-x-1/2 rounded-full"
-          style={{ background: 'radial-gradient(circle, color-mix(in srgb, var(--color-accent) 14%, transparent), transparent 64%)' }}
-        />
-        <span className="absolute inset-0" style={{ background: 'radial-gradient(110% 90% at 50% 40%, transparent 50%, color-mix(in srgb, var(--color-page) 92%, transparent) 100%)' }} />
-      </div>
+    <div ref={frameRef} className="relative mt-2 min-h-0 flex-1 overflow-hidden rounded-[10px]">
+      <div
+        className="absolute left-1/2 top-1/2"
+        style={{ width: NEURAL_W, height: NEURAL_H, transform: `translate(-50%, -50%) scale(${scale})` }}
+      >
+        <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" aria-hidden="true" />
 
-      {/* Under `preserve-3d`, a card at negative depth sits behind its parent's
-          own plane, so the parent wins every hit test. Nothing here takes the
-          pointer except the cards themselves. */}
-      <div className="absolute inset-0" style={{ perspective: 1150, perspectiveOrigin: '50% 50%', pointerEvents: 'none' }}>
-        <div
-          className="absolute left-1/2 top-1/2 h-0 w-0"
-          style={
-            {
-              transformStyle: 'preserve-3d',
-              transform: 'translate(-50%, -50%) translateY(6px) scale(var(--scene-scale)) rotateY(-1.4deg) rotateX(20deg)',
-              animation: 'eth-cam5 84s cubic-bezier(0.4, 0, 0.2, 1) infinite',
-              animationPlayState: reduced ? 'paused' : 'running',
-              willChange: 'transform',
-              '--scene-scale': stageScale,
-            } as React.CSSProperties
-          }
-        >
-          {/* the floor */}
-          <div
-            aria-hidden="true"
-            className="absolute left-1/2 top-1/2 h-[800px] w-[1400px] -ml-[700px] -mt-[400px]"
+        {/* ── the keywords that opened the run ─────────────────────────── */}
+        {sourceCards.map((entry, i) => {
+          const slot = KEYWORD_SLOT[slots[i] ?? i]
+          if (!slot) return null
+          const measured = !('fallback' in entry)
+          return (
+            <button
+              key={entry.keyword}
+              type="button"
+              onClick={() => onSelect(0)}
+              aria-label={`${entry.keyword} · ${measured ? `${entry.kept} kept` : source?.figure ?? 'on record'}`}
+              className={`${card} px-3 py-[9px] ${selected === 0 ? 'border-accent' : 'hover:border-accent'}`}
+              style={{ left: 20, top: slot.top, width: 168, borderTopWidth: 2, borderTopColor: 'var(--color-good)' }}
+            >
+              <span className="flex items-center">
+                <span className="mono text-[8.5px] tracking-[0.14em]" style={{ color: 'var(--color-good)' }}>
+                  {measured ? `KEYWORD ${String(i + 1).padStart(2, '0')}` : 'SOURCE'}
+                </span>
+                <span className="ml-auto h-[5px] w-[5px] rounded-full" style={{ background: 'var(--color-good)' }} aria-hidden="true" />
+              </span>
+              <span className="mt-[5px] block truncate text-[13px] font-bold text-ink">{entry.keyword}</span>
+              <span className="mono mt-[3px] block truncate text-[8.5px] text-ink-3">
+                {measured ? `${entry.kept} KEPT · ${entry.lanes} LANE${entry.lanes === 1 ? '' : 'S'}` : (source?.figure ?? '').toUpperCase()}
+              </span>
+            </button>
+          )
+        })}
+
+        {/* ── 01 · the Scraping Agent ──────────────────────────────────── */}
+        {scraping ? (
+          <button
+            type="button"
+            onClick={() => onSelect(1)}
+            aria-label={`${scraping.name} · ${scraping.figure}`}
+            className={agentCard(1)}
             style={{
-              transformOrigin: '50% 50%',
-              transform: 'translate3d(0, 64px, 0) rotateX(88deg)',
-              backgroundImage:
-                'linear-gradient(to right, color-mix(in srgb, var(--color-accent) 13%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--color-accent) 13%, transparent) 1px, transparent 1px)',
-              backgroundSize: '48px 48px',
-              WebkitMaskImage: 'radial-gradient(48% 52% at 50% 50%, #000 20%, transparent 100%)',
-              maskImage: 'radial-gradient(48% 52% at 50% 50%, #000 20%, transparent 100%)',
+              left: 262,
+              top: 249,
+              width: 190,
+              boxShadow: selected === 1 ? '0 0 34px -8px var(--color-accent)' : undefined,
             }}
-          />
-          <div
-            aria-hidden="true"
-            className="absolute left-1/2 top-1/2 h-px w-[1400px] -ml-[700px]"
-            style={{
-              transform: 'translate3d(0, 64px, 0) rotateX(88deg)',
-              background: 'linear-gradient(to right, transparent, color-mix(in srgb, var(--color-accent) 45%, transparent) 50%, transparent)',
-            }}
-          />
-
-          {/* the pool of light under the selected station */}
-          <div
-            aria-hidden="true"
-            className="absolute left-1/2 top-1/2 h-[280px] w-[360px] -ml-[180px] -mt-[140px] rounded-full"
-            style={{
-              transform: `translate3d(${STATION_POSE[selected]?.x ?? 0}px, 60px, ${STATION_POSE[selected]?.z ?? 0}px) rotateX(88deg)`,
-              transition: 'transform 520ms cubic-bezier(0.34, 1.3, 0.64, 1)',
-              background: 'radial-gradient(circle, color-mix(in srgb, var(--color-accent) 22%, transparent), transparent 62%)',
-              animation: 'eth-pool 6s cubic-bezier(0.4, 0, 0.2, 1) infinite',
-              animationPlayState: play,
-            }}
-          />
-
-          {/* the rails */}
-          {RAIL_POSE.map((pose, i) => {
-            const kind = rails[i] ?? 'idle'
-            return (
-              <div
-                key={i}
-                aria-hidden="true"
-                className="absolute left-1/2 top-1/2 h-px"
-                style={{
-                  width: pose.len,
-                  ['--len' as string]: `${pose.len}px`,
-                  transformOrigin: '0 50%',
-                  transform: `translate3d(${pose.x}px, 0, ${pose.z}px) rotateY(${pose.ry}deg)`,
-                  background: RAIL_TONE[kind],
-                  opacity: kind === 'idle' ? 0.35 : 0.7,
-                  transition: 'opacity 320ms ease, background-color 320ms ease',
-                }}
-              >
-                <span
-                  className="absolute right-[-1px] top-[-3px] h-0 w-0 border-y-[3.5px] border-l-[6px] border-y-transparent"
-                  style={{ borderLeftColor: RAIL_TONE[kind] }}
-                />
-                {/* information moving: two packets, half a beat apart */}
-                {kind === 'working'
-                  ? [0, 0.9].map((delay) => (
-                      <span
-                        key={delay}
-                        className="absolute left-0 top-[-2.5px] h-1.5 w-1.5 rounded-full bg-accent-bright"
-                        style={{
-                          boxShadow: '0 0 8px 1px var(--color-accent-bright)',
-                          opacity: 0,
-                          animation: `eth-pkt3 1.8s cubic-bezier(0.45, 0, 0.55, 1) ${delay}s infinite`,
-                          animationPlayState: play,
-                        }}
-                      />
-                    ))
-                  : null}
-                {/* turned back at the gate */}
-                {kind === 'held' ? (
-                  <>
-                    <span className="absolute left-1/2 top-[-16px] h-8 w-px bg-serious opacity-70" />
-                    <span
-                      className="absolute left-1/2 top-[-3px] h-[7px] w-[7px] -ml-[3.5px] rounded-full bg-serious"
-                      style={{ boxShadow: '0 0 8px 1px var(--color-serious)', animation: 'eth-pkt-stop 2.6s cubic-bezier(0.33, 1, 0.68, 1) infinite', animationPlayState: play }}
-                    />
-                  </>
-                ) : null}
-              </div>
-            )
-          })}
-
-          {/* what comes after this theater */}
-          <div
-            aria-hidden="true"
-            className="mono absolute left-1/2 top-1/2 whitespace-nowrap text-[10.5px] tracking-[0.14em] text-ink-3"
-            style={{ transform: 'translate3d(424px, -66px, -44px) translateX(-50%)' }}
           >
-            THEN → CREATE
-          </div>
+            <span className="flex items-center gap-1.5">
+              <span className="mono text-[8px] tracking-[0.18em] text-ink-3">{scraping.tag}</span>
+              <span className="ml-auto flex h-3 w-3 items-center justify-center">
+                {scraping.status === 'working' && !paused ? (
+                  <WorkArc size={12} />
+                ) : (
+                  <span className="h-[5px] w-[5px] rounded-full" style={{ background: STATION_TONE[scraping.status] }} aria-hidden="true" />
+                )}
+              </span>
+            </span>
+            <span className="mt-[5px] block text-[15px] font-bold text-ink">{scraping.name}</span>
+            <span className="mt-0.5 block text-[9.5px] text-ink-3">{scraping.sub}</span>
+            <span className="mono mt-[7px] block truncate text-[8.5px]" style={{ color: STATION_TONE[scraping.status] }}>
+              {scraping.figure}
+            </span>
+          </button>
+        ) : null}
 
-          {/* the stations */}
-          {stations.map((station, i) => {
-            const pose = STATION_POSE[i]
-            if (!pose) return null
-            const active = i === selected
-            const tone = STATION_TONE[station.status]
-            const dim = station.status === 'idle' || station.status === 'record'
-            return (
-              <div
-                key={station.id}
-                role="button"
-                tabIndex={0}
-                aria-pressed={active}
-                aria-label={`${station.name} · ${station.figure}`}
-                onClick={() => onSelect(i)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    onSelect(i)
-                  }
-                }}
-                className="absolute left-1/2 top-1/2 h-[92px] w-[160px] -ml-[80px] -mt-[46px] cursor-pointer outline-none"
-                style={{
-                  pointerEvents: 'auto',
-                  transformStyle: 'preserve-3d',
-                  transform: `translate3d(${pose.x}px, ${active ? -10 : 0}px, ${pose.z}px) rotateY(${pose.ry}deg)`,
-                  transition: 'transform 520ms cubic-bezier(0.34, 1.3, 0.64, 1), opacity 420ms ease',
-                  opacity: dim && !active ? 0.82 : 1,
-                }}
-              >
-                <div
-                  className={`absolute inset-0 overflow-hidden rounded-[10px] border bg-surface px-[13px] py-[11px] transition-[border-color,box-shadow] duration-[320ms] ${
-                    active ? 'border-accent' : 'border-line-strong'
-                  }`}
-                  style={{ boxShadow: `0 1px 0 color-mix(in srgb, var(--color-ink) 5%, transparent) inset, 0 18px 40px -20px color-mix(in srgb, var(--color-page) 70%, black)${active ? ', 0 0 0 1px var(--color-accent)' : ''}` }}
-                >
-                  <span className="absolute inset-x-0 top-0 h-[2px]" style={{ background: tone, opacity: dim ? 0.35 : 1, transition: 'opacity 320ms ease' }} aria-hidden="true" />
-                  <div className="flex items-center gap-[7px]">
-                    <span className="mono text-[10.5px] tracking-[0.14em]" style={{ color: tone }}>{station.tag}</span>
-                    <span className="ml-auto flex h-3 w-3 items-center justify-center">
-                      {station.status === 'working' && !paused ? (
-                        <WorkArc size={12} />
-                      ) : station.status === 'attention' ? (
-                        <Breathe tone={tone} />
-                      ) : (
-                        <span className="h-[5px] w-[5px] rounded-full" style={{ background: tone, opacity: dim ? 0.5 : 1 }} aria-hidden="true" />
-                      )}
-                    </span>
-                  </div>
-                  <p className="mt-[7px] truncate text-[13.5px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink">{station.name}</p>
-                  <p className="mono mt-0.5 truncate text-[11px] text-ink-3">{station.sub}</p>
-                  <p className="mono absolute inset-x-[13px] bottom-[9px] truncate text-[11px]" style={{ color: tone }}>{station.figure}</p>
-                </div>
-                <div className="absolute inset-x-0 top-full h-2 rounded-b-[10px] opacity-50" style={{ background: 'linear-gradient(to bottom, color-mix(in srgb, black 70%, transparent), transparent)' }} aria-hidden="true" />
-              </div>
-            )
-          })}
+        {/* ── 02 · the Validation Agent, where the run bifurcates ──────── */}
+        {validation ? (
+          <button
+            type="button"
+            onClick={() => onSelect(2)}
+            aria-label={`${validation.name} · ${validation.figure}`}
+            className={agentCard(2)}
+            style={{
+              left: 556,
+              top: 236,
+              width: 206,
+              boxShadow: selected === 2 ? '0 0 34px -8px var(--color-accent)' : undefined,
+            }}
+          >
+            <span className="flex items-center gap-1.5">
+              <span className="mono text-[8px] tracking-[0.18em] text-ink-3">{validation.tag}</span>
+              <span className="ml-auto flex h-3 w-3 items-center justify-center">
+                {validation.status === 'working' && !paused ? (
+                  <WorkArc size={12} />
+                ) : validation.status === 'attention' ? (
+                  <Breathe tone={STATION_TONE[validation.status]} />
+                ) : (
+                  <span className="h-[5px] w-[5px] rounded-full" style={{ background: STATION_TONE[validation.status] }} aria-hidden="true" />
+                )}
+              </span>
+            </span>
+            <span className="mt-[5px] block text-[15px] font-bold text-ink">{validation.name}</span>
+            <span className="mt-0.5 block text-[9.5px] text-ink-3">{validation.sub}</span>
+            <span className="mono mt-[7px] block truncate text-[8.5px]" style={{ color: STATION_TONE[validation.status] }}>
+              {validation.figure}
+            </span>
+            <span className="mono mt-[6px] block border-t border-line pt-[6px] text-[8px] text-ink-3">
+              bifurcates by verdict class
+            </span>
+          </button>
+        ) : null}
+
+        {/* ── the four verdicts ────────────────────────────────────────── */}
+        {buckets.map((bucket, i) => {
+          const slot = BUCKET_SLOT[i]
+          if (!slot) return null
+          return (
+            <button
+              key={bucket.id}
+              type="button"
+              onClick={() => onSelect(3)}
+              aria-label={`${bucket.label} · ${verdictTotal === 0 ? 'not measured' : bucket.count}`}
+              className={`${card} px-3 py-[9px] ${selected === 3 ? 'border-accent' : 'hover:border-accent'}`}
+              style={{ left: 886, top: slot.top, width: 200, borderLeftWidth: 2, borderLeftColor: bucket.tone }}
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="mono text-[7.5px] tracking-[0.14em]" style={{ color: bucket.tone }}>
+                  {bucket.label.toUpperCase()}
+                </span>
+                <span className="tabular ml-auto text-[14px] font-bold text-ink">
+                  {verdictTotal === 0 ? '—' : bucket.count}
+                </span>
+              </span>
+              <span className="mono mt-1 block text-[8px] text-ink-3">{BUCKET_NOTE[bucket.id]}</span>
+            </button>
+          )
+        })}
+
+        {/* ── what happens after this theater ──────────────────────────── */}
+        <span className="mono absolute text-[8px] tracking-[0.18em] text-ink-3" style={{ left: 1126, top: 56 }} aria-hidden="true">
+          THEN → CREATE
+        </span>
+        {calendar ? (
+          <button
+            type="button"
+            onClick={() => onSelect(4)}
+            aria-label={`${calendar.name} · ${calendar.figure}`}
+            className={`${card} rounded-[14px] px-[13px] py-[11px] ${selected === 4 ? 'border-accent' : 'hover:border-accent'}`}
+            style={{ left: 1126, top: 83, width: 160 }}
+          >
+            <span className="flex items-center gap-1.5">
+              <span className="mono text-[8px] tracking-[0.18em] text-ink-3">{calendar.tag}</span>
+              <span className="ml-auto h-[5px] w-[5px] rounded-full" style={{ background: STATION_TONE[calendar.status] }} aria-hidden="true" />
+            </span>
+            <span className="mt-[5px] block text-[15px] font-bold text-ink">{calendar.name}</span>
+            <span className="mt-0.5 block text-[9.5px] text-ink-3">{calendar.sub}</span>
+            <span className="mono mt-[7px] block truncate text-[8.5px]" style={{ color: STATION_TONE[calendar.status] }}>
+              {calendar.figure}
+            </span>
+          </button>
+        ) : null}
+
+        {/* ── what the drawing means ───────────────────────────────────── */}
+        <div
+          className="mono absolute flex items-center gap-3.5 text-[8px] tracking-[0.08em] text-ink-3"
+          style={{ left: 20, bottom: 10 }}
+          aria-hidden="true"
+        >
+          <span className="flex items-center gap-1.5">
+            <span className="h-[2px] w-3.5 rounded-[2px]" style={{ background: 'var(--color-accent-bright)' }} />
+            SYNAPSE · PULSES = ITEMS IN FLIGHT
+          </span>
+          {buckets.map((bucket) => (
+            <span key={bucket.id} className="flex items-center gap-1.5">
+              <span className="h-[7px] w-[7px] rounded-full" style={{ background: bucket.tone }} />
+              {bucket.label.toUpperCase()}
+            </span>
+          ))}
         </div>
       </div>
     </div>

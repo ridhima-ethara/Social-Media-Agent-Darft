@@ -7,7 +7,7 @@
 
 # Architecture
 
-**12 agents · 7 stages · 91 skills · 247 knobs · 37 tools**
+**12 agents · 7 stages · 92 skills · 255 knobs · 37 tools**
 
 Eleven specialist agents run a seven-stage pipeline; the twelfth is the command
 plane the operator talks to. Sequencing is derived from each agent's
@@ -47,7 +47,7 @@ plane the operator talks to. Sequencing is derived from each agent's
 | Knowledge Agent | `knowledge` | The cited Knowledge Base | `learn` | 8 | caption, image, calendar, review |
 | Mickey | `publishing` | Publishing Agent · The one irreversible act | `ship` | 4 | analytics |
 | Jerry | `analytics` | Analytics Agent · Measurement against our own baseline | `learn` | 8 | learning |
-| Velma | `learning` | Learning Agent · Turning outcomes into durable knowledge | `learn` | 4 | knowledge |
+| Velma | `learning` | Learning Agent · Turning outcomes into durable knowledge | `learn` | 5 | knowledge |
 
 ## Tools the command plane may call
 

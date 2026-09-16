@@ -659,16 +659,34 @@ export function Dialog({
   onClose,
   header,
   children,
+  size = 'full',
+  footer,
 }: {
   open: boolean
   onClose: () => void
   header: ReactNode
   children: ReactNode
+  /**
+   * `full` fills the viewport — for the review panel, whose columns need the
+   * height. `fit` sizes to its content up to a cap, so a short list does not
+   * leave two thirds of the screen empty under it.
+   */
+  size?: 'full' | 'fit'
+  footer?: ReactNode
 }) {
   useEscape(onClose)
   if (!open) return null
 
-  return (
+  /*
+   * MOUNTED ON <body>, NOT WHERE IT IS WRITTEN.
+   *
+   * `<main>` carries `perspective`, which makes it the containing block for
+   * every `position: fixed` descendant. A dialog opened from inside a page was
+   * therefore fixed to the scrolling pane rather than to the viewport: it sat
+   * under the top bar and was clipped. A portal puts it on the body, where
+   * `inset-0` means the screen.
+   */
+  return createPortal(
     /*
      * ABOVE EVERY OTHER OVERLAY.
      *
@@ -685,7 +703,9 @@ export function Dialog({
       <div
         role="dialog"
         aria-modal="true"
-        className="anim-dialog-in card relative z-10 flex h-[94vh] w-full max-w-[1480px] flex-col overflow-hidden shadow-2xl"
+        className={`anim-dialog-in card relative z-10 flex w-full flex-col overflow-hidden shadow-2xl ${
+          size === 'full' ? 'h-[94vh] max-w-[1480px]' : 'max-h-[86vh] max-w-[940px]'
+        }`}
       >
         <header className="flex items-center justify-between gap-4 border-b border-line px-5 py-3">
           {header}
@@ -702,9 +722,11 @@ export function Dialog({
             a child asks for. The review panel's grid still has to pin its own
             row to this height — see there — or its columns inherit a
             content-sized row and the post is clipped instead of scrolled. */}
-        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+        <div className={`min-h-0 ${size === 'full' ? 'flex-1 overflow-hidden' : 'overflow-y-auto'}`}>{children}</div>
+        {footer ? <footer className="shrink-0 border-t border-line px-5 py-3">{footer}</footer> : null}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

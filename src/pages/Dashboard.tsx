@@ -1,72 +1,48 @@
 /**
- * DASHBOARD
+ * THE DASHBOARD — the command centre.
  *
- * The operator's first screen, built around what the system is doing. The
- * pipeline is the hero: the five stages that move work stand in depth with
- * live counts, and the decision queue sits beside them so a verdict needs no
- * navigation. Under that, the month against this account's own trailing
- * baseline, and the lessons that changed what the agents do.
- *
- * Every figure is measured or it is absent. A tile with nothing to show says
- * why, and never shows a zero that reads as a result.
+ * One screen with the emblem at its heart and the platform's work arranged
+ * around it. Every card is a door to the screen that owns that work, and
+ * every figure on a card is read from state: a number the platform has not
+ * measured is shown as not measured, never as a placeholder.
  */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { ArrowUpRight, ExternalLink, Play } from 'lucide-react'
-import { AGENT_BY_ID, STAGES } from '@shared/agent-registry'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { ArrowUpRight, ExternalLink, Play, Sparkles } from 'lucide-react'
+import { AGENT_BY_ID } from '@shared/agent-registry'
 import { useStore } from '../store'
 import { DownloadMenu } from '../components/download-menu'
-import { Btn, CountUp, EmptyState, PLATFORM_LABEL, PLATFORM_TOKEN, PlatformIcon, fmt, timeAgo } from '../components/ui'
+import { Logo } from '../components/logo'
+import { navFor } from '../components/layout'
+import { AssistantCore } from '../components/assistant/core'
+import { AgentHologram } from '../components/agent-hologram'
+import { Btn, Dialog, EmptyState, PLATFORM_LABEL, PLATFORM_TOKEN, PlatformIcon, fmt, timeAgo } from '../components/ui'
 import { exportCombined, exportPerPost } from '../lib/export'
-import type { AgentId, AgentRunStatus, Idea, Platform, PlatformAnalytics, ReviewQueueItem } from '../types'
+import type { AgentId, AgentState, Idea, PageId, Platform, ReviewQueueItem } from '../types'
 
 /**
- * The brand definition is configuration, not something learned. Excluded by
- * name so any category the Learning Agent produces counts as a lesson.
+ * Knowledge that is brand definition (configuration), not something learned.
+ * Excluded by name so any category the Learning Agent produces counts as a lesson.
  */
 const BRAND_DEFINITION_CATEGORIES = ['Brand Corpus', 'Brand Voice', 'Brand Guideline', 'Visual Identity', 'Compliance Rule']
-
-/** The stages that move work, in registry order. Measure and learn close the loop overhead. */
-const WORK_STAGE_IDS = ['discover', 'assess', 'plan', 'create', 'ship'] as const
-const LOOP_STAGE_IDS = ['learn'] as const
-
+const PLATFORMS: Platform[] = ['linkedin', 'instagram', 'x', 'facebook']
 const DAY_MS = 86_400_000
 
 function agentShort(id: AgentId): string {
   return AGENT_BY_ID[id]?.name.replace(' Agent', '') ?? id
 }
 
-type StageStatus = 'idle' | 'running' | 'done' | 'gated' | 'failed'
-
-/** A stage is what its agents are doing, taken together. */
-function stageStatus(statuses: AgentRunStatus[]): StageStatus {
-  if (statuses.some((s) => s === 'failed')) return 'failed'
-  if (statuses.some((s) => s === 'running')) return 'running'
-  if (statuses.some((s) => s === 'needs_review' || s === 'waiting')) return 'gated'
-  if (statuses.length > 0 && statuses.every((s) => s === 'completed')) return 'done'
-  return 'idle'
+function startOfWeek(date: Date): Date {
+  const d = new Date(date)
+  d.setHours(0, 0, 0, 0)
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
+  return d
 }
-
-const STAGE_STROKE: Record<StageStatus, string> = {
-  idle: 'var(--color-line-strong)',
-  running: 'var(--color-accent)',
-  done: 'var(--color-good)',
-  gated: 'var(--color-serious)',
-  failed: 'var(--color-critical)',
-}
-
-function quantile(sorted: number[], q: number): number {
-  if (sorted.length === 0) return 0
-  const pos = (sorted.length - 1) * q
-  const lo = Math.floor(pos)
-  const hi = Math.ceil(pos)
-  const a = sorted[lo] ?? 0
-  const b = sorted[hi] ?? a
-  return a + (b - a) * (pos - lo)
-}
-
 function shortDay(iso: string): string {
-  return new Date(iso).toLocaleDateString('en-GB', { weekday: 'short' })
+  return new Date(iso).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' })
+}
+function isoDate(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
 export function Dashboard() {
@@ -79,208 +55,177 @@ export function Dashboard() {
   const agents = useStore((s) => s.agents)
   const reviewQueue = useStore((s) => s.reviewQueue)
   const pendingConfirm = useStore((s) => s.assistant.pendingConfirm)
+  const coreState = useStore((s) => s.assistant.coreState)
   const scrapeRun = useStore((s) => s.scrapeRun)
-  const apiMode = useStore((s) => s.apiMode)
+  const setPage = useStore((s) => s.setPage)
   const openTheater = useStore((s) => s.openTheater)
   const runScraping = useStore((s) => s.runScraping)
-  const openKnowledge = useStore((s) => s.openKnowledge)
+  const openBar = useStore((s) => s.openBar)
+  const [queueOpen, setQueueOpen] = useState(false)
 
-  const months = useMemo(() => [...new Set(analytics.map((a) => a.month))].sort().reverse(), [analytics])
-  // The chosen month, not the stored one: analytics arrives after mount.
-  const [picked, setPicked] = useState<string | null>(null)
-  const month = picked !== null && months.includes(picked) ? picked : (months[0] ?? '')
-  const previousMonth = months[months.indexOf(month) + 1]
-  const [platformTab, setPlatformTab] = useState<Platform>('linkedin')
-
-  const rowFor = (m: string | undefined, p: Platform): PlatformAnalytics | undefined =>
-    m === undefined ? undefined : analytics.find((a) => a.month === m && a.platform === p)
-  const linkedin = rowFor(month, 'linkedin')
-  const instagram = rowFor(month, 'instagram')
-  const prevLinkedin = rowFor(previousMonth, 'linkedin')
-  const reported = analytics.some((a) => a.month === month && a.is_reported)
-  const labelOf = (m: string | undefined): string => (m ? (analytics.find((a) => a.month === m)?.label ?? m) : '')
-
-  /* ── Waiting on people ────────────────────────────────────────────── */
-  const awaitingLeadership = ideas.filter((i) => i.status === 'pending_leadership')
-  const openVerdicts = reviewQueue.filter((q) => !q.resolved)
-  const waitingCount = awaitingLeadership.length + openVerdicts.length + (pendingConfirm ? 1 : 0)
-  const oldestWaiting = [...awaitingLeadership.map((i) => i.marketing_approved_at ?? i.updated_at), ...openVerdicts.map((q) => q.created_at)]
-    .filter((d): d is string => typeof d === 'string')
-    .sort()[0]
-
-  /* ── The published tile ───────────────────────────────────────────── */
-  const drafted = ideas.filter((i) => i.status !== 'suggested').length
-  const held = ideas.filter((i) => i.status === 'in_review' || i.status === 'pending_leadership' || i.status === 'approved').length
-  const rejected = ideas.filter((i) => i.status === 'rejected').length
-
-  /* ── Scheduled · 14d ──────────────────────────────────────────────── */
-  const now = Date.now()
-  const upcoming = useMemo(
-    () =>
-      ideas
-        .filter((i) => i.calendar_slot === 'primary' && i.status !== 'published' && i.status !== 'rejected')
-        .filter((i) => {
-          const t = new Date(i.scheduled_date).getTime()
-          return t >= now - DAY_MS && t < now + 14 * DAY_MS
-        })
-        .sort((a, b) => `${a.scheduled_date}${a.scheduled_time}`.localeCompare(`${b.scheduled_date}${b.scheduled_time}`)),
-    [ideas, now],
-  )
-  const weekdayShape = useMemo(() => {
-    const counts = [0, 0, 0, 0, 0, 0, 0]
-    for (const i of upcoming) counts[(new Date(i.scheduled_date).getDay() + 6) % 7] += 1
-    const max = Math.max(1, ...counts)
-    return counts.map((c) => c / max)
-  }, [upcoming])
-  const nextOut = upcoming.find((i) => new Date(i.scheduled_date).getTime() >= now - DAY_MS)
-  const scheduledPlatforms = new Set(upcoming.map((i) => i.platform)).size
-
-  /* ── Lessons ──────────────────────────────────────────────────────── */
-  const learned = useMemo(
-    () => knowledge.filter((e) => e.active && !BRAND_DEFINITION_CATEGORIES.includes(e.category)).slice(0, 4),
-    [knowledge],
-  )
-
-  /* ── Pipeline ─────────────────────────────────────────────────────── */
-  const stages = useMemo(() => {
-    const statusOf = (id: AgentId): AgentRunStatus => agents.find((a) => a.agent_id === id)?.status ?? 'idle'
-    return STAGES.filter((s) => s.id !== 'command').map((stage) => {
-      const ids = Object.values(AGENT_BY_ID)
-        .filter((a) => a.stage === stage.id && a.id !== 'assistant')
-        .map((a) => a.id)
-      return { id: stage.id, name: stage.name, agents: ids, status: stageStatus(ids.map(statusOf)) }
-    })
-  }, [agents])
-  const workStages = WORK_STAGE_IDS.map((id) => stages.find((s) => s.id === id)).filter((s): s is NonNullable<typeof s> => s !== undefined)
-  const runningAgent = agents.find((a) => a.status === 'running')
-  const anyRunning = runningAgent !== undefined || scrapeRun.running
-  const runId = scrapeRun.runId ? scrapeRun.runId.slice(0, 4) : null
-
-  const heldGates = awaitingLeadership.length + ideas.filter((i) => i.status === 'in_review').length
-  const stageLine = (id: string): { text: string; tone: string } => {
-    switch (id) {
-      case 'discover': {
-        const kept = scrapeRun.captures.filter((c) => c.held === null).length
-        const empty = scrapeRun.lanes.filter((l) => l.status === 'warn').length
-        if (scrapeRun.captures.length === 0 && scrapeRun.lanes.length === 0) return { text: 'nothing captured', tone: 'text-ink-3' }
-        return { text: `${kept} kept${empty > 0 ? ` · ${empty} empty` : ''}`, tone: 'text-good-ink' }
-      }
-      case 'assess': {
-        const scored = scrapeRun.verdicts.length
-        const forYou = scrapeRun.verdicts.filter((v) => v.verdict === 'needs_review').length + openVerdicts.length
-        if (scored === 0 && forYou === 0) return { text: 'nothing to score', tone: 'text-ink-3' }
-        return { text: `${scored} scored${forYou > 0 ? ` · ${forYou} for you` : ''}`, tone: forYou > 0 ? 'text-serious' : 'text-good-ink' }
-      }
-      case 'plan': {
-        const placed = ideas.filter((i) => i.calendar_slot === 'primary').length
-        return placed === 0 ? { text: 'no slots taken', tone: 'text-ink-3' } : { text: `${placed} slots · ${ideas.length - placed} held`, tone: 'text-accent-bright' }
-      }
-      case 'create': {
-        const written = ideas.filter((i) => i.status !== 'suggested').length
-        return written === 0 ? { text: 'queued', tone: 'text-ink-3' } : { text: `${written} drafted`, tone: 'text-good-ink' }
-      }
-      case 'ship':
-        return heldGates === 0 ? { text: published.length === 0 ? 'nothing published' : `${published.length} out`, tone: 'text-ink-3' } : { text: `${heldGates} gate${heldGates === 1 ? '' : 's'} held`, tone: 'text-serious' }
-      default:
-        return { text: '', tone: 'text-ink-3' }
-    }
+  /*
+   * The scene leans a few degrees toward the pointer. Written straight to the
+   * node rather than through state: this fires on every mouse move, and a
+   * re-render per frame would cost more than the whole hologram.
+   */
+  const sceneRef = useRef<HTMLDivElement | null>(null)
+  const reducedRef = useRef(typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  const onScenePointer = (event: React.PointerEvent<HTMLElement>): void => {
+    if (reducedRef.current || !sceneRef.current) return
+    const box = event.currentTarget.getBoundingClientRect()
+    const x = (event.clientX - box.left) / box.width - 0.5
+    const y = (event.clientY - box.top) / box.height - 0.5
+    sceneRef.current.style.transform = `rotateX(${(-y * 3).toFixed(2)}deg) rotateY(${(x * 4.5).toFixed(2)}deg)`
   }
+  const resetScene = (): void => {
+    if (sceneRef.current) sceneRef.current.style.transform = 'rotateX(0deg) rotateY(0deg)'
+  }
+  const [statusOpen, setStatusOpen] = useState(false)
 
-  /* ── Lane feed: what the run reported last ────────────────────────── */
-  const feed = useMemo(() => {
-    const laneRows = scrapeRun.lanes.slice(-3).map((l) => ({
-      id: `l-${l.id}`,
-      agent: 'SHERLOCK',
-      warn: l.status === 'warn',
-      text:
-        l.status === 'warn'
-          ? `${l.platform} · ${l.keyword} · nothing captured${l.reason ? ` · ${l.reason}` : ''}`
-          : l.status === 'running'
-            ? `${l.platform} · ${l.keyword} · capturing`
-            : `${l.platform} · ${l.keyword} · kept ${l.kept ?? 0}${l.captured === null ? '' : ` of ${l.captured}`}`,
+  /* ── Reach and engagement: the latest reported month, summed across platforms ── */
+  const month = useMemo(() => [...new Set(analytics.filter((a) => a.is_reported).map((a) => a.month))].sort().reverse()[0] ?? null, [analytics])
+  const reportedRows = useMemo(() => analytics.filter((a) => a.month === month && a.is_reported), [analytics, month])
+  const monthLabel = reportedRows[0]?.label ?? month ?? null
+  /** Sum of one metric across the rows that report it; null when none does. */
+  const metric = (key: string): number | null => {
+    const rows = reportedRows.filter((r) => typeof r.metrics[key] === 'number')
+    return rows.length === 0 ? null : rows.reduce((sum, r) => sum + (r.metrics[key] ?? 0), 0)
+  }
+  const reach = metric('reach') ?? metric('impressions')
+  const engagementRate = (() => {
+    const rows = reportedRows.filter((r) => typeof r.metrics.engagementRate === 'number')
+    return rows.length === 0 ? null : rows.reduce((s, r) => s + (r.metrics.engagementRate ?? 0), 0) / rows.length
+  })()
+  const followers = metric('followerGrowth')
+  const daily = useMemo(() => {
+    const byDate = new Map<string, number>()
+    for (const row of reportedRows) for (const d of row.daily) byDate.set(d.date, (byDate.get(d.date) ?? 0) + d.value)
+    return [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v)
+  }, [reportedRows])
+
+  /* ── Engagement breakdown and top content: from the published posts' own readings ── */
+  const breakdown = useMemo(() => {
+    const parts = (['likes', 'comments', 'shares'] as const).map((key) => ({
+      key,
+      value: published.reduce((sum, p) => sum + (p[key] ?? 0), 0),
+      reported: published.some((p) => p[key] !== null),
     }))
-    const noteRows = scrapeRun.notes.slice(-3).map((n) => ({
-      id: `n-${n.id}`,
-      agent: agentShort(n.agentId as AgentId).toUpperCase(),
-      warn: n.status === 'warn',
-      text: n.message,
-    }))
-    return [...noteRows, ...laneRows].slice(-3).reverse()
-  }, [scrapeRun.lanes, scrapeRun.notes])
+    const total = parts.reduce((s, p) => s + p.value, 0)
+    return { parts, total, reported: parts.some((p) => p.reported) }
+  }, [published])
 
-  /* ── Baseline chart ───────────────────────────────────────────────── */
-  const chartRow = rowFor(month, platformTab)
-  const prevRow = rowFor(previousMonth, platformTab)
-  const chart = useMemo(() => {
-    if (!chartRow || chartRow.daily.length === 0) return null
-    const values = chartRow.daily.map((d) => d.value)
-    const prevValues = prevRow?.daily.map((d) => d.value) ?? []
-    // The band is where last month sat most of the time: its inner two quartiles.
-    const sortedPrev = [...prevValues].sort((a, b) => a - b)
-    const band = prevValues.length > 0 ? { lo: quantile(sortedPrev, 0.25), hi: quantile(sortedPrev, 0.75) } : null
-    const max = Math.max(...values, band?.hi ?? 0, 1)
-    const peakIndex = values.indexOf(Math.max(...values))
-    const daysAbove = band ? values.filter((v) => v > band.hi).length : null
-    const prevDaysAbove =
-      band && prevValues.length > 0 ? prevValues.filter((v) => v > band.hi).length : null
-    const avg = values.reduce((s, v) => s + v, 0) / values.length
-    const prevAvg = prevValues.length > 0 ? prevValues.reduce((s, v) => s + v, 0) / prevValues.length : null
-    return { values, band, max, peakIndex, daysAbove, prevDaysAbove, avg, prevAvg, dates: chartRow.daily.map((d) => d.date) }
-  }, [chartRow, prevRow])
+  /* ── This week ── */
+  const today = useMemo(() => new Date(), [])
+  const week = useMemo(() => {
+    const start = startOfWeek(today)
+    return Array.from({ length: 7 }, (_, i) => {
+      const day = new Date(start.getTime() + i * DAY_MS)
+      const iso = isoDate(day)
+      return { iso, day, items: ideas.filter((idea) => idea.calendar_slot === 'primary' && idea.scheduled_date === iso && idea.status !== 'rejected') }
+    })
+  }, [ideas, today])
+  const placed = week.reduce((s, d) => s + d.items.length, 0)
+  /** Published posts with a reading, strongest first. */
+  const topContent = useMemo(
+    () =>
+      [...published]
+        .filter((post) => post.likes !== null || post.comments !== null || post.shares !== null || post.impressions !== null)
+        .sort((a, b) => (b.likes ?? 0) + (b.comments ?? 0) + (b.shares ?? 0) - ((a.likes ?? 0) + (a.comments ?? 0) + (a.shares ?? 0)))
+        .slice(0, 3),
+    [published],
+  )
 
-  const engagementDelta =
-    linkedin && prevLinkedin && prevLinkedin.metrics.engagementRate
-      ? ((linkedin.metrics.engagementRate ?? 0) - prevLinkedin.metrics.engagementRate) / prevLinkedin.metrics.engagementRate * 100
-      : null
-  const impressionsDelta =
-    linkedin && prevLinkedin && prevLinkedin.metrics.impressions
-      ? ((linkedin.metrics.impressions ?? 0) - prevLinkedin.metrics.impressions) / prevLinkedin.metrics.impressions * 100
-      : null
+  /** The strongest drafts, for the card that stands in until something is published. */
+  const topDrafts = useMemo(
+    () => [...ideas].filter((i) => i.status !== 'suggested' && i.status !== 'rejected').sort((a, b) => b.confidence - a.confidence).slice(0, 4),
+    [ideas],
+  )
+  /** What is next in the week, from today, with its creative. */
+  const upcomingWeek = useMemo(() => {
+    const todayKey = isoDate(today)
+    return week.flatMap((d) => d.items).filter((i) => i.scheduled_date >= todayKey).slice(0, 3)
+  }, [week, today])
+  /** What the Analyze panel shows: lessons if any, else the most-cited entries. */
+  const insightRows = useMemo(() => {
+    const lessons = knowledge.filter((e) => e.active && !BRAND_DEFINITION_CATEGORIES.includes(e.category)).slice(0, 3)
+    if (lessons.length > 0) return lessons
+    return [...knowledge].filter((e) => e.active).sort((a, b) => b.evidence_count - a.evidence_count).slice(0, 3)
+  }, [knowledge])
 
+  /** When nothing has been learned yet, the entries the agents lean on most. */
+
+  /** Everything written but not yet out — what the Create station holds. */
+  const drafts = useMemo(
+    () =>
+      [...ideas]
+        .filter((i) => i.status === 'drafted' || i.status === 'in_review' || i.status === 'pending_leadership')
+        .sort((a, b) => `${a.scheduled_date} ${a.scheduled_time}`.localeCompare(`${b.scheduled_date} ${b.scheduled_time}`)),
+    [ideas],
+  )
+
+  /* ── Waiting on people ── */
+  const awaitingLeadership = useMemo(() => ideas.filter((i) => i.status === 'pending_leadership'), [ideas])
+  const openVerdicts = useMemo(() => reviewQueue.filter((q) => !q.resolved), [reviewQueue])
+  const waitingCount = awaitingLeadership.length + openVerdicts.length + (pendingConfirm ? 1 : 0)
+  const total = waitingCount
+  /** The queue in one line each, for the card. The dialog holds the full cards. */
+  const waitingRows = useMemo(
+    () => [
+      ...(pendingConfirm ? [{ id: 'confirm', kind: 'confirm', title: pendingConfirm.prompt, age: 'now' }] : []),
+      ...awaitingLeadership.map((i) => ({ id: i.id, kind: 'gate', title: i.title, age: timeAgo(i.marketing_approved_at ?? i.updated_at) })),
+      ...openVerdicts.map((q) => ({ id: q.id, kind: q.kind.replace(/[_.]/g, ' '), title: q.entity_title ?? q.decision_requested, age: timeAgo(q.created_at) })),
+    ],
+    [pendingConfirm, awaitingLeadership, openVerdicts],
+  )
+  const oldestWait = [...awaitingLeadership.map((i) => i.marketing_approved_at ?? i.updated_at), ...openVerdicts.map((q) => q.created_at)].sort()[0]
+
+  /* ── Lessons, agents, platforms ── */
   const kbCount = knowledgeCounts?.active ?? knowledge.filter((k) => k.active).length
+  const running = agents.filter((a) => a.status === 'running')
+  const lastRun = agents.map((a) => a.last_run).filter((v): v is string => v !== null).sort().reverse()[0] ?? null
+  const platformRows = PLATFORMS.map((platform) => ({
+    platform,
+    scheduled: ideas.filter((i) => i.platform === platform && i.calendar_slot === 'primary' && i.status !== 'rejected' && i.status !== 'published').length,
+    published: published.filter((p) => p.platform === platform).length,
+  }))
+  const controls = navFor(user?.role ?? 'marketing').flatMap((g) => g.items).filter((i) => i.page !== 'dashboard')
+
+  const busy = running.length > 0 || scrapeRun.running
+  const statusLine = busy
+    ? `${running[0] ? agentShort(running[0].agent_id) : 'Sherlock'} · ${running[0]?.current_task ?? 'capturing'}`
+    : lastRun ? `all ${agents.length} agents idle · last run ${timeAgo(lastRun)}` : `all ${agents.length} agents idle · no run yet`
 
   return (
-    <>
-      <header className="glass -mx-6 -mt-5 mb-3.5 flex min-h-[52px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
-        <div className="flex min-w-0 items-baseline gap-[9px]">
-          <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Dashboard</h1>
-          <span className="hidden truncate text-[11.5px] text-ink-3 md:inline">measured against our own trailing baseline</span>
+    <div className="relative flex min-h-0 w-full flex-1 flex-col">
+      {/* The ambient field the glass sits over: light from behind the core,
+          a warmer wash low and right, and a vignette holding the edges. */}
+      <div aria-hidden="true" className="pointer-events-none absolute -inset-x-6 inset-y-0 -z-10 overflow-hidden">
+        <span className="absolute left-1/2 top-[38%] h-[640px] w-[900px] -translate-x-1/2 -translate-y-1/2 rounded-full" style={{ background: 'radial-gradient(closest-side, color-mix(in srgb, var(--color-accent) 26%, transparent), transparent)', filter: 'blur(40px)' }} />
+        <span className="absolute right-[-10%] bottom-[-10%] h-[520px] w-[620px] rounded-full" style={{ background: 'radial-gradient(closest-side, color-mix(in srgb, var(--color-magenta) 16%, transparent), transparent)', filter: 'blur(48px)' }} />
+        <span className="absolute left-[-8%] top-[-6%] h-[420px] w-[520px] rounded-full" style={{ background: 'radial-gradient(closest-side, color-mix(in srgb, var(--color-accent-bright) 14%, transparent), transparent)', filter: 'blur(44px)' }} />
+      </div>
+
+      {/* ── Title row ─────────────────────────────────────────────────── */}
+      <div className="mb-3.5 flex flex-wrap items-center gap-3">
+        <div className="min-w-0">
+          <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Command centre</h1>
+          <p className="text-[11.5px] text-ink-3">Every card opens the screen that owns the work. Every figure is read from the platform.</p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {months.length > 0 ? (
-            <div role="group" aria-label="Reporting period" className="flex items-center overflow-hidden rounded-md border border-line-strong">
-              {months.slice(0, 4).map((key, i) => {
-                const active = key === month
-                const label = labelOf(key)
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setPicked(key)}
-                    aria-pressed={active}
-                    className={`mono px-2.5 py-[5px] text-[11px] uppercase transition-colors duration-[var(--dur-fast)] ${i > 0 ? 'border-l border-line-strong' : ''} ${
-                      active ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:text-ink-2'
-                    }`}
-                  >
-                    {active ? label : label.split(' ')[0]?.slice(0, 3)}
-                  </button>
-                )
-              })}
-            </div>
-          ) : (
-            <span className="mono rounded-md border border-line-strong px-2 py-[5px] text-[10px] tracking-[0.08em] text-ink-3">NO PERIOD REPORTED</span>
-          )}
-          {reported ? (
-            <span className="mono inline-flex items-center gap-1.5 rounded-md border border-line-strong px-2 py-[5px] text-[10px] tracking-[0.08em] text-ink-2">
-              <span className="h-[5px] w-[5px] rounded-full bg-accent-bright" aria-hidden="true" />
-              REPORTED DATA
-            </span>
-          ) : null}
           <DownloadMenu
             options={[
               { id: 'combined', label: 'Combined analytics', hint: 'One row per platform per month, every reported metric.', onSelect: (format) => exportCombined(analytics, format) },
               { id: 'per-post', label: 'Per-post analytics', hint: 'Every published post with its latest metric reading.', onSelect: (format) => exportPerPost(published, format) },
             ]}
+          />
+          <SystemPill
+            agents={agents}
+            busy={busy}
+            statusLine={statusLine}
+            open={statusOpen}
+            onToggle={() => setStatusOpen((v) => !v)}
+            onOpenTheater={() => { setStatusOpen(false); if (user?.role === 'leadership') setPage('orchestration'); else openTheater() }}
+            leadership={user?.role === 'leadership'}
           />
           {user?.role === 'marketing' ? (
             <Btn
@@ -297,591 +242,459 @@ export function Dashboard() {
             </Btn>
           ) : null}
         </div>
-      </header>
+      </div>
 
-      {/* ── Metric band ──────────────────────────────────────────────── */}
+      {/* ── The command centre ────────────────────────────────────────
+          A 320 / 1fr / 340 grid under one perspective: the side columns turn
+          8° toward the middle, the agent sits 26px proud of them, and the
+          whole scene tilts a little with the pointer. */}
       <section
-        aria-label="Performance this period"
-        className="mb-3.5 grid grid-cols-1 gap-px overflow-hidden rounded-[10px] border border-line-strong bg-line-strong sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
-        style={{ animation: 'eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
+        aria-label="Command centre"
+        onPointerMove={onScenePointer}
+        onPointerLeave={resetScene}
+        className="relative flex min-h-0 flex-1 flex-col"
+        style={{ perspective: 1600, perspectiveOrigin: '50% 40%' }}
       >
-        <Tile label="Engagement rate" unavailable={linkedin ? null : 'LinkedIn has reported no monthly rollup yet'}>
-          <Figure value="—" {...(linkedin ? { count: linkedin.metrics.engagementRate ?? 0, format: (n: number) => n.toFixed(2) } : {})} unit="%" delta={engagementDelta} />
-          {linkedin && prevLinkedin ? (
-            <GhostBar
-              now={linkedin.metrics.engagementRate ?? 0}
-              ghost={prevLinkedin.metrics.engagementRate ?? 0}
-            />
-          ) : (
-            <Spacer />
-          )}
-          <Caption>{prevLinkedin ? `LinkedIn · ghost = ${labelOf(previousMonth).split(' ')[0]}` : 'LinkedIn · no prior month to compare'}</Caption>
-        </Tile>
+        <div
+          ref={sceneRef}
+          className="flex min-h-0 flex-1 flex-col gap-3.5"
+          style={{ transformStyle: 'preserve-3d', transition: 'transform 220ms var(--ease-out-soft)' }}
+        >
+          <div
+            className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(280px,21%)_minmax(0,1fr)_minmax(280px,21%)] xl:grid-rows-[minmax(0,1fr)]"
+            style={{ transformStyle: 'preserve-3d' }}
+          >
 
-        <Tile label="Impressions" unavailable={linkedin ? null : 'No impressions reported for this period'}>
-          <Figure value="—" {...(linkedin ? { count: linkedin.metrics.impressions ?? 0, format: fmt } : {})} delta={impressionsDelta} />
-          {linkedin && linkedin.daily.length > 1 ? <Spark values={linkedin.daily.map((d) => d.value)} /> : <Spacer />}
-          <Caption>
-            {(() => {
-              const first = linkedin?.daily[0]
-              if (!linkedin || !first) return 'no daily series'
-              const peak = linkedin.daily.reduce((p, d) => (d.value > p.value ? d : p), first)
-              return `peak ${fmt(peak.value)} · ${new Date(peak.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`
-            })()}
-          </Caption>
-        </Tile>
+            {/* ── left ─────────────────────────────────────────────── */}
+            <div
+              className="flex min-w-0 flex-col justify-start gap-3.5"
+              style={{ transform: 'rotateY(8deg) translateZ(-14px)', transformOrigin: '100% 50%' }}
+            >
+              <Panel title="Analyze" hint={`${kbCount} entries`} onOpen={() => setPage('intelligence')} delay={120}>
+                {insightRows.length === 0 ? (
+                  <NotMeasured>The Knowledge Base is empty. Entries arrive once a research build has run.</NotMeasured>
+                ) : (
+                  <ul className="flex flex-col gap-[7px]">
+                    {insightRows.map((entry) => (
+                      <li key={entry.id}>
+                        <Row>
+                          <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border border-hud-strong bg-accent/12">
+                            <Sparkles size={11} className="text-accent-bright" aria-hidden="true" />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block truncate text-[11.5px] font-medium text-ink">{entry.title}</span>
+                            <span className="mono mt-0.5 block truncate text-[8px] uppercase tracking-[0.1em] text-ink-3">
+                              {entry.category} · {entry.evidence_count} cited
+                            </span>
+                          </span>
+                        </Row>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Panel>
 
-        <Tile label="New followers" unavailable={linkedin ? null : 'No follower figures reported for this period'}>
-          <Figure value="—" {...(linkedin ? { count: (linkedin.metrics.followerGrowth ?? 0) + (instagram?.metrics.followerGrowth ?? 0), format: fmt } : {})} />
-          {linkedin ? (
-            <SplitBar
-              parts={[
-                { platform: 'linkedin', value: linkedin.metrics.followerGrowth ?? 0 },
-                { platform: 'instagram', value: instagram?.metrics.followerGrowth ?? 0 },
-              ]}
-            />
-          ) : (
-            <Spacer />
-          )}
-          <Caption>{linkedin?.metrics.organicShare !== undefined ? `${linkedin.metrics.organicShare}% organic` : 'organic share not reported'}</Caption>
-        </Tile>
+              <Panel title="Create" hint={`${drafts.length} draft${drafts.length === 1 ? '' : 's'}`} onOpen={() => setPage('calendar')} delay={200} grow>
+                {topDrafts.length === 0 ? (
+                  <NotMeasured>Nothing is written yet.</NotMeasured>
+                ) : (
+                  <ul className="flex flex-col gap-[7px]">
+                    {topDrafts.map((idea) => (
+                      <li key={idea.id}>
+                        <Row>
+                          <Thumb src={idea.media?.dataUri ?? null} platform={idea.platform} className="h-[30px] w-10 shrink-0" />
+                          <span className="min-w-0">
+                            <span className="block truncate text-[11.5px] font-medium text-ink">{idea.title}</span>
+                            <span className="mono mt-0.5 block truncate text-[8px] uppercase tracking-[0.1em] text-ink-3">
+                              {IDEA_STATUS_LABEL[idea.status] ?? idea.status} · conf {idea.confidence}
+                            </span>
+                          </span>
+                        </Row>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Panel>
+            </div>
 
-        <Tile label="Published">
-          <Figure value="0" count={published.length} suffix={drafted > 0 ? `of ${drafted} drafted` : undefined} />
-          <Bar fraction={drafted > 0 ? published.length / drafted : 0} tone="var(--color-hud-strong)" />
-          <Caption>{held === 0 && rejected === 0 ? 'nothing held or rejected' : `${held} held · ${rejected} rejected`}</Caption>
-        </Tile>
+            {/* ── centre: the agent ────────────────────────────────── */}
+            <div className="relative flex min-w-0 flex-col items-center" style={{ transform: 'translateZ(26px)' }}>
+              <div className="relative min-h-[200px] w-full flex-1">
+                <AgentHologram busy={busy} className="absolute inset-0" />
+                <button
+                  type="button"
+                  onClick={() => openTheater()}
+                  title="What the system is doing"
+                  className="absolute left-1/2 top-[42%] h-[118px] w-[118px] rounded-full transition-[box-shadow] duration-300 hover:shadow-[0_0_60px_var(--color-glow)]"
+                  style={{ marginLeft: -59, marginTop: -59, boxShadow: '0 0 44px -6px color-mix(in srgb, var(--color-accent) 70%, transparent)' }}
+                >
+                  <Logo size={118} className="rounded-full" />
+                </button>
+              </div>
 
-        <Tile label="Scheduled · 14d">
-          <Figure value="0" count={upcoming.length} suffix={upcoming.length > 0 ? `${scheduledPlatforms} platform${scheduledPlatforms === 1 ? '' : 's'}` : undefined} />
-          <div className="mt-3 flex h-3.5 items-end gap-0.5" aria-hidden="true">
-            {weekdayShape.map((h, i) => (
-              <span
-                key={i}
-                className="flex-1 rounded-[1px]"
-                style={{ height: `${Math.max(20, h * 100)}%`, background: h > 0 ? 'var(--color-hud-strong)' : 'var(--color-surface-3)' }}
-              />
-            ))}
-          </div>
-          <Caption>{nextOut ? `next out ${shortDay(nextOut.scheduled_date)} ${nextOut.scheduled_time}` : 'nothing on the calendar'}</Caption>
-        </Tile>
+              <div className="text-center">
+                <p className="text-[19px] font-bold tracking-[0.2px] text-ink">AI Social Agent</p>
+                <p className="mono mt-[5px] text-[9px] uppercase tracking-[0.35em] text-ink-3">Autonomous mode</p>
+                <span className="mono mt-[9px] inline-flex items-center gap-[7px] rounded-full border border-line-strong bg-surface/60 px-[13px] py-1 text-[9px] uppercase tracking-[0.15em] text-ink-2">
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${busy ? 'bg-accent anim-pulse-dot' : 'bg-good'}`}
+                    style={{ boxShadow: `0 0 10px ${busy ? 'var(--color-accent)' : 'var(--color-good)'}` }}
+                    aria-hidden="true"
+                  />
+                  {busy ? 'running' : 'idle'}
+                </span>
+              </div>
 
-        <Tile label="Waiting on people" attention={waitingCount > 0}>
-          <div className="mt-[7px] flex items-baseline gap-[7px]">
-            <span className={`mono text-[26px] font-medium leading-none tracking-[-0.02em] ${waitingCount > 0 ? 'text-serious' : 'text-ink'}`}>
-              <CountUp value={waitingCount} format={(n) => String(Math.round(n))} />
-            </span>
-            {waitingCount > 0 ? <Breathe /> : null}
-          </div>
-          <div className="mono mt-[9px] flex flex-col gap-[3px] text-[10px] text-ink-2">
-            {openVerdicts.length > 0 ? <span>{openVerdicts.length} &nbsp;validation verdict{openVerdicts.length === 1 ? '' : 's'}</span> : null}
-            {awaitingLeadership.length > 0 ? <span>{awaitingLeadership.length} &nbsp;leadership approval{awaitingLeadership.length === 1 ? '' : 's'}</span> : null}
-            {pendingConfirm ? <span>1 &nbsp;confirmation</span> : null}
-            {waitingCount === 0 ? <span className="text-ink-3">nothing needs a person</span> : null}
-          </div>
-        </Tile>
-      </section>
-
-      {/* ── Hero: live pipeline + decision queue ─────────────────────── */}
-      <section className="mb-3.5 grid gap-3.5 lg:grid-cols-[minmax(0,1.52fr)_minmax(0,1fr)]">
-        <Panel>
-          <PanelHeader
-            lead={
-              <span className={`mono inline-flex items-center gap-[7px] text-[11px] uppercase tracking-[0.14em] ${anyRunning ? 'text-accent-bright' : 'text-ink-3'}`}>
-                <span className={`h-[5px] w-[5px] rounded-full ${anyRunning ? 'bg-accent-bright' : 'bg-ink-3'}`} aria-hidden="true" />
-                {anyRunning ? `Live${runId ? ` · run ${runId}` : ''}` : 'Idle'}
-              </span>
-            }
-            title="What the system is doing"
-            meta={runningAgent ? `${agentShort(runningAgent.agent_id)} · ${runningAgent.current_task}` : `${agents.length} agents · nothing running`}
-            action={
               <button
                 type="button"
-                onClick={openTheater}
-                className="mono rounded-[5px] border border-line-strong px-2 py-[3px] text-[10px] text-ink-2 transition-colors duration-[var(--dur-fast)] hover:border-accent/60 hover:text-ink"
+                onClick={() => openBar()}
+                className="glass-panel mt-2.5 inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] text-ink transition-[border-color,box-shadow] hover:border-accent hover:shadow-[0_0_22px_-6px_var(--color-accent)]"
               >
-                OPEN THEATER
+                <AssistantCore state={coreState === 'thinking' || coreState === 'working' ? 'thinking' : 'dormant'} size={15} />
+                {coreState === 'thinking' || coreState === 'working' ? 'Thinking…' : 'Ask Ethara'}
+                <span className="mono rounded-[5px] border border-line-strong px-[5px] py-px text-[8.5px] text-ink-3">⌘K</span>
               </button>
-            }
-          />
 
-          <StageScene stages={workStages} loopStage={stages.find((s) => s.id === LOOP_STAGE_IDS[0])} lineFor={stageLine} anyRunning={anyRunning} />
+              {/* One line, always reserved, so nothing below it jumps. */}
+              <p className="mono mt-2 h-[15px] text-[9.5px] tracking-[0.05em] text-accent-bright">{statusLine}</p>
 
-          <div className="flex flex-col gap-[3px] border-t border-line px-[15px] pb-2 pt-[7px]">
-            {feed.length === 0 ? (
-              <p className="mono text-[10.5px] text-ink-3">no lane has reported this session · press Run pipeline</p>
-            ) : (
-              feed.map((row, i) => (
-                <div
-                  key={row.id}
-                  className="mono flex items-center gap-[9px] text-[10.5px]"
-                  style={{
-                    animation: anyRunning
-                      ? `eth-feed 9s linear ${i * 3}s infinite`
-                      : `eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 60}ms both`,
-                  }}
-                >
-                  <span className={`w-[92px] shrink-0 ${row.warn ? 'text-serious' : 'text-ink-3'}`}>{row.agent}</span>
-                  <span className={`min-w-0 flex-1 truncate ${row.warn ? 'text-serious' : 'text-ink-2'}`}>{row.text}</span>
+              <button
+                type="button"
+                onClick={() => setQueueOpen(true)}
+                className={`glass-panel glass-lift mt-1.5 flex w-[86%] items-center gap-2.5 rounded-xl px-3.5 py-2.5 text-left ${total > 0 ? '!border-serious/50' : ''}`}
+              >
+                {total > 0 ? <Breathe /> : <span className="h-[7px] w-[7px] shrink-0 rounded-full bg-good" aria-hidden="true" />}
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[11.5px] font-bold text-ink">
+                    {total === 0 ? 'Nothing is waiting on you' : `${total} waiting on you`}
+                  </span>
+                  <span className="mono mt-0.5 block truncate text-[8.5px] text-ink-3">
+                    {total === 0 ? 'verdicts and approvals land here' : waitingRows.slice(0, 2).map((row) => row.title).join(' · ')}
+                  </span>
+                </span>
+                <span className="mono shrink-0 text-[10px] text-ink-3">↗</span>
+              </button>
+            </div>
+
+            {/* ── right ────────────────────────────────────────────── */}
+            <div
+              className="flex min-w-0 flex-col justify-start gap-3.5"
+              style={{ transform: 'rotateY(-8deg) translateZ(-14px)', transformOrigin: '0% 50%' }}
+            >
+              <Panel title="Calendar" hint={`${placed} placed`} onOpen={() => setPage('calendar')} delay={160}>
+                <div className="grid grid-cols-7 gap-1">
+                  {week.map(({ iso, day, items }) => {
+                    const isToday = iso === isoDate(today)
+                    return (
+                      <span
+                        key={iso}
+                        className={`rounded-[9px] border px-0 py-1.5 text-center transition-colors ${isToday ? 'border-accent bg-accent/15' : 'border-line bg-surface-2/50'}`}
+                        style={isToday ? { boxShadow: '0 0 14px -4px var(--color-accent)' } : undefined}
+                      >
+                        <span className="mono block text-[7.5px] uppercase text-ink-3">{day.toLocaleDateString('en-GB', { weekday: 'short' })}</span>
+                        <span className="mt-0.5 block text-[12px] font-bold text-ink">{day.getDate()}</span>
+                        <span className="mx-auto mt-[3px] block h-[3px] w-[3px] rounded-full" style={{ background: items.length > 0 ? 'var(--color-accent-bright)' : 'transparent' }} aria-hidden="true" />
+                      </span>
+                    )
+                  })}
                 </div>
-              ))
-            )}
+                <ul className="mt-2.5 flex flex-col gap-[7px]">
+                  {upcomingWeek.length === 0 ? (
+                    <li><NotMeasured>Nothing placed in this week.</NotMeasured></li>
+                  ) : (
+                    upcomingWeek.map((idea) => (
+                      <li key={idea.id}>
+                        <Row>
+                          <span className="mono w-12 shrink-0 text-[9px] text-accent-bright">{idea.scheduled_time}</span>
+                          <Thumb src={idea.media?.dataUri ?? null} platform={idea.platform} className="h-7 w-[38px] shrink-0" />
+                          <span className="min-w-0">
+                            <span className="block truncate text-[11px] font-medium text-ink">{idea.title}</span>
+                            <span className="mono mt-0.5 block text-[8px] uppercase tracking-[0.1em] text-ink-3">{IDEA_STATUS_LABEL[idea.status] ?? idea.status}</span>
+                          </span>
+                        </Row>
+                      </li>
+                    ))
+                  )}
+                </ul>
+              </Panel>
+
+              <Panel title="Publish" hint={`${published.length} out`} onOpen={() => setPage('published')} delay={240} grow>
+                <div className="grid grid-cols-4 gap-[7px]">
+                  {platformRows.map((row) => (
+                    <div
+                      key={row.platform}
+                      className="flex flex-col items-center gap-1 rounded-[11px] border border-line bg-surface-2/50 px-0.5 pb-[7px] pt-2"
+                      title={`${PLATFORM_LABEL[row.platform]}: ${row.scheduled} scheduled · ${row.published} published`}
+                    >
+                      <span
+                        className="flex h-6 w-6 items-center justify-center rounded-[7px]"
+                        style={{ background: `color-mix(in srgb, ${PLATFORM_TOKEN[row.platform]} 14%, transparent)`, border: `1px solid color-mix(in srgb, ${PLATFORM_TOKEN[row.platform]} 34%, transparent)` }}
+                      >
+                        <PlatformIcon platform={row.platform} size={12} />
+                      </span>
+                      <span className="text-[14px] font-bold text-ink">{row.scheduled}</span>
+                      <span className="mono -mt-0.5 text-[7.5px] uppercase text-ink-3">{row.published} out</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-3 border-t border-line pt-2.5">
+                  {monthLabel ? (
+                    <p className="mono mb-1.5 text-[7.5px] uppercase tracking-[0.1em] text-ink-3">{monthLabel}</p>
+                  ) : null}
+                  <div className="grid grid-cols-[1.2fr_1fr_1fr] gap-2">
+                    <Figure label="Total reach" value={reach === null ? null : fmt(reach)} />
+                    <Figure label="Engagement" value={engagementRate === null ? null : `${engagementRate.toFixed(1)}%`} />
+                    <Figure label="Followers" value={followers === null ? null : fmt(followers)} />
+                  </div>
+                  {daily.length > 1 ? <Spark values={daily} /> : null}
+                </div>
+
+                {topContent.length > 0 ? (
+                  <ul className="mt-2.5 grid grid-cols-3 gap-1.5">
+                    {topContent.map((post) => (
+                      <li key={post.id} className="min-w-0">
+                        <Thumb src={post.data_uri} platform={post.platform} />
+                        <p className="mono mt-1 truncate text-[8px] uppercase tracking-[0.06em] text-ink-3">
+                          {fmt((post.likes ?? 0) + (post.comments ?? 0) + (post.shares ?? 0))} · {PLATFORM_LABEL[post.platform]}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+
+                <div className="mt-2.5 flex items-center gap-3.5">
+                  <Donut
+                    parts={breakdown.parts.map((part, i) => ({ value: part.value, tone: ['var(--color-accent)', 'var(--color-accent-bright)', 'var(--color-hud-strong)'][i] ?? 'var(--color-accent)' }))}
+                    total={breakdown.total}
+                    reported={breakdown.reported}
+                  />
+                  <ul className="flex min-w-0 flex-1 flex-col gap-[5px]">
+                    {breakdown.parts.map((part, i) => (
+                      <li key={part.key} className="flex items-center gap-[7px]">
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ background: ['var(--color-accent)', 'var(--color-accent-bright)', 'var(--color-hud-strong)'][i] }} aria-hidden="true" />
+                        <span className="flex-1 text-[10.5px] capitalize text-ink-2">{part.key}</span>
+                        <span className="mono text-[10.5px] text-ink-3">
+                          {part.reported ? `${breakdown.total === 0 ? 0 : Math.round((part.value / breakdown.total) * 100)}%` : '—'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* What the platform has not measured, said rather than zeroed. */}
+                {reportedRows.length === 0 || !breakdown.reported ? (
+                  <p className="mono mt-2.5 text-[7.5px] uppercase tracking-[0.06em] text-ink-3">
+                    {reportedRows.length === 0 ? 'no monthly rollup reported' : ''}
+                    {reportedRows.length === 0 && !breakdown.reported ? ' · ' : ''}
+                    {!breakdown.reported ? 'no reactions reported' : ''}
+                  </p>
+                ) : null}
+              </Panel>
+            </div>
           </div>
-        </Panel>
 
-        <DecisionQueue awaiting={awaitingLeadership} verdicts={openVerdicts} oldest={oldestWaiting} />
-      </section>
-
-      {/* ── Baseline + learning loop ─────────────────────────────────── */}
-      <section className="mb-3.5 grid gap-3.5 lg:grid-cols-[minmax(0,1.52fr)_minmax(0,1fr)]">
-        <Panel>
-          <PanelHeader
-            title="Against our own baseline"
-            action={
-              <div role="tablist" className="flex items-center gap-0.5 rounded-md border border-line-strong p-0.5">
-                {(['linkedin', 'instagram', 'x', 'facebook'] as Platform[]).map((p) => (
+          {/* ── the foot: every other screen ───────────────────────── */}
+          <div className="flex flex-col gap-4 xl:flex-row" style={{ transform: 'translateZ(6px)' }}>
+            <div className="glass-panel flex-1 rounded-[14px] px-3.5 py-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11.5px] font-bold text-ink">Everything else</span>
+                <span className="mono text-[8px] uppercase tracking-[0.08em] text-ink-3">{controls.length} screens</span>
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+                {controls.map((item) => (
                   <button
-                    key={p}
+                    key={item.page}
                     type="button"
-                    role="tab"
-                    aria-selected={platformTab === p}
-                    onClick={() => setPlatformTab(p)}
-                    className={`mono inline-flex items-center gap-1.5 rounded-[4px] px-[9px] py-[3px] text-[10px] transition-colors duration-[var(--dur-fast)] ${
-                      platformTab === p ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:text-ink-2'
-                    }`}
+                    onClick={() => setPage(item.page as PageId)}
+                    className="relative flex flex-col items-center gap-1 rounded-lg border border-line bg-surface-2/50 px-1 py-2 transition-[border-color,box-shadow] hover:border-accent hover:shadow-[0_0_14px_-6px_var(--color-accent)]"
                   >
-                    <span className="h-[7px] w-[7px] rounded-[2px]" style={{ background: PLATFORM_TOKEN[p] }} aria-hidden="true" />
-                    {p === 'linkedin' ? 'LI' : p === 'instagram' ? 'IG' : p === 'x' ? 'X' : 'FB'}
+                    <item.icon size={13} className="text-accent-bright" aria-hidden="true" />
+                    <span className="text-center text-[9.5px] leading-[1.25] text-ink-2">{item.label}</span>
+                    {item.badge === 'leadership' && awaitingLeadership.length > 0 ? (
+                      <span className="mono absolute right-1 top-1 rounded-full bg-critical px-1 text-[7.5px] text-on-accent">{awaitingLeadership.length}</span>
+                    ) : null}
                   </button>
                 ))}
               </div>
-            }
-          />
-          <div className="px-4 pb-3.5 pt-2.5">
-            {chart ? (
-              <>
-                <BaselineChart chart={chart} />
-                <div className="mt-3 grid grid-cols-3 gap-px overflow-hidden rounded-[7px] border border-line-strong bg-line-strong">
-                  <SubMetric label="Days above the band">
-                    {chart.daysAbove === null ? (
-                      <span className="mono text-[11px] text-ink-3">no prior month</span>
-                    ) : (
-                      <>
-                        <span className="mono text-[17px] font-medium text-good-ink"><CountUp value={chart.daysAbove} format={(n) => String(Math.round(n))} /></span>
-                        <span className="mono text-[10.5px] text-ink-3">
-                          of {chart.values.length}
-                          {chart.prevDaysAbove !== null ? ` · ${labelOf(previousMonth).split(' ')[0]?.slice(0, 3)} ${chart.prevDaysAbove}` : ''}
-                        </span>
-                      </>
-                    )}
-                  </SubMetric>
-                  <SubMetric label="Daily average">
-                    <span className="mono text-[17px] font-medium"><CountUp value={Math.round(chart.avg)} format={fmt} /></span>
-                    {chart.prevAvg ? (
-                      <span className={`mono text-[10.5px] ${chart.avg >= chart.prevAvg ? 'text-accent-bright' : 'text-ink-3'}`}>
-                        {chart.avg >= chart.prevAvg ? '+' : ''}
-                        {(((chart.avg - chart.prevAvg) / chart.prevAvg) * 100).toFixed(1)}%
-                      </span>
-                    ) : null}
-                  </SubMetric>
-                  <SubMetric label="Peak">
-                    <span className="mono text-[17px] font-medium"><CountUp value={chart.values[chart.peakIndex] ?? 0} format={fmt} /></span>
-                    <span className="mono text-[10.5px] text-ink-3">
-                      {new Date(chart.dates[chart.peakIndex] ?? '').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
-                    </span>
-                  </SubMetric>
-                </div>
-                <p className="mt-[11px] text-[11.5px] leading-relaxed text-ink-2">
-                  {chart.band && chart.daysAbove !== null
-                    ? `Above our own band on ${chart.daysAbove} of ${chart.values.length} days${
-                        chart.prevDaysAbove !== null ? `, where ${labelOf(previousMonth).split(' ')[0]} managed ${chart.prevDaysAbove}` : ''
-                      }. The band is the inner half of last month's days — the account's own trailing baseline, not an industry figure.`
-                    : `${labelOf(month)} has a daily series but no prior month to draw a band from. Once a second period closes, the band appears.`}
-                </p>
-              </>
-            ) : platformTab === 'x' || platformTab === 'facebook' ? (
-              <EmptyState
-                title={`${PLATFORM_LABEL[platformTab]} reports no monthly rollup`}
-                body="Its figures come from the posts themselves, so there is no daily series to draw against a baseline. A synthetic month would be fabricated evidence."
-              />
-            ) : (
-              <EmptyState
-                title={analytics.length === 0 ? 'Nothing reported yet' : `No reported data for ${PLATFORM_LABEL[platformTab]} in ${labelOf(month) || 'this month'}`}
-                body="Refresh analytics once a period has closed."
-              />
-            )}
+            </div>
           </div>
-        </Panel>
-
-        <Panel>
-          <PanelHeader
-            title="What changed because we measured"
-            meta={learned.length > 0 ? `Velma · ${learned.length} lesson${learned.length === 1 ? '' : 's'}` : 'Velma · nothing yet'}
-          />
-          {learned.length === 0 ? (
-            <div className="p-4">
-              <EmptyState
-                title="No lessons recorded yet"
-                body="Velma writes here once posts have published and been measured, or once you have given an instruction worth remembering. An empty panel means nothing has been measured — not that nothing was learned."
-              />
-            </div>
-          ) : (
-            <div className="py-1">
-              {learned.map((entry, i) => {
-                const provisional = entry.confidence === 'Low'
-                return (
-                  <article
-                    key={entry.id}
-                    className={`px-[15px] py-[11px] ${i < learned.length - 1 ? 'border-b border-line' : ''}`}
-                    style={{ animation: `eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 60}ms both` }}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`mono text-[10.5px] uppercase tracking-[0.12em] ${provisional ? 'text-serious' : 'text-accent-bright'}`}>{entry.category}</span>
-                      <span className={`h-1 w-1 rounded-full ${provisional ? 'bg-serious/60' : 'bg-hud-strong'}`} aria-hidden="true" />
-                      <span className="mono text-[11px] text-ink-3">
-                        {entry.evidence_count} observation{entry.evidence_count === 1 ? '' : 's'} · {provisional ? 'provisional' : entry.confidence.toLowerCase()}
-                      </span>
-                    </div>
-                    <h4 className="mt-1.5 text-[12.5px] font-medium leading-snug text-ink">{entry.title}</h4>
-                    <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-ink-2">
-                      {entry.content} <span className="text-ink-3">{entry.source}</span>
-                    </p>
-                  </article>
-                )
-              })}
-            </div>
-          )}
-        </Panel>
+        </div>
       </section>
 
-      {/* ── The spine ────────────────────────────────────────────────── */}
-      <footer className="glass sticky bottom-0 z-10 -mx-6 -mb-5 flex flex-wrap items-center gap-[11px] border-t border-line px-[18px] py-[9px]">
-        <span className={`mono inline-flex shrink-0 items-center gap-[7px] text-[10px] tracking-[0.12em] ${anyRunning ? 'text-accent-bright' : 'text-ink-3'}`}>
-          <span className={`h-[5px] w-[5px] rounded-full ${anyRunning ? 'bg-accent-bright' : 'bg-ink-3'}`} aria-hidden="true" />
-          {runId ? `RUN ${runId.toUpperCase()}` : 'NO RUN'}
-        </span>
-        <span className="h-[15px] w-px shrink-0 bg-line-strong" aria-hidden="true" />
-        <div className="flex min-w-0 flex-1 items-center gap-1" aria-label="Pipeline stages">
-          {stages.map((s) => (
-            <span
-              key={s.id}
-              title={`${s.name} · ${s.status}`}
-              className="relative h-[3px] overflow-hidden rounded-[2px]"
-              style={{
-                transition: 'flex 320ms var(--ease-out-soft), background-color 320ms var(--ease-out-soft)',
-                flex: s.status === 'running' ? 1.7 : 1,
-                background:
-                  s.status === 'running'
-                    ? 'var(--color-accent-bright)'
-                    : s.status === 'done'
-                      ? 'var(--color-hud-strong)'
-                      : s.status === 'gated'
-                        ? 'color-mix(in srgb, var(--color-serious) 32%, transparent)'
-                        : s.status === 'failed'
-                          ? 'var(--color-critical)'
-                          : 'var(--color-surface-3)',
-              }}
-            >
-              {s.status === 'running' ? (
-                <span
-                  className="absolute inset-0 w-[32%]"
-                  style={{
-                    background: 'linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-ink) 80%, transparent), transparent)',
-                    animation: 'eth-spine-sweep 1.8s linear infinite',
-                  }}
-                  aria-hidden="true"
-                />
-              ) : null}
+
+      {/* The full queue, where the decisions are actually made. */}
+      <Dialog
+        open={queueOpen}
+        size="fit"
+        onClose={() => setQueueOpen(false)}
+        header={
+          <div className="flex min-w-0 items-center gap-2.5">
+            {total > 0 ? <Breathe /> : null}
+            <h2 className="text-[15px] font-semibold tracking-[-0.02em] text-ink">Waiting on you</h2>
+            <span className="mono text-[9.5px] uppercase tracking-[0.1em] text-ink-3">
+              {total === 0 ? 'nothing needs a person' : `${total} item${total === 1 ? '' : 's'}${oldestWait ? ` · oldest ${timeAgo(oldestWait)}` : ''}`}
             </span>
-          ))}
+          </div>
+        }
+      >
+        <div className="p-4">
+          <DecisionQueue awaiting={awaitingLeadership} verdicts={openVerdicts} />
         </div>
-        <span className="mono hidden shrink-0 truncate text-[10px] text-ink-2 md:inline">
-          {runningAgent ? `${agentShort(runningAgent.agent_id).toUpperCase()} · ${runningAgent.current_task}` : 'ALL TWELVE IDLE'}
-        </span>
-        <span className="h-[15px] w-px shrink-0 bg-line-strong" aria-hidden="true" />
-        <button type="button" onClick={openKnowledge} className="mono shrink-0 text-[10px] text-ink-3 transition-colors duration-[var(--dur-fast)] hover:text-ink">
-          KB {kbCount} · {apiMode === 'connected' ? 'DEMO MODE' : 'STANDALONE'}
-        </button>
-        {waitingCount > 0 ? (
-          <span className="mono inline-flex shrink-0 items-center gap-1.5 rounded-full border border-serious/50 bg-serious/10 px-[9px] py-[3px] text-[10px] tracking-[0.08em] text-serious">
-            <Breathe small />
-            {waitingCount} FOR YOU
-          </span>
-        ) : null}
-      </footer>
-    </>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   THE STAGE SCENE — five stages in depth, one travelling dot per live hand-off
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-interface SceneStage {
-  id: string
-  name: string
-  agents: AgentId[]
-  status: StageStatus
-}
-
-/** Where each stage stands: x across, z toward the viewer, y for the learn loop overhead. */
-const SLOTS: Record<string, { x: number; z: number; ry: number }> = {
-  discover: { x: -372, z: -118, ry: 14 },
-  assess: { x: -214, z: -18, ry: 9 },
-  plan: { x: -16, z: 104, ry: 0 },
-  create: { x: 182, z: -18, ry: -9 },
-  ship: { x: 336, z: -118, ry: -14 },
-}
-
-function StageScene({
-  stages,
-  loopStage,
-  lineFor,
-  anyRunning,
-}: {
-  stages: SceneStage[]
-  loopStage: SceneStage | undefined
-  lineFor: (id: string) => { text: string; tone: string }
-  anyRunning: boolean
-}) {
-  /*
-   * THE SCENE FILLS ITS PANEL.
-   *
-   * The five stages sit at fixed 3D coordinates spanning roughly 880px, and the
-   * camera used to shrink them by a constant 0.74 — which on a 1440px display
-   * left a 600px cluster of 9px text floating in a 900px panel, and on a 1920px
-   * display a smaller one still. The scale now follows the panel's measured
-   * width, so the stages are as large as the space allows and the text on them
-   * reads at every size the product runs at.
-   */
-  const sceneRef = useRef<HTMLDivElement | null>(null)
-  const [sceneScale, setSceneScale] = useState(0.74)
-  useEffect(() => {
-    const el = sceneRef.current
-    if (!el) return
-    const observer = new ResizeObserver((entries) => {
-      const rect = entries[0]?.contentRect
-      if (!rect || rect.width === 0) return
-      // Bounded by whichever the panel runs out of first — width or height.
-      setSceneScale(Math.max(0.62, Math.min(1.35, (rect.width - 48) / 880, (rect.height - 40) / 300)))
-    })
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [])
-
-  return (
-    <div ref={sceneRef} className="relative min-h-[340px] flex-1 overflow-hidden">
-      <div className="absolute inset-0" style={{ perspective: 1200, perspectiveOrigin: '50% 44%' }}>
-        <div
-          className="absolute left-1/2 top-1/2 h-0 w-0"
-          style={
-            {
-              transformStyle: 'preserve-3d',
-              transform: 'translate(-50%, -50%) translateY(16px) scale(var(--scene-scale))',
-              animation: 'eth-cam3 56s cubic-bezier(0.4, 0, 0.2, 1) infinite',
-              '--scene-scale': sceneScale,
-            } as CSSProperties
-          }
-        >
-          {/* the floor */}
-          <div
-            aria-hidden="true"
-            className="absolute left-1/2 top-1/2 h-[620px] w-[1000px] origin-top"
-            style={{
-              marginLeft: -500,
-              marginTop: -310,
-              transform: 'translate3d(0, 86px, 0) rotateX(84deg)',
-              backgroundImage:
-                'linear-gradient(to right, var(--color-hud-strong) 1px, transparent 1px), linear-gradient(to bottom, var(--color-hud-strong) 1px, transparent 1px)',
-              backgroundSize: '56px 56px',
-              opacity: 0.7,
-              maskImage: 'radial-gradient(58% 52% at 50% 14%, #000 10%, transparent 100%)',
-              WebkitMaskImage: 'radial-gradient(58% 52% at 50% 14%, #000 10%, transparent 100%)',
-            }}
-          />
-          {/* the pool of light under the live stage */}
-          {stages.some((s) => s.status === 'running') ? (
-            <div
-              aria-hidden="true"
-              className="absolute left-1/2 top-1/2 h-[300px] w-[400px] rounded-full"
-              style={{
-                marginLeft: -200,
-                marginTop: -150,
-                transform: `translate3d(${SLOTS[stages.find((s) => s.status === 'running')?.id ?? 'plan']?.x ?? 0}px, 88px, ${
-                  SLOTS[stages.find((s) => s.status === 'running')?.id ?? 'plan']?.z ?? 0
-                }px) rotateX(84deg)`,
-                background: 'radial-gradient(circle, var(--color-hud-strong), transparent 62%)',
-                animation: 'eth-pool 3.6s cubic-bezier(0.4, 0, 0.2, 1) infinite',
-              }}
-            />
-          ) : null}
-
-          {/* hand-offs between neighbouring stages */}
-          {stages.slice(0, -1).map((from, i) => {
-            const to = stages[i + 1]
-            if (!to) return null
-            const a = SLOTS[from.id]
-            const b = SLOTS[to.id]
-            if (!a || !b) return null
-            const dx = b.x - a.x
-            const dz = b.z - a.z
-            const len = Math.hypot(dx, dz)
-            const ry = (Math.atan2(-dz, dx) * 180) / Math.PI
-            const carrying = from.status === 'done' && to.status === 'running'
-            const settled = from.status === 'done' && to.status !== 'idle'
-            const colour = carrying ? 'var(--color-accent)' : settled ? 'var(--color-good)' : 'var(--color-line-strong)'
-            return (
-              <div
-                key={`${from.id}-${to.id}`}
-                aria-hidden="true"
-                className="absolute left-1/2 top-1/2 h-0.5 origin-left"
-                style={{
-                  width: len,
-                  marginTop: -1,
-                  transform: `translate3d(${a.x}px, 0, ${a.z}px) rotateY(${ry}deg)`,
-                  background: `linear-gradient(90deg, transparent, ${colour} 12%, ${colour} 88%, transparent)`,
-                  opacity: settled || carrying ? 0.85 : 0.4,
-                }}
-              >
-                {/* Three packets on a hand-off carrying work; one slow packet on a settled one. */}
-                {carrying
-                  ? [0, 1, 2].map((n) => (
-                      <span
-                        key={n}
-                        className="absolute -top-[3px] h-2 w-2 rounded-full"
-                        style={{ background: colour, boxShadow: `0 0 12px 3px ${colour}`, animation: `eth-signal 1.7s linear ${n * 0.57}s infinite` }}
-                      />
-                    ))
-                  : settled
-                    ? (
-                      <span
-                        className="absolute -top-[3px] h-2 w-2 rounded-full"
-                        style={{ background: colour, boxShadow: `0 0 12px 3px ${colour}`, animation: 'eth-signal 3.6s linear infinite' }}
-                      />
-                    )
-                    : null}
-              </div>
-            )
-          })}
-
-          {/* the loop overhead: measure → learn returning to discover */}
-          {(() => {
-            const a = SLOTS.ship
-            const b = SLOTS.discover
-            if (!a || !b) return null
-            const returning = loopStage?.status === 'running' || loopStage?.status === 'done'
-            const colour = 'var(--color-hud-strong)'
-            return (
-              <>
-                <div
-                  aria-hidden="true"
-                  className="absolute left-1/2 top-1/2 h-0.5 origin-left"
-                  style={{
-                    width: a.x - b.x,
-                    marginTop: -1,
-                    transform: `translate3d(${a.x}px, -104px, ${a.z}px) rotateY(180deg)`,
-                    background: `linear-gradient(90deg, transparent, ${colour} 10%, ${colour} 90%, transparent)`,
-                    opacity: returning ? 0.85 : 0.35,
-                  }}
-                >
-                  {returning ? (
-                    <span className="absolute -top-[3px] h-2 w-2 rounded-full" style={{ background: colour, boxShadow: `0 0 12px 3px ${colour}`, animation: 'eth-signal 7.5s linear infinite' }} />
-                  ) : null}
-                </div>
-                <div className="absolute left-1/2 top-1/2 w-[340px] text-center" style={{ marginLeft: -170, transform: 'translate3d(-18px, -158px, -118px)' }}>
-                  <div className="mono text-[10.5px] tracking-[0.14em] text-accent-bright">06 · 07 &nbsp;MEASURE → LEARN</div>
-                  <div className="mono mt-0.5 text-[11px] text-ink-3">
-                    {loopStage?.status === 'running'
-                      ? 'Velma is writing the lesson back'
-                      : loopStage?.status === 'done'
-                        ? 'Jerry measured · Velma wrote the lesson back'
-                        : 'Jerry measures · Velma writes the lesson back'}
-                  </div>
-                </div>
-              </>
-            )
-          })()}
-
-          {/* the stage cards */}
-          {stages.map((s, i) => {
-            const slot = SLOTS[s.id]
-            if (!slot) return null
-            const live = s.status === 'running'
-            const line = lineFor(s.id)
-            const w = live ? 156 : 134
-            const h = live ? 126 : 114
-            return (
-              <div
-                key={s.id}
-                className="absolute left-1/2 top-1/2"
-                style={{ width: w, height: h, marginLeft: -w / 2, marginTop: -h / 2, transform: `translate3d(${slot.x}px, 0, ${slot.z}px) rotateY(${slot.ry}deg)` }}
-              >
-                <div
-                  className="absolute inset-0 overflow-hidden rounded-[11px] border px-[13px] py-3"
-                  style={{
-                    borderColor: STAGE_STROKE[s.status],
-                    background: 'linear-gradient(165deg, var(--color-surface-2), var(--color-page))',
-                    boxShadow: live
-                      ? '0 26px 54px -26px rgba(0, 0, 0, 0.72), 0 0 0 4px var(--color-hud-strong)'
-                      : '0 26px 54px -26px rgba(0, 0, 0, 0.72)',
-                  }}
-                >
-                  {live ? (
-                    <span
-                      aria-hidden="true"
-                      className="absolute inset-x-0 top-0 h-px"
-                      style={{ background: 'linear-gradient(90deg, transparent, var(--color-accent-bright), transparent)', animation: 'eth-glint 7s ease-in-out infinite' }}
-                    />
-                  ) : null}
-                  <div className="flex items-center gap-[7px]">
-                    <span className="mono text-[10.5px] tracking-[0.14em]" style={{ color: live ? 'var(--color-accent-bright)' : s.status === 'done' ? 'var(--color-good)' : s.status === 'gated' ? 'var(--color-serious)' : 'var(--color-ink-3)' }}>
-                      {String(i + 1).padStart(2, '0')}
-                    </span>
-                    <span className="ml-auto">
-                      {live ? (
-                        <WorkArc />
-                      ) : s.status === 'gated' ? (
-                        <Breathe small />
-                      ) : (
-                        <span className="block h-[5px] w-[5px] rounded-full" style={{ background: STAGE_STROKE[s.status] }} aria-hidden="true" />
-                      )}
-                    </span>
-                  </div>
-                  <div className={`mt-1.5 whitespace-nowrap font-semibold leading-tight tracking-[-0.02em] text-ink ${live ? 'text-[14px]' : 'text-[13px]'}`}>{s.name}</div>
-                  <div className="mono mt-0.5 truncate text-[11px] text-ink-3">{s.agents.map(agentShort).join(' · ')}</div>
-                  <div className="absolute inset-x-[13px] bottom-[11px]">
-                    <div className="mb-[7px] h-px bg-surface-3" />
-                    <div className={`mono truncate text-[11px] ${line.tone}`}>{line.text || (s.status === 'idle' ? 'queued' : s.status)}</div>
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      <div className="mono absolute bottom-[9px] left-[15px] flex flex-wrap gap-x-3.5 gap-y-1 text-[11px] tracking-[0.08em] text-ink-3">
-        <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-2 bg-good" />SETTLED</span>
-        <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-2 bg-accent" />CARRYING WORK</span>
-        <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-2 bg-hud-strong" />LESSON RETURNING</span>
-        {!anyRunning ? <span className="text-ink-3">· nothing moving — the dots are hand-offs in flight, and there are none</span> : null}
-      </div>
+      </Dialog>
     </div>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   THE DECISION QUEUE — confidence, the reason and both verdicts on the card
+   THE HEART — the emblem, and the four ways work leaves it
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+
+/** One glass panel in the command centre. The whole surface is the door. */
+function Panel({
+  title,
+  hint,
+  onOpen,
+  delay,
+  grow = false,
+  children,
+}: {
+  title: string
+  hint: string
+  onOpen: () => void
+  delay: number
+  /** The last panel in a column absorbs the leftover height, so the column
+      reaches the foot row instead of stopping short. `grow` keeps the
+      content's own height as the floor, so nothing is clipped to fit. */
+  grow?: boolean
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      /*
+       * Natural height, not a forced share of the column. Stretching every
+       * panel to an equal height clipped whichever had the most to say —
+       * Publish lost its reaction split off the bottom edge.
+       */
+      className={`group glass-panel glass-lift flex min-w-0 flex-col rounded-[18px] px-4 py-3.5 text-left${grow ? ' grow' : ''}`}
+      style={{ animation: `eth-rise 520ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms both` }}
+    >
+      <span className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[12.5px] font-bold text-ink">{title}</span>
+        <span className="mono shrink-0 whitespace-nowrap text-[8.5px] uppercase tracking-[0.08em] text-ink-3 transition-colors group-hover:text-accent-bright">
+          {hint} ↗
+        </span>
+      </span>
+      <span className="mt-[11px] block">{children}</span>
+    </button>
+  )
+}
+
+/** A row inside a panel: the design's soft inset with a hover wash. */
+function Row({ children }: { children: ReactNode }) {
+  return (
+    <span className="flex items-center gap-2.5 rounded-xl border border-line bg-surface-2/40 px-2.5 py-2 transition-colors group-hover:border-line-strong">
+      {children}
+    </span>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STATION DETAIL — what a station holds, before you go to its screen
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+
+const IDEA_STATUS_LABEL: Record<string, string> = {
+  drafted: 'Drafted',
+  in_review: 'In review',
+  pending_leadership: 'With Leadership',
+  scheduled: 'Scheduled',
+  published: 'Published',
+  suggested: 'Suggested',
+  rejected: 'Rejected',
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CARDS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+
+function NotMeasured({ children }: { children: ReactNode }) {
+  return <span className="block text-[11.5px] leading-relaxed text-ink-3">{children}</span>
+}
+
+function Figure({ label, value }: { label: string; value: string | null }) {
+  return (
+    <span className="block min-w-0">
+      <span className="mono block text-[16px] leading-none text-ink">{value ?? '—'}</span>
+      <span className="mono mt-1 block truncate text-[8.5px] uppercase tracking-[0.1em] text-ink-3">{label}</span>
+    </span>
+  )
+}
+
+/** Shares of a whole, drawn as arcs. Renders nothing meaningful when the whole is zero. */
+/** A creative thumbnail, or the platform's mark where there is none yet. */
+function Thumb({ src, platform, className = 'aspect-[4/3] w-full' }: { src: string | null; platform: Platform; className?: string }) {
+  return (
+    <span className={`block overflow-hidden rounded-md border border-line bg-surface-2 ${className}`}>
+      {src ? (
+        <img src={src} alt="" className="h-full w-full object-cover" />
+      ) : (
+        <span className="flex h-full w-full items-center justify-center"><PlatformIcon platform={platform} size={13} /></span>
+      )}
+    </span>
+  )
+}
+
+function Donut({ parts, total, reported = true }: { parts: Array<{ value: number; tone: string }>; total: number; reported?: boolean }) {
+  const r = 26
+  const c = 2 * Math.PI * r
+  let offset = 0
+  return (
+    <svg width={72} height={72} viewBox="0 0 72 72" aria-hidden="true" className="shrink-0">
+      <circle cx={36} cy={36} r={r} fill="none" stroke="var(--color-surface-3)" strokeWidth={8} />
+      {total > 0
+        ? parts.map((p, i) => {
+            const len = (p.value / total) * c
+            const el = (
+              <circle
+                key={i}
+                cx={36}
+                cy={36}
+                r={r}
+                fill="none"
+                stroke={p.tone}
+                strokeWidth={8}
+                strokeLinecap="round"
+                strokeDasharray={`${len} ${c - len}`}
+                strokeDashoffset={-offset}
+                transform="rotate(-90 36 36)"
+                style={{ filter: 'drop-shadow(0 0 5px color-mix(in srgb, var(--color-accent) 55%, transparent))', animation: `eth-num-in 420ms cubic-bezier(0.22, 1, 0.36, 1) ${160 + i * 110}ms both` }}
+              />
+            )
+            offset += len
+            return el
+          })
+        : null}
+      <text x={36} y={40} textAnchor="middle" fontSize={11} fill="var(--color-ink)" className="mono">{reported ? fmt(total) : '—'}</text>
+    </svg>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WAITING ON YOU — kept as it was
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function DecisionQueue({
   awaiting,
   verdicts,
-  oldest,
 }: {
   awaiting: Idea[]
   verdicts: ReviewQueueItem[]
-  oldest: string | undefined
 }) {
   const user = useStore((s) => s.user)
   const pendingConfirm = useStore((s) => s.assistant.pendingConfirm)
@@ -900,7 +713,8 @@ function DecisionQueue({
   }
 
   const total = awaiting.length + verdicts.length + (pendingConfirm ? 1 : 0)
-  const shown = 3
+  // Everything, because this IS the queue. The dashboard card summarises it.
+  const shown = total
   let index = 0
   const cards: ReactNode[] = []
 
@@ -1011,13 +825,7 @@ function DecisionQueue({
   }
 
   return (
-    <Panel>
-      <PanelHeader
-        lead={total > 0 ? <Breathe /> : null}
-        title="Waiting on you"
-        meta={total === 0 ? 'nothing needs a person' : `${total} item${total === 1 ? '' : 's'}${oldest ? ` · oldest ${timeAgo(oldest)}` : ''}`}
-      />
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2.5">
+    <div className="mx-auto flex w-full max-w-[880px] flex-col gap-2">
         {cards.length === 0 ? (
           <div className="py-6">
             <EmptyState title="Nothing is waiting on you" body="Verdicts, approvals and confirmations land here the moment one needs a person. Everything else the agents decide themselves, and say why." />
@@ -1034,8 +842,106 @@ function DecisionQueue({
             {total - cards.length} MORE · OPEN THE QUEUE <ArrowUpRight size={11} aria-hidden="true" />
           </button>
         ) : null}
-      </div>
-    </Panel>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE SYSTEM PILL
+
+   The run's state, beside the control that starts it. This was a full-width
+   card in the foot of the page, which meant the one thing you watch during a
+   run sat furthest from the button that begins it. Collapsed it is an animated
+   dot; open it names every agent and what it is doing.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function SystemPill({
+  agents,
+  busy,
+  statusLine,
+  open,
+  onToggle,
+  onOpenTheater,
+  leadership,
+}: {
+  agents: AgentState[]
+  busy: boolean
+  statusLine: string
+  open: boolean
+  onToggle: () => void
+  onOpenTheater: () => void
+  leadership: boolean
+}) {
+  const working = agents.filter((a) => a.status === 'waiting').length
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-label={`System status: ${statusLine}. ${open ? 'Hide' : 'Show'} the agents.`}
+        title={statusLine}
+        className={`flex items-center gap-2 rounded-md border px-2.5 py-[6px] text-[12px] transition-colors ${
+          open ? 'border-accent text-ink' : 'border-line-strong text-ink-2 hover:border-accent'
+        }`}
+      >
+        {/* The only looping motion here means work is in flight. */}
+        <span className="relative flex h-[14px] w-[14px] shrink-0 items-center justify-center" aria-hidden="true">
+          {busy ? (
+            <span className="anim-ping-slow absolute inset-0 rounded-full border border-accent" />
+          ) : null}
+          <span
+            className={`h-[7px] w-[7px] rounded-full ${busy ? 'bg-accent anim-pulse-dot' : 'bg-good'}`}
+            style={{ boxShadow: `0 0 10px ${busy ? 'var(--color-accent)' : 'var(--color-good)'}` }}
+          />
+        </span>
+        <span className="mono text-[10px] uppercase tracking-[0.08em]">
+          {busy ? `${working || 1} running` : `${agents.length} idle`}
+        </span>
+      </button>
+
+      {open ? (
+        <div
+          className="glass-panel absolute right-0 top-[calc(100%+6px)] z-40 w-[320px] rounded-[14px] p-3 text-left"
+          style={{ animation: 'eth-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
+        >
+          <p className="text-[11.5px] font-bold text-ink">System status</p>
+          <p className="mt-0.5 text-[10px] text-ink-3">{statusLine}</p>
+
+          <div className="mt-2.5 grid grid-cols-2 gap-1.5">
+            {agents.map((agent) => {
+              const tone =
+                agent.status === 'waiting' ? 'bg-accent anim-pulse-dot'
+                  : agent.status === 'failed' ? 'bg-critical'
+                    : agent.status === 'needs_review' ? 'bg-serious'
+                      : agent.status === 'completed' ? 'bg-good'
+                        : 'bg-line-strong'
+              return (
+                <span
+                  key={agent.agent_id}
+                  title={`${agentShort(agent.agent_id)} · ${agent.status}${agent.current_task ? ` · ${agent.current_task}` : ''}`}
+                  className="flex min-w-0 items-center gap-1.5 rounded-lg border border-line bg-surface-2/50 px-2 py-1.5"
+                >
+                  <span className={`h-[5px] w-[5px] shrink-0 rounded-full ${tone}`} aria-hidden="true" />
+                  <span className="mono truncate text-[8.5px] uppercase tracking-[0.06em] text-ink-3">
+                    {agentShort(agent.agent_id)}
+                  </span>
+                </span>
+              )
+            })}
+          </div>
+
+          <button
+            type="button"
+            onClick={onOpenTheater}
+            className="mono mt-2.5 w-full rounded-lg border border-line-strong px-2 py-1.5 text-[9px] uppercase tracking-[0.1em] text-ink-2 transition-colors hover:border-accent hover:text-ink"
+          >
+            {leadership ? 'Open orchestration ↗' : 'Open the run theater ↗'}
+          </button>
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -1054,17 +960,19 @@ function Decision({
 }) {
   return (
     <article
-      className={`rounded-lg border bg-surface-2 px-3 py-[11px] ${tone === 'serious' && index === 0 ? 'border-serious/60' : 'border-line-strong'}`}
+      className={`rounded-[10px] border bg-surface-2 px-3 py-2.5 ${tone === 'serious' && index === 0 ? 'border-serious/50' : 'border-line'}`}
       style={{ animation: `eth-row-stream 200ms cubic-bezier(0.22, 1, 0.36, 1) ${index * 60}ms both` }}
     >
       <div className="flex items-center gap-[7px]">
-        <span className={`mono text-[10.5px] uppercase tracking-[0.12em] ${tone === 'serious' ? 'text-serious' : 'text-accent-bright'}`}>{eyebrow}</span>
-        <span className="mono ml-auto text-[11px] text-ink-3">{meta}</span>
+        <span className={`mono text-[9.5px] uppercase tracking-[0.12em] ${tone === 'serious' ? 'text-serious' : 'text-accent-bright'}`}>{eyebrow}</span>
+        <span className="mono ml-auto text-[10px] text-ink-3">{meta}</span>
       </div>
       {children}
     </article>
   )
 }
+
+/** A decision landed: the only celebratory motion in the product, and it fires once. */
 
 /** A decision landed: the only celebratory motion in the product, and it fires once. */
 function Commit({ label }: { label: string }) {
@@ -1086,223 +994,6 @@ function Reason({ tone, children }: { tone: 'serious' | 'accent'; children: Reac
   )
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   THE BASELINE CHART — daily values against last month's inner two quartiles
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function BaselineChart({
-  chart,
-}: {
-  chart: { values: number[]; band: { lo: number; hi: number } | null; max: number; peakIndex: number; dates: string[] }
-}) {
-  const W = 860
-  const H = 206
-  const L = 34
-  const R = 8
-  const T = 14
-  const B = 30
-  const n = chart.values.length
-  const x = (i: number) => L + ((W - L - R) * i) / Math.max(1, n - 1)
-  const y = (v: number) => H - B - ((H - T - B) * v) / chart.max
-  const pts = chart.values.map((v, i) => [x(i), y(v)] as const)
-  const line = pts.map(([px, py], i) => (i === 0 ? `M${px} ${py}` : `L${px} ${py}`)).join(' ')
-  const area = `${line} L${x(n - 1)} ${y(0)} L${L} ${y(0)} Z`
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * chart.max)
-  const tickLabel = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10_000 ? 0 : 1)}K` : String(Math.round(v)))
-  const peak = pts[chart.peakIndex]
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="block h-[130px] w-full" preserveAspectRatio="none" role="img" aria-label="Daily values for the month against the account's own trailing baseline band.">
-      <defs>
-        <linearGradient id="eth-fill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="var(--color-accent-bright)" stopOpacity="0.24" />
-          <stop offset="100%" stopColor="var(--color-accent-bright)" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <g stroke="var(--color-line)">
-        {ticks.map((v) => (
-          <line key={v} x1={L} y1={y(v)} x2={W - R} y2={y(v)} />
-        ))}
-      </g>
-      <g className="mono" fontSize={10.5} fill="var(--color-ink-3)" textAnchor="end">
-        {ticks.map((v) => (
-          <text key={v} x={L - 6} y={y(v) + 3}>
-            {tickLabel(v)}
-          </text>
-        ))}
-      </g>
-      {chart.band ? (
-        <>
-          <rect x={L} y={y(chart.band.hi)} width={W - L - R} height={Math.max(2, y(chart.band.lo) - y(chart.band.hi))} fill="var(--color-surface-3)" opacity={0.8} />
-          <text x={L + 6} y={y(chart.band.hi) - 4} className="mono" fontSize={10.5} fill="var(--color-ink-3)">
-            our own trailing band
-          </text>
-        </>
-      ) : null}
-      <path d={area} fill="url(#eth-fill)" />
-      <path
-        d={line}
-        fill="none"
-        stroke="var(--color-accent-bright)"
-        strokeWidth={1.6}
-        strokeLinejoin="round"
-        style={{ strokeDasharray: 2400, animation: 'eth-draw 900ms cubic-bezier(0.22, 1, 0.36, 1) both', '--len': 2400 } as CSSProperties}
-      />
-      {peak ? (
-        <>
-          <circle cx={peak[0]} cy={peak[1]} r={3.4} fill="var(--color-accent-bright)" />
-          <text x={peak[0]} y={Math.max(10, peak[1] - 7)} textAnchor="middle" className="mono" fontSize={10.5} fill="var(--color-ink-2)">
-            {tickLabel(chart.values[chart.peakIndex] ?? 0)}
-          </text>
-        </>
-      ) : null}
-      <g className="mono" fontSize={10.5} fill="var(--color-ink-3)" textAnchor="middle">
-        {chart.dates.map((d, i) =>
-          i === 0 || i === n - 1 || i % 6 === 0 ? (
-            <text key={d} x={x(i)} y={H - 4}>
-              {i === n - 1 ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }).toUpperCase() : new Date(d).getDate()}
-            </text>
-          ) : null,
-        )}
-      </g>
-    </svg>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   PRIMITIVES — the surface grammar: one hairline, no glow, radii 3 / 6 / 10
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function Panel({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex min-h-0 flex-col overflow-hidden rounded-[10px] border border-line-strong bg-surface shadow-[inset_0_1px_0_color-mix(in_srgb,var(--color-ink)_5%,transparent),0_12px_32px_-24px_color-mix(in_srgb,var(--color-page)_90%,transparent)]">
-      {children}
-    </div>
-  )
-}
-
-function PanelHeader({ lead, title, meta, action }: { lead?: ReactNode; title: string; meta?: string; action?: ReactNode }) {
-  return (
-    <header className="flex shrink-0 flex-wrap items-center gap-2.5 border-b border-line px-[15px] py-3">
-      {lead}
-      <h2 className="text-[14px] font-semibold tracking-[-0.015em] text-ink">{title}</h2>
-      {meta ? <span className="mono ml-auto truncate text-[10px] text-ink-3">{meta}</span> : null}
-      {action ? <span className={meta ? '' : 'ml-auto'}>{action}</span> : null}
-    </header>
-  )
-}
-
-function Tile({ label, unavailable, attention, children }: { label: string; unavailable?: string | null; attention?: boolean; children: ReactNode }) {
-  return (
-    <div className="relative flex flex-col bg-surface px-[15px] pb-3 pt-[13px]">
-      {attention ? <span className="absolute inset-y-0 left-0 w-0.5 bg-serious" aria-hidden="true" /> : null}
-      <div className={`mono text-[11px] uppercase tracking-[0.14em] ${attention ? 'text-serious' : 'text-ink-3'}`}>{label}</div>
-      {unavailable ? (
-        <>
-          <div className="mono mt-[7px] text-[26px] font-medium leading-none text-ink-3">—</div>
-          <div className="mt-auto pt-2.5 text-[10.5px] leading-snug text-ink-3">{unavailable}</div>
-        </>
-      ) : (
-        children
-      )}
-    </div>
-  )
-}
-
-function Figure({
-  value,
-  count,
-  format,
-  unit,
-  suffix,
-  delta,
-}: {
-  value: string
-  /** When set, the figure counts up to itself over 900ms. */
-  count?: number
-  format?: (n: number) => string
-  unit?: string
-  suffix?: string
-  delta?: number | null
-}) {
-  return (
-    <div className="mt-[7px] flex items-baseline gap-[7px]">
-      <span className="mono text-[26px] font-medium leading-none tracking-[-0.02em] text-ink">
-        {count === undefined ? value : <CountUp value={count} format={format ?? ((n) => String(Math.round(n)))} className="!font-[inherit]" />}
-        {unit ? <span className="text-[14px] text-ink-3">{unit}</span> : null}
-      </span>
-      {delta !== undefined && delta !== null ? (
-        <span className={`mono text-[11px] ${delta >= 0 ? 'text-accent-bright' : 'text-ink-3'}`}>
-          {delta >= 0 ? '+' : ''}
-          {delta.toFixed(1)}
-        </span>
-      ) : suffix ? (
-        <span className="mono text-[11px] text-ink-3">{suffix}</span>
-      ) : null}
-    </div>
-  )
-}
-
-function Caption({ children }: { children: ReactNode }) {
-  return <div className="mt-auto pt-1.5 text-[10.5px] text-ink-3">{children}</div>
-}
-
-function Spacer() {
-  return <div className="mt-2.5 h-[3px]" aria-hidden="true" />
-}
-
-/** Now against then: the ghost is last month, so a figure that moved shows where from. */
-function GhostBar({ now, ghost }: { now: number; ghost: number }) {
-  const max = Math.max(now, ghost, 0.0001)
-  return (
-    <div className="relative mt-2.5 h-[3px] rounded-[2px] bg-surface-3" aria-hidden="true">
-      <span className="absolute inset-y-0 left-0 rounded-[2px] bg-hud-strong" style={{ width: `${(ghost / max) * 100}%` }} />
-      <span className="absolute inset-y-0 left-0 rounded-[2px] bg-accent-bright" style={{ width: `${(now / max) * 100}%`, transformOrigin: 'left', animation: 'eth-fill 560ms cubic-bezier(0.16, 1, 0.3, 1) both' }} />
-    </div>
-  )
-}
-
-function Bar({ fraction, tone }: { fraction: number; tone: string }) {
-  return (
-    <div className="relative mt-3 h-[3px] rounded-[2px] bg-surface-3" aria-hidden="true">
-      <span className="absolute inset-y-0 left-0 rounded-[2px]" style={{ width: `${Math.min(100, fraction * 100)}%`, background: tone, transformOrigin: 'left', animation: 'eth-fill 560ms cubic-bezier(0.16, 1, 0.3, 1) both' }} />
-    </div>
-  )
-}
-
-function SplitBar({ parts }: { parts: Array<{ platform: Platform; value: number }> }) {
-  const total = parts.reduce((s, p) => s + p.value, 0)
-  return (
-    <div className="mt-3 flex items-center gap-[3px]" aria-hidden="true">
-      {parts.filter((p) => p.value > 0).map((p) => (
-        <span key={p.platform} className="h-[3px] rounded-[2px]" style={{ width: `${(p.value / Math.max(1, total)) * 100}%`, background: PLATFORM_TOKEN[p.platform] }} />
-      ))}
-      {total === 0 ? <span className="h-[3px] w-full rounded-[2px] bg-surface-3" /> : null}
-    </div>
-  )
-}
-
-function Spark({ values }: { values: number[] }) {
-  const max = Math.max(...values, 1)
-  const pts = values.map((v, i) => `${(i / (values.length - 1)) * 120},${24 - (v / max) * 20}`)
-  const last = pts[pts.length - 1]?.split(',') ?? ['120', '6']
-  return (
-    <svg viewBox="0 0 120 26" preserveAspectRatio="none" className="mt-1.5 block h-[26px] w-full" aria-hidden="true">
-      <path d={`M${pts.join(' L')}`} fill="none" stroke="var(--color-hud-strong)" strokeWidth={1.25} strokeLinejoin="round" />
-      <circle cx={last[0]} cy={last[1]} r={2} fill="var(--color-accent-bright)" />
-    </svg>
-  )
-}
-
-function SubMetric({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="bg-surface-2 px-3 py-2">
-      <div className="mono text-[10.5px] uppercase tracking-[0.13em] text-ink-3">{label}</div>
-      <div className="mt-[3px] flex items-baseline gap-1.5">{children}</div>
-    </div>
-  )
-}
-
 /** A human is required: 4s, amber, half-contrast travel. Never red, never fast. */
 function Breathe({ small = false }: { small?: boolean }) {
   const size = small ? 8 : 13
@@ -1312,6 +1003,48 @@ function Breathe({ small = false }: { small?: boolean }) {
       <span className="absolute inset-0 rounded-full bg-serious opacity-40" style={{ animation: 'eth-attention-breathe 4s ease-in-out infinite' }} />
       <span className="relative rounded-full bg-serious" style={{ width: dot, height: dot }} />
     </span>
+  )
+}
+
+/** An agent is working: 1.6s linear on the node, stops when the skill returns. */
+
+function Spark({ values }: { values: number[] }) {
+  const max = Math.max(...values, 1)
+  const pts = values.map((v, i) => `${(i / (values.length - 1)) * 120},${24 - (v / max) * 20}`)
+  const last = pts[pts.length - 1]?.split(',') ?? ['120', '6']
+  const line = `M${pts.join(' L')}`
+  const uid = `spark-${values.length}-${Math.round(max)}`
+  return (
+    <svg viewBox="0 0 120 26" preserveAspectRatio="none" className="mt-1.5 block h-[26px] w-full overflow-visible" aria-hidden="true">
+      <defs>
+        <linearGradient id={`${uid}-fill`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--color-accent)" stopOpacity="0.45" />
+          <stop offset="100%" stopColor="var(--color-accent)" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id={`${uid}-line`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor="var(--color-accent)" />
+          <stop offset="100%" stopColor="var(--color-accent-bright)" />
+        </linearGradient>
+      </defs>
+      {/* the area, rising in behind the line */}
+      <path
+        d={`${line} L120,26 L0,26 Z`}
+        fill={`url(#${uid}-fill)`}
+        style={{ transformOrigin: 'bottom', animation: 'eth-area-in 720ms cubic-bezier(0.22, 1, 0.36, 1) 160ms both' }}
+      />
+      <path
+        d={line}
+        fill="none"
+        stroke={`url(#${uid}-line)`}
+        strokeWidth={1.4}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        pathLength={300}
+        style={{ strokeDasharray: 300, ['--len' as string]: '300', animation: 'eth-draw-line 900ms cubic-bezier(0.16, 1, 0.3, 1) both' }}
+      />
+      {/* the latest reading, lit */}
+      <circle cx={last[0]} cy={last[1]} r={2.6} fill="var(--color-accent-bright)" style={{ filter: 'drop-shadow(0 0 4px var(--color-accent-bright))', animation: 'eth-num-in 320ms cubic-bezier(0.22, 1, 0.36, 1) 820ms both' }} />
+    </svg>
   )
 }
 

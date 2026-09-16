@@ -56,6 +56,8 @@ import {
   type RawPost,
 } from '../../integrations'
 import { prepareEvidence } from '../../../../packages/runtime/src/evidence'
+import { cycleWeekFor } from '../../../../shared/keyword-schedule'
+import { cycleWeekTopic, keywordsForCycleWeek, type KeywordRow } from '../../db/repo'
 import { insertActivity, listKeywords, listKnowledge, listSources, recentCaptures } from '../../db/repo'
 import {
   clampChars,
@@ -250,18 +252,90 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
   const maxKeywords = ctx.num('maxKeywordsPerRun', 12)
   const minWeight = ctx.num('minWeight', 40)
   const expand = ctx.bool('expandSynonyms', true)
+  const useWeekSchedule = ctx.bool('useWeekSchedule', true)
+  const anchorRaw = ctx.str('scheduleAnchorDate', '2026-09-14')
+  const fallback = ctx.str('scheduleFallback', 'weighted')
 
   const all = await listKeywords(ctx.workspaceId, true)
 
-  // A scoped run (Ethara: "run discovery on RLHF") narrows the set but still
-  // honours the weight floor, so the operator gets the same quality bar.
-  const scoped =
-    payload.keywordIds && payload.keywordIds.length > 0
-      ? all.filter((k) => payload.keywordIds?.includes(k.id))
-      : all
+  /*
+   * THE WEEKLY ROTA, WHEN THERE IS ONE.
+   *
+   * Precedence matters and is deliberate:
+   *
+   *   1. An explicitly scoped run wins outright. "Run discovery on RLHF" is a
+   *      direct instruction, and a rota must never override what was asked for.
+   *   2. Otherwise the rota for the current cycle week — every constant plus
+   *      that week's rotating set.
+   *   3. Otherwise the weight-ordered set, which is the behaviour that existed
+   *      before the rota and remains the honest fallback.
+   *
+   * Which path was taken is EMITTED, not inferred. When a Monday captures
+   * nothing, the run has to say "week 12 has no rota and the fallback is skip"
+   * rather than looking like a broken scraper.
+   */
+  const scopedExplicitly = (payload.keywordIds?.length ?? 0) > 0
+  let rotaWeek: number | null = null
+  let rotaTopic = ''
+  let scheduled: KeywordRow[] = []
 
-  const cleared = scoped.filter((k) => k.weight >= minWeight).sort((a, b) => b.weight - a.weight)
-  const eligible = cleared.slice(0, Math.max(1, maxKeywords))
+  if (!scopedExplicitly && useWeekSchedule) {
+    const anchor = new Date(`${anchorRaw}T00:00:00Z`)
+    if (Number.isNaN(anchor.getTime())) {
+      ctx.emit('activity', `scheduleAnchorDate is not a date (${anchorRaw}) — ignoring the rota`, {
+        status: 'warn',
+      })
+    } else {
+      // "Today" in the WORKSPACE timezone. A naive UTC read crosses the week
+      // boundary hours early for anyone east of Greenwich.
+      const today = new Date(new Date().toLocaleDateString('en-CA', { timeZone: config.core.tz }))
+      rotaWeek = cycleWeekFor(today, anchor)
+      scheduled = await keywordsForCycleWeek(ctx.workspaceId, rotaWeek)
+      rotaTopic = await cycleWeekTopic(ctx.workspaceId, rotaWeek)
+    }
+  }
+
+  let source: 'scoped' | 'rota' | 'weighted' = 'weighted'
+  let pool = all
+
+  if (scopedExplicitly) {
+    source = 'scoped'
+    pool = all.filter((k) => payload.keywordIds?.includes(k.id))
+  } else if (scheduled.length > 0) {
+    source = 'rota'
+    pool = scheduled
+  } else if (rotaWeek !== null && fallback === 'skip') {
+    // An honest empty result. Capturing the weight-ordered set here would quietly
+    // substitute a different week's intent for the one that was scheduled.
+    ctx.emit(
+      'activity',
+      `Week ${rotaWeek} has no keywords scheduled and scheduleFallback is 'skip' — nothing was captured`,
+      { status: 'warn', cycleWeek: rotaWeek },
+    )
+    return { keywords: [] }
+  }
+
+  /*
+   * The weight floor applies to the scoped and weighted paths, not the rota. A
+   * keyword an operator deliberately scheduled for this week has already passed
+   * their judgement, and silently dropping it for being under-weighted would
+   * make the rota mean less than it says.
+   */
+  const cleared =
+    source === 'rota' ? pool : pool.filter((k) => k.weight >= minWeight)
+  const ordered =
+    source === 'rota' ? cleared : [...cleared].sort((a, b) => b.weight - a.weight)
+  const eligible = ordered.slice(0, Math.max(1, maxKeywords))
+
+  ctx.emit(
+    'activity',
+    source === 'rota'
+      ? `Week ${rotaWeek}${rotaTopic ? ` · ${rotaTopic}` : ''} — ${eligible.length} of ${pool.length} scheduled keyword(s)`
+      : source === 'scoped'
+        ? `Scoped run — ${eligible.length} keyword(s) named explicitly`
+        : `No rota in effect — top ${eligible.length} keyword(s) by weight`,
+    { status: 'ok', source, ...(rotaWeek === null ? {} : { cycleWeek: rotaWeek }) },
+  )
 
   const keywords: ResolvedKeyword[] = eligible.map((k) => ({
     id: k.id,
@@ -275,7 +349,9 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
   // out, and rule 6 wants the reason to name its actual cause. Reporting the
   // cap as a weight failure sends the operator to re-weight a term that was
   // never under-weighted.
-  const belowFloor = scoped.length - cleared.length
+  // `pool` is whichever set the precedence above selected — scoped, rota or
+  // weighted — so this counts what that set lost rather than always the full list.
+  const belowFloor = pool.length - cleared.length
   const beyondCap = cleared.length - eligible.length
   ctx.log(
     `${keywords.length} keyword${keywords.length === 1 ? '' : 's'} resolved` +
