@@ -206,6 +206,13 @@ export function CalendarPage() {
    * than jumping to a default.
    */
   const resizeRef = useRef<{ id: number; startX: number; startWidth: number } | null>(null)
+  /*
+   * True only while a pointer is actively dragging the edge. The grid follows
+   * the pointer instantly during a drag (a transition here would lag the cursor
+   * and feel like rubber), and glides for every OTHER width change — the reset
+   * to auto, a keyboard nudge, a width restored from localStorage on load.
+   */
+  const [isResizing, setIsResizing] = useState(false)
   const beginResize = (event: React.PointerEvent<HTMLElement>): void => {
     if (event.button !== 0) return
     event.preventDefault()
@@ -213,6 +220,7 @@ export function CalendarPage() {
     const column = event.currentTarget.closest<HTMLElement>('[data-day]')
     const startWidth = columnWidth > 0 ? columnWidth : (column?.getBoundingClientRect().width ?? COLUMN_MIN)
     resizeRef.current = { id: event.pointerId, startX: event.clientX, startWidth }
+    setIsResizing(true)
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
     } catch {
@@ -229,12 +237,26 @@ export function CalendarPage() {
   const endResize = (event: React.PointerEvent<HTMLElement>): void => {
     if (!resizeRef.current) return
     resizeRef.current = null
+    setIsResizing(false)
     document.body.classList.remove('is-resizing')
     try {
       event.currentTarget.releasePointerCapture(event.pointerId)
     } catch {
       // Capture already gone.
     }
+  }
+  // Keyboard resize: the same shared width, nudged. Starts from the real
+  // rendered width when the grid is still in "auto", so the first keypress does
+  // not jump. Not a pointer drag, so the grid glides to the new width.
+  const nudgeWidth = (event: React.KeyboardEvent<HTMLElement>): void => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const base =
+      columnWidth > 0
+        ? columnWidth
+        : (event.currentTarget.closest<HTMLElement>('[data-day]')?.getBoundingClientRect().width ?? COLUMN_MIN)
+    const next = base + (event.key === 'ArrowRight' ? 24 : -24)
+    setColumnWidth(Math.min(COLUMN_MAX, Math.max(COLUMN_MIN, Math.round(next))))
   }
   // Only an explicitly-widened column shows the whole topic and hook; "auto"
   // keeps the original responsive clamp so a narrow laptop still reads cleanly.
@@ -476,7 +498,16 @@ export function CalendarPage() {
                 ? 'grid items-start gap-2 overflow-x-auto pb-1'
                 : 'grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7'
             }
-            style={columnWidth > 0 ? { gridTemplateColumns: `repeat(7, ${columnWidth}px)` } : undefined}
+            style={
+              columnWidth > 0
+                ? {
+                    gridTemplateColumns: `repeat(7, ${columnWidth}px)`,
+                    // Glide when the width changes on its own (reset, keyboard,
+                    // restore-on-load); follow the pointer instantly mid-drag.
+                    transition: isResizing ? 'none' : `grid-template-columns var(--dur-base) var(--ease-out-soft)`,
+                  }
+                : undefined
+            }
           >
             {days.map((day, i) => {
               const iso = isoDate(day)
@@ -557,12 +588,17 @@ export function CalendarPage() {
                     role="separator"
                     aria-label="Resize calendar columns"
                     aria-orientation="vertical"
-                    title="Drag to resize every column"
+                    aria-valuenow={columnWidth > 0 ? columnWidth : undefined}
+                    aria-valuemin={COLUMN_MIN}
+                    aria-valuemax={COLUMN_MAX}
+                    tabIndex={0}
+                    title="Drag to resize every column · arrow keys also work"
                     onPointerDown={beginResize}
                     onPointerMove={onResizeMove}
                     onPointerUp={endResize}
                     onPointerCancel={endResize}
-                    className="absolute -right-1 top-0 z-20 flex h-full w-2 cursor-col-resize touch-none items-center justify-center opacity-0 transition-opacity duration-[var(--dur-fast)] group-hover/day:opacity-100"
+                    onKeyDown={nudgeWidth}
+                    className="absolute -right-1 top-0 z-20 flex h-full w-2 cursor-col-resize touch-none items-center justify-center opacity-0 outline-none transition-opacity duration-[var(--dur-fast)] group-hover/day:opacity-100 focus-visible:opacity-100"
                   >
                     <span className="h-10 w-[3px] rounded-full bg-line-strong transition-colors hover:bg-accent" aria-hidden="true" />
                   </span>
