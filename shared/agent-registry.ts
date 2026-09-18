@@ -856,9 +856,9 @@ const VALIDATION_SKILLS: SkillSpec[] = [
     section: 'Duplication',
     name: 'Detect duplicates',
     summary:
-      'Three passes — exact match, near-duplicate by text similarity, and semantic alias — linking any duplicate to its original rather than deleting it.',
-    inputs: ['Candidates', 'Prior validated candidates'],
-    outputs: ['Duplicate links'],
+      'Passes for exact match, near-duplicate by text similarity, and semantic alias — plus checks against the Knowledge Base and against items rejected earlier — linking any duplicate to its original rather than deleting it.',
+    inputs: ['Candidates', 'Prior validated candidates', 'Prior rejected candidates', 'Knowledge Base'],
+    outputs: ['Duplicate links', 'Known-already links', 'Prior-rejection links'],
     order: 6,
     enabledByDefault: true,
     critical: true,
@@ -872,6 +872,10 @@ const VALIDATION_SKILLS: SkillSpec[] = [
         'Catches two candidates in the same run that are the same thing. Off only compares against history.'),
       bool('aliasMapEnabled', 'Use the alias map', true,
         'Treats declared equivalents as the same tag — #RL and #ReinforcementLearning, #GenAI and #GenerativeAI.'),
+      bool('checkKnowledgeBase', 'Check against the Knowledge Base', true,
+        'Marks an item as already-known when its citation URL is already cited by an active Knowledge Base entry, or its text closely matches one. Linked to the entry, not dropped.'),
+      bool('checkPriorRejections', 'Reject repeats of earlier rejections', true,
+        'When an item matches something a human or the agent rejected before, it is rejected again with the original reason rather than re-queued for the same decision.'),
     ],
   },
   {

@@ -2074,6 +2074,126 @@ export async function persistScrapedItems(
   return idByExternal
 }
 
+/**
+ * A page carried through the scrape stage, reduced to what a knowledge entry
+ * needs. `keyword` and `topics` are what found it; `hashtags` are what it
+ * carried; `url`/`title` become the citation.
+ */
+export interface ScrapedTopicSignal {
+  keyword: string
+  topics: string[]
+  hashtags: string[]
+  title: string
+  url: string
+  publishedAt?: string
+  brandRelevance: number
+}
+
+/**
+ * RECORD WHAT WAS SCRAPED AS KNOWLEDGE, ON EVERY SCRAPE — but as a distinct,
+ * labelled origin, never dressed up as vetted research.
+ *
+ * One entry per keyword. Its content lists the topics and hashtags the scrape
+ * associated with that keyword this run, and its `sources` cite the actual
+ * pages that carried them, so the entry obeys the same "cited, never invented"
+ * rule the research build does. `origin='learned'` and `category='Signals'`
+ * keep these filterable and deactivatable in the Knowledge Base, and distinct
+ * from the human-vetted `origin='research'` entries — so an operator can switch
+ * the auto-captured layer off without touching curated findings.
+ *
+ * Re-scraping the same keyword MERGES new citations into the existing signal
+ * entry rather than stacking duplicates, matching the deactivate-never-delete
+ * and merge-don't-duplicate invariants the rest of knowledge already honours.
+ */
+export async function recordScrapedTopicsAsKnowledge(
+  workspaceId: string,
+  signals: ScrapedTopicSignal[],
+): Promise<{ written: number; merged: number }> {
+  if (signals.length === 0) return { written: 0, merged: 0 }
+
+  // Group every scraped page by the keyword that found it.
+  const byKeyword = new Map<string, ScrapedTopicSignal[]>()
+  for (const s of signals) {
+    const key = s.keyword.trim()
+    if (!key) continue
+    const list = byKeyword.get(key) ?? []
+    list.push(s)
+    byKeyword.set(key, list)
+  }
+
+  let written = 0
+  let merged = 0
+
+  for (const [keyword, rows] of byKeyword) {
+    const topics = [...new Set(rows.flatMap((r) => r.topics))].filter(Boolean)
+    const hashtags = [...new Set(rows.flatMap((r) => r.hashtags))].filter(Boolean)
+
+    // The citations: distinct URLs, deduped, with the strongest title kept.
+    const sourceByUrl = new Map<string, { title: string; url: string; publishedAt?: string }>()
+    for (const r of rows) {
+      if (!r.url || sourceByUrl.has(r.url)) continue
+      sourceByUrl.set(r.url, {
+        title: r.title || keyword,
+        url: r.url,
+        ...(r.publishedAt ? { publishedAt: r.publishedAt } : {}),
+      })
+    }
+    const sources = [...sourceByUrl.values()]
+    // No citable page means no entry — the same floor knowledge already enforces.
+    if (sources.length === 0) continue
+
+    const title = `Signal · ${keyword}`
+    const content = [
+      `Scraped signal for "${keyword}".`,
+      topics.length ? `Topics: ${topics.join(', ')}.` : '',
+      hashtags.length ? `Hashtags: ${hashtags.map((h) => `#${h.replace(/^#/, '')}`).join(' ')}.` : '',
+      `Seen on ${sources.length} page${sources.length === 1 ? '' : 's'} this scrape.`,
+    ]
+      .filter(Boolean)
+      .join(' ')
+
+    const avgRelevance =
+      rows.reduce((n, r) => n + (r.brandRelevance || 0), 0) / rows.length
+    const confidence: 'High' | 'Medium' | 'Low' =
+      sources.length >= 3 && avgRelevance >= 70
+        ? 'High'
+        : sources.length >= 2 || avgRelevance >= 50
+          ? 'Medium'
+          : 'Low'
+
+    // Merge into the existing signal entry for this keyword if one is live.
+    const existing = await queryOne<{ id: string }>(
+      `SELECT id FROM knowledge_entries
+        WHERE workspace_id = $1 AND origin = 'learned' AND category = 'Signals'
+          AND title = $2 AND active = true
+        LIMIT 1`,
+      [workspaceId, title],
+    )
+
+    if (existing) {
+      await mergeKnowledgeEntry(existing.id, sources, false)
+      merged += 1
+    } else {
+      const inserted = await insertKnowledgeEntry({
+        workspaceId,
+        title,
+        category: 'Signals',
+        content,
+        source: 'Scrape',
+        sources,
+        hashtagId: null,
+        confidence,
+        origin: 'learned',
+        buildId: null,
+        tags: [...new Set([keyword, ...topics, ...hashtags.map((h) => h.replace(/^#/, ''))])].slice(0, 20),
+      })
+      if (inserted) written += 1
+    }
+  }
+
+  return { written, merged }
+}
+
 /** Links a duplicate to its original. The duplicate row itself stays. */
 export async function linkDuplicateItem(id: string, duplicateOfId: string): Promise<void> {
   await query(`UPDATE scraped_items SET duplicate_of_id = $2 WHERE id = $1`, [id, duplicateOfId])

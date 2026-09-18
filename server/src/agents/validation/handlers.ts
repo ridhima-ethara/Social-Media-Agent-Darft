@@ -7,7 +7,7 @@
 
 import { similarity } from '../../../../shared/brand-voice'
 import type { Confidence } from '../../../../shared/agent-contract'
-import { listHashtags, listScrapedItems, priorKeywordAverages } from '../../db/repo'
+import { listHashtags, listKnowledge, listScrapedItems, priorKeywordAverages } from '../../db/repo'
 import { aliasGroupLabel, aliasKey, clamp, contentWords, countTopicMatches, credibilityBase, credibilityLabel, growthPercent, halfLifeScore, hoursSince, matchedTopics, mean, normalise, normaliseTag, rescaleGrowth, round } from '../corpus'
 import { registerSkill } from '../runtime'
 import type { BucketCounts, HashtagCandidate, KeywordTrend, PipelinePayload, RankedHashtagGroup, ReviewRequest, ScrapedPost } from '../skills/index'
@@ -434,6 +434,8 @@ registerSkill<PipelinePayload>('validation.duplicate.detect', async (payload, ct
   const compareWindow = ctx.num('compareWindow', 30)
   const withinBatch = ctx.bool('withinBatch', true)
   const aliasMapEnabled = ctx.bool('aliasMapEnabled', true)
+  const checkKnowledgeBase = ctx.bool('checkKnowledgeBase', true)
+  const checkPriorRejections = ctx.bool('checkPriorRejections', true)
 
   const posts = payload.posts ?? []
   const candidates = payload.hashtagCandidates ?? []
@@ -446,13 +448,82 @@ registerSkill<PipelinePayload>('validation.duplicate.detect', async (payload, ct
     (row) => new Date(row.scraped_at).getTime() >= cutoff && row.validation === 'validated',
   )
 
+  // Items a human or the agent rejected before. No time window: a rejection is
+  // a decision, and a decision does not expire just because the calendar turned.
+  const priorRejected = checkPriorRejections
+    ? await listScrapedItems(ctx.workspaceId, { limit: 400, validation: 'rejected' })
+    : []
+
+  // The active Knowledge Base — entries and every URL they cite. An item whose
+  // citation is already cited by a live entry is already known, and an item
+  // whose body closely matches an entry is telling us what we already recorded.
+  const knowledge = checkKnowledgeBase
+    ? await listKnowledge(ctx.workspaceId, { activeOnly: true, limit: 500 })
+    : []
+  const citedUrls = new Map<string, string>() // url → entry title
+  for (const entry of knowledge) {
+    for (const src of entry.sources ?? []) {
+      if (src.url) citedUrls.set(src.url, entry.title)
+    }
+  }
+
   let exact = 0
   let near = 0
   let aliasHits = 0
+  let knownAlready = 0
+  let priorRejects = 0
 
   const acceptedInBatch: ScrapedPost[] = []
 
   for (const post of posts) {
+    // Pass 0a — prior rejection: a decision already made, not re-litigated.
+    // Highest priority, ahead of the duplicate passes: rejecting a repeat is
+    // more informative than linking it to an original that itself was rejected.
+    if (checkPriorRejections) {
+      const rejectedHit =
+        priorRejected.find(
+          (row) => row.external_id === post.externalId || (row.url && row.url === post.url),
+        ) ??
+        priorRejected
+          .map((row) => ({ row, score: similarity(post.text, `${row.title} ${row.snippet ?? ''}`) }))
+          .sort((a, b) => b.score - a.score)
+          .find((m) => m.score >= threshold)?.row
+
+      if (rejectedHit) {
+        post.priorRejection = {
+          reason: rejectedHit.verdict_reason ?? 'Rejected on an earlier run.',
+          title: rejectedHit.title,
+          when: rejectedHit.scraped_at,
+        }
+        priorRejects += 1
+        // Not `continue`d: the verdict router reads `priorRejection` first and
+        // routes it to rejected, so no further pass can override it — but the
+        // item still carries its other signals for the record.
+        continue
+      }
+    }
+
+    // Pass 0b — Knowledge Base: already-known content is a duplicate of what we
+    // researched, not new. Cite the entry it matched as its original.
+    if (checkKnowledgeBase) {
+      const knownByUrl = post.url ? citedUrls.get(post.url) : undefined
+      if (knownByUrl) {
+        post.isDuplicate = true
+        post.verdictReason = `Already in the Knowledge Base — this URL is cited by “${knownByUrl}”. Linked to the entry rather than re-processed.`
+        knownAlready += 1
+        continue
+      }
+      const knownByText = knowledge
+        .map((entry) => ({ entry, score: similarity(post.text, `${entry.title} ${entry.content}`) }))
+        .sort((a, b) => b.score - a.score)[0]
+      if (knownByText && knownByText.score >= threshold) {
+        post.isDuplicate = true
+        post.verdictReason = `${Math.round(knownByText.score * 100)}% similar to the Knowledge Base entry “${knownByText.entry.title}”. Already known — linked to the entry.`
+        knownAlready += 1
+        continue
+      }
+    }
+
     // Pass 1 — exact: the same external id already on record.
     const exactPrior = priorInWindow.find(
       (row) => row.external_id === post.externalId || (row.url && row.url === post.url),
@@ -546,7 +617,8 @@ registerSkill<PipelinePayload>('validation.duplicate.detect', async (payload, ct
   }
 
   ctx.log(
-    `${exact} exact, ${near} near and ${aliasHits} alias duplicate(s) linked — none deleted`,
+    `${exact} exact, ${near} near and ${aliasHits} alias duplicate(s) linked · ` +
+      `${knownAlready} already in the Knowledge Base · ${priorRejects} matched an earlier rejection — none deleted`,
   )
 
   return { posts, hashtagCandidates: candidates }
@@ -585,6 +657,7 @@ registerSkill<PipelinePayload>('validation.verdict.route', (payload, ctx) => {
   for (const post of posts) {
     const verdict = routeVerdict({
       isDuplicate: post.isDuplicate,
+      priorRejection: post.priorRejection,
       relevance: post.relevance,
       credibility: post.credibility,
       existingReason: post.verdictReason,
@@ -685,6 +758,7 @@ function describe(b: BucketCounts): string {
 
 interface RouteInput {
   isDuplicate: boolean
+  priorRejection?: { reason: string; title: string; when: string } | null
   relevance: number
   credibility: Confidence
   existingReason: string
@@ -699,8 +773,8 @@ interface RouteInput {
 
 /**
  * Strict priority, in this order and no other:
- *   duplicate → rejected (below the floor) → needs_review (low credibility)
- *   → needs_review (between the thresholds) → validated
+ *   prior rejection → duplicate → rejected (below the floor) → needs_review
+ *   (low credibility) → needs_review (between the thresholds) → validated
  *
  * Every branch writes a reason naming the number it rests on. "Low confidence"
  * on its own is a bug, not a reason.
@@ -709,6 +783,15 @@ function routeVerdict(input: RouteInput): {
   validation: 'validated' | 'needs_review' | 'duplicate' | 'rejected'
   reason: string
 } {
+  // A decision a human already made comes first — a repeat of a rejected item
+  // is rejected again with the original reason rather than re-queued.
+  if (input.priorRejection) {
+    return {
+      validation: 'rejected',
+      reason: `Rejected before as “${input.priorRejection.title}” — ${input.priorRejection.reason} Rejected again on the same grounds rather than re-queued.`,
+    }
+  }
+
   if (input.isDuplicate) {
     return {
       validation: 'duplicate',

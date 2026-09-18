@@ -89,6 +89,13 @@ export interface ScrapedPost {
   freshness: number
   isDuplicate: boolean
   duplicateOfExternalId: string | null
+  /**
+   * Set when this item matches something rejected on a previous run. It routes
+   * straight to `rejected` with the original reason, ahead of the duplicate
+   * check — a decision a human already made is not re-litigated. `null` means
+   * no prior rejection matched.
+   */
+  priorRejection: { reason: string; title: string; when: string } | null
   validation: ValidationVerdict
   verdictReason: string
 }

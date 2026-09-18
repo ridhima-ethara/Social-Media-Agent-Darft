@@ -43,6 +43,7 @@ import {
   persistHashtagCandidates,
   persistIdeas,
   persistScrapedItems,
+  recordScrapedTopicsAsKnowledge,
   replaceTopHashtagSet,
   setAgentState,
   setLeadershipDecision,
@@ -188,6 +189,41 @@ export async function runDiscoveryPipeline(
 
   const afterScrape = scraping.payload
   const itemIdByExternal = await persistCorpus(workspaceId, run.id, afterScrape)
+
+  // Record the scraped keywords, hashtags and topics into the Knowledge Base on
+  // every scrape — as `origin='learned'`, category 'Signals', citing the pages
+  // that carried them. Distinct from the human-vetted research layer, so it can
+  // be filtered or switched off without touching curated findings. Failure here
+  // is non-fatal: a signal we could not record must never fail a capture we did.
+  try {
+    const signals = (afterScrape.posts ?? [])
+      .filter((p) => !p.isDuplicate && p.keyword)
+      .map((p) => ({
+        keyword: p.keyword,
+        topics: p.alignedTopics ?? [],
+        hashtags: p.hashtags ?? [],
+        title: p.title,
+        url: p.url,
+        ...(p.postedAt ? { publishedAt: p.postedAt } : {}),
+        brandRelevance: p.brandRelevance ?? 0,
+      }))
+    const recorded = await recordScrapedTopicsAsKnowledge(workspaceId, signals)
+    if (recorded.written > 0 || recorded.merged > 0) {
+      await insertActivity({
+        workspaceId,
+        agentId: 'scraping',
+        message: `Scrape signals recorded to Knowledge Base · ${recorded.written} new, ${recorded.merged} merged`,
+        status: 'ok',
+      })
+    }
+  } catch (err) {
+    await insertActivity({
+      workspaceId,
+      agentId: 'scraping',
+      message: `Could not record scrape signals to Knowledge Base: ${err instanceof Error ? err.message : String(err)}`,
+      status: 'error',
+    })
+  }
 
   /* ── ② Validation ───────────────────────────────────────────────────────── */
   const validation = await runAgent<PipelinePayload>('validation', afterScrape, {

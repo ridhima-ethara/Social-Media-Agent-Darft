@@ -526,6 +526,7 @@ function toScrapedPost(
     freshness: 0,
     isDuplicate: false,
     duplicateOfExternalId: null,
+    priorRejection: null,
     validation: 'pending',
     verdictReason: '',
   }

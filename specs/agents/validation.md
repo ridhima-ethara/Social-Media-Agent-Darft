@@ -69,7 +69,7 @@ Decays a candidate’s score by age on a half-life curve, so yesterday clearly b
 
 ### `validation.duplicate.detect`
 
-Three passes — exact match, near-duplicate by text similarity, and semantic alias — linking any duplicate to its original rather than deleting it.
+Passes for exact match, near-duplicate by text similarity, and semantic alias — plus checks against the Knowledge Base and against items rejected earlier — linking any duplicate to its original rather than deleting it.
 
 | Knob | Default | Description |
 |---|---|---|
@@ -77,6 +77,8 @@ Three passes — exact match, near-duplicate by text similarity, and semantic al
 | `compareWindow` | `30` | How far back to look for an original when deciding whether something is a duplicate. |
 | `withinBatch` | `true` | Catches two candidates in the same run that are the same thing. Off only compares against history. |
 | `aliasMapEnabled` | `true` | Treats declared equivalents as the same tag — #RL and #ReinforcementLearning, #GenAI and #GenerativeAI. |
+| `checkKnowledgeBase` | `true` | Marks an item as already-known when its citation URL is already cited by an active Knowledge Base entry, or its text closely matches one. Linked to the entry, not dropped. |
+| `checkPriorRejections` | `true` | When an item matches something a human or the agent rejected before, it is rejected again with the original reason rather than re-queued for the same decision. |
 
 ### `validation.verdict.route`
 
