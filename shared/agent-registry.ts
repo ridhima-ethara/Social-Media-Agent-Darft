@@ -1572,6 +1572,8 @@ const IMAGE_SKILLS: SkillSpec[] = [
       num('safeMargin', 'Safe margin', 64,
         'The keep-clear border in canvas pixels, so nothing important is cropped by a platform preview.',
         { min: 16, max: 160, step: 8, unit: 'px' }),
+      bool('useReferenceImages', 'Use brand reference images', true,
+        'Appends the style descriptions from public/brand/references/references.json to the background prompt, so every painter is steered toward your reference look. Off ignores the folder. Never affects the brand text layer.'),
     ],
   },
   {

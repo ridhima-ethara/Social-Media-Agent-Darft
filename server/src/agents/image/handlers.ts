@@ -12,6 +12,7 @@
  */
 
 import { BRAND } from '../../../../shared/brand-voice'
+import { styleClauseFor } from '../../../../shared/reference-images'
 import {
   canvasFor,
   canvasKey,
@@ -96,6 +97,7 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
   const layout = ctx.str('layout', 'Editorial')
   const headlineMaxWords = ctx.num('headlineMaxWords', 12)
   const safeMargin = ctx.num('safeMargin', 64)
+  const useReferenceImages = ctx.bool('useReferenceImages', true)
 
   const canvas = canvasFor(payload.platform)
 
@@ -105,6 +107,14 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
   const headline = clampWords(fromCaption.length >= 12 ? fromCaption : payload.title, headlineMaxWords)
 
   const concept = (payload.concept ?? 'gradient-field') as ImageConcept
+
+  // The brand reference images steer the background only, as text — see
+  // shared/reference-images.ts and invariant 21. Empty when the folder is empty
+  // or the knob is off, in which case the prompt is unchanged from before.
+  const styleClause = useReferenceImages ? styleClauseFor(concept) : ''
+  if (styleClause) {
+    ctx.log(`Applied brand reference style to the background prompt`)
+  }
 
   ctx.log(
     `${layout} layout on a ${canvas.width}×${canvas.height} ${PLATFORM_LABEL[payload.platform]} canvas, ${safeMargin}px safe margin`,
@@ -119,15 +129,16 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
     width: canvas.width,
     height: canvas.height,
     canvas: canvasKey(payload.platform),
-    backgroundPrompt: backgroundPromptFor(concept, payload.sourceTopic),
+    backgroundPrompt: backgroundPromptFor(concept, payload.sourceTopic, styleClause),
   }
 })
 
 /**
  * Describes an abstract background only. It contains no brand copy, because the
- * brand copy is never sent to a diffusion model.
+ * brand copy is never sent to a diffusion model. An optional `styleClause` from
+ * the brand reference images is appended when configured.
  */
-function backgroundPromptFor(concept: ImageConcept, topic: string): string {
+function backgroundPromptFor(concept: ImageConcept, topic: string, styleClause = ''): string {
   const base: Record<ImageConcept, string> = {
     'gradient-field': 'a deep violet gradient field, soft volumetric light, no text, no logos, abstract',
     'signal-lines': 'thin luminous signal lines rising across a dark violet field, no text, abstract',
@@ -136,7 +147,9 @@ function backgroundPromptFor(concept: ImageConcept, topic: string): string {
     'benchmark-bars': 'abstract vertical luminous bars of varying height in violet tones, no text',
     'data-lattice': 'a fine three-dimensional lattice of violet points receding into darkness, no text',
   }
-  return `${base[concept]}, editorial, high contrast, cinematic, subject matter: ${topic}`
+  return [`${base[concept]}, editorial, high contrast, cinematic, subject matter: ${topic}`, styleClause]
+    .filter(Boolean)
+    .join(' ')
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

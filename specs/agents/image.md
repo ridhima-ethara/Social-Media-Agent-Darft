@@ -44,6 +44,7 @@ Positions the headline, kicker, accent bar, logomark and footer on the platformâ
 | `layout` | `Editorial` | Editorial puts the headline lower-left with a kicker above. Centred is for single statements. Split carries a figure alongside. |
 | `headlineMaxWords` | `12` | The ceiling on the drawn headline. Beyond this the type shrinks below legibility on a phone. |
 | `safeMargin` | `64` | The keep-clear border in canvas pixels, so nothing important is cropped by a platform preview. |
+| `useReferenceImages` | `true` | Appends the style descriptions from public/brand/references/references.json to the background prompt, so every painter is steered toward your reference look. Off ignores the folder. Never affects the brand text layer. |
 
 ### `generation.image.tokens`
 

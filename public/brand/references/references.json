@@ -1,0 +1,11 @@
+{
+  "references": [
+    {
+      "file": "example-mood.jpg",
+      "label": "House mood — dark editorial",
+      "style": "deep near-black ground, restrained violet and magenta accents, soft volumetric light, generous negative space, cinematic and high-contrast",
+      "concepts": [],
+      "active": false
+    }
+  ]
+}
