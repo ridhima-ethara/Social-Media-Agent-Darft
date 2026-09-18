@@ -165,7 +165,10 @@ function useWeekSwipe(onChange: (direction: 1 | -1) => void): {
     onTouchEnd: () => void
     onWheel: (e: React.WheelEvent) => void
   }
-  style: { transform?: string; transition?: string }
+  /** True while a finger is down, so the caller can disable easing. */
+  dragging: boolean
+  /** The live drag offset, or undefined when at rest. */
+  transform: string | undefined
 } {
   const [dragX, setDragX] = useState(0)
   const start = useRef<{ x: number; y: number } | null>(null)
@@ -211,11 +214,9 @@ function useWeekSwipe(onChange: (direction: 1 | -1) => void): {
         }, 420)
       },
     },
-    style:
-      dragX === 0
-        ? { transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)' }
-        : // Damped, so the grid follows the finger without sliding off-screen.
-          { transform: `translateX(${dragX * 0.35}px)`, transition: 'none' },
+    dragging: dragX !== 0,
+    // Damped, so the grid follows the finger without sliding off-screen.
+    transform: dragX === 0 ? undefined : `translateX(${dragX * 0.35}px)`,
   }
 }
 
@@ -276,6 +277,13 @@ export function CalendarPage() {
    * than jumping to a default.
    */
   const resizeRef = useRef<{ id: number; startX: number; startWidth: number } | null>(null)
+  /*
+   * True only while a pointer is actively dragging the edge. The grid follows
+   * the pointer instantly during a drag (a transition here would lag the cursor
+   * and feel like rubber), and glides for every OTHER width change — the reset
+   * to auto, a keyboard nudge, a width restored from localStorage on load.
+   */
+  const [isResizing, setIsResizing] = useState(false)
   const beginResize = (event: React.PointerEvent<HTMLElement>): void => {
     if (event.button !== 0) return
     event.preventDefault()
@@ -283,6 +291,7 @@ export function CalendarPage() {
     const column = event.currentTarget.closest<HTMLElement>('[data-day]')
     const startWidth = columnWidth > 0 ? columnWidth : (column?.getBoundingClientRect().width ?? COLUMN_MIN)
     resizeRef.current = { id: event.pointerId, startX: event.clientX, startWidth }
+    setIsResizing(true)
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
     } catch {
@@ -299,12 +308,26 @@ export function CalendarPage() {
   const endResize = (event: React.PointerEvent<HTMLElement>): void => {
     if (!resizeRef.current) return
     resizeRef.current = null
+    setIsResizing(false)
     document.body.classList.remove('is-resizing')
     try {
       event.currentTarget.releasePointerCapture(event.pointerId)
     } catch {
       // Capture already gone.
     }
+  }
+  // Keyboard resize: the same shared width, nudged. Starts from the real
+  // rendered width when the grid is still in "auto", so the first keypress does
+  // not jump. Not a pointer drag, so the grid glides to the new width.
+  const nudgeWidth = (event: React.KeyboardEvent<HTMLElement>): void => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const base =
+      columnWidth > 0
+        ? columnWidth
+        : (event.currentTarget.closest<HTMLElement>('[data-day]')?.getBoundingClientRect().width ?? COLUMN_MIN)
+    const next = base + (event.key === 'ArrowRight' ? 24 : -24)
+    setColumnWidth(Math.min(COLUMN_MAX, Math.max(COLUMN_MIN, Math.round(next))))
   }
   // Only an explicitly-widened column shows the whole topic and hook; "auto"
   // keeps the original responsive clamp so a narrow laptop still reads cleanly.
@@ -543,20 +566,42 @@ export function CalendarPage() {
            */}
           <div
             ref={gridRef}
-              {...weekSwipe.handlers}
-              className={
-                // `touch-pan-y` keeps vertical page scrolling native while the
-                // horizontal axis becomes ours to read as a week change.
-                `touch-pan-y ${
-                  columnWidth > 0
-                    ? 'grid items-start gap-2 overflow-x-auto pb-1'
-                    : 'grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7'
-                }`
-              }
-              style={{
-                ...(columnWidth > 0 ? { gridTemplateColumns: `repeat(7, ${columnWidth}px)` } : {}),
-                ...weekSwipe.style,
-              }}
+            {...weekSwipe.handlers}
+            className={
+              // `touch-pan-y` keeps vertical page scrolling native while the
+              // horizontal axis becomes ours to read as a week change.
+              `touch-pan-y ${
+                columnWidth > 0
+                  ? 'grid items-start gap-2 overflow-x-auto pb-1'
+                  : 'grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7'
+              }`
+            }
+            /*
+             * TWO ANIMATED PROPERTIES, ONE `transition` SHORTHAND.
+             *
+             * The column width glides when it changes by itself — reset, keyboard,
+             * restore-on-load — and the week swipe eases the transform back after a
+             * drag. Both want `transition`, and spreading one style object over the
+             * other would silently drop whichever lost, so the value is COMPOSED
+             * rather than overwritten.
+             *
+             * Both are cut to `none` while a pointer is down: mid-drag the columns
+             * must track the cursor exactly, and the grid must follow the finger
+             * without easing behind it.
+             */
+            style={{
+              ...(columnWidth > 0
+                ? { gridTemplateColumns: `repeat(7, ${columnWidth}px)` }
+                : {}),
+              ...(weekSwipe.dragging ? { transform: weekSwipe.transform } : {}),
+              transition:
+                isResizing || weekSwipe.dragging
+                  ? 'none'
+                  : [
+                      'grid-template-columns var(--dur-base) var(--ease-out-soft)',
+                      'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
+                    ].join(', '),
+            }}
           >
             {days.map((day, i) => {
               const iso = isoDate(day)
@@ -637,12 +682,17 @@ export function CalendarPage() {
                     role="separator"
                     aria-label="Resize calendar columns"
                     aria-orientation="vertical"
-                    title="Drag to resize every column"
+                    aria-valuenow={columnWidth > 0 ? columnWidth : undefined}
+                    aria-valuemin={COLUMN_MIN}
+                    aria-valuemax={COLUMN_MAX}
+                    tabIndex={0}
+                    title="Drag to resize every column · arrow keys also work"
                     onPointerDown={beginResize}
                     onPointerMove={onResizeMove}
                     onPointerUp={endResize}
                     onPointerCancel={endResize}
-                    className="absolute -right-1 top-0 z-20 flex h-full w-2 cursor-col-resize touch-none items-center justify-center opacity-0 transition-opacity duration-[var(--dur-fast)] group-hover/day:opacity-100"
+                    onKeyDown={nudgeWidth}
+                    className="absolute -right-1 top-0 z-20 flex h-full w-2 cursor-col-resize touch-none items-center justify-center opacity-0 outline-none transition-opacity duration-[var(--dur-fast)] group-hover/day:opacity-100 focus-visible:opacity-100"
                   >
                     <span className="h-10 w-[3px] rounded-full bg-line-strong transition-colors hover:bg-accent" aria-hidden="true" />
                   </span>
