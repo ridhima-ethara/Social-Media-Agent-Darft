@@ -411,6 +411,57 @@ export const config = {
     },
   },
 
+  /* ── Publishing · Buffer ─────────────────────────────────────────────────── */
+  buffer: {
+    /**
+     * The base URL Buffer's servers will fetch creatives from.
+     *
+     * Buffer takes an image by URL — `ImageAssetInput.url` is the only way to
+     * attach one, there is no upload endpoint — so the creative must be reachable
+     * from the public internet. `localhost` is not: it resolves on Buffer's
+     * machine, not ours.
+     *
+     * Blank is a supported state. The caption then publishes without the image and
+     * says why, which is the correct degradation: losing the whole post because a
+     * picture could not be hosted would be the worse failure.
+     */
+    get publicBaseUrl(): string {
+      return str('PUBLIC_BASE_URL').replace(/\/+$/, '')
+    },
+    /*
+     * ONE TOKEN, EVERY CHANNEL.
+     *
+     * Buffer is a broker: the operator connects LinkedIn, Instagram, X and
+     * Facebook inside Buffer once, and this posts through it. That is why there
+     * is a single credential here rather than a per-platform app, secret and
+     * OAuth flow — and why a LinkedIn *Company Page* is reachable at all, since
+     * the scope LinkedIn refuses to issue us directly is one Buffer already holds.
+     */
+    get accessToken(): string {
+      return str('BUFFER_ACCESS_TOKEN')
+    },
+    get apiBase(): string {
+      return str('BUFFER_API_BASE', 'https://api.buffer.com')
+    },
+    get timeoutMs(): number {
+      return int('BUFFER_TIMEOUT_MS', 30000)
+    },
+    /**
+     * An explicitly pinned channel for a platform, or '' to discover it.
+     *
+     * Pinning matters when an account holds two channels for one service — a
+     * personal LinkedIn profile and a Company Page, say. Discovery would resolve
+     * whichever Buffer listed first, and posting to the wrong feed cannot be
+     * undone, so the ambiguous case is refused rather than guessed.
+     */
+    profileIdFor(platform: string): string {
+      return str(`BUFFER_PROFILE_ID_${platform.toUpperCase()}`)
+    },
+    get configured(): boolean {
+      return has('BUFFER_ACCESS_TOKEN')
+    },
+  },
+
   /* ── The Python agent tier · process boundary ────────────────────────────── */
   agentTier: {
     /**

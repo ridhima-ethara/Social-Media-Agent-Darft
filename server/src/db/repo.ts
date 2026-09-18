@@ -897,6 +897,16 @@ export async function getMediaAsset(
   )
 }
 
+/**
+ * One creative by its own id.
+ *
+ * Exists for the public media route, which is addressed by asset id rather than
+ * by idea and platform — Buffer fetches a URL and knows nothing about either.
+ */
+export async function mediaAssetById(id: string): Promise<MediaAssetRow | null> {
+  return queryOne<MediaAssetRow>('SELECT * FROM media_assets WHERE id = $1', [id])
+}
+
 export async function listMediaForIdeas(ideaIds: string[]): Promise<MediaAssetRow[]> {
   if (ideaIds.length === 0) return []
   return query<MediaAssetRow>(

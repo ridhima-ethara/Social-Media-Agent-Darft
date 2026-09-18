@@ -12,7 +12,6 @@ import { ArrowUpRight, ExternalLink, Play, Sparkles } from 'lucide-react'
 import { AGENT_BY_ID } from '@shared/agent-registry'
 import { useStore } from '../store'
 import { DownloadMenu } from '../components/download-menu'
-import { Logo } from '../components/logo'
 import { navFor } from '../components/layout'
 import { AssistantCore } from '../components/assistant/core'
 import { AgentHologram } from '../components/agent-hologram'
@@ -294,7 +293,41 @@ export function Dashboard() {
                 )}
               </Panel>
 
-              <Panel title="Create" hint={`${drafts.length} draft${drafts.length === 1 ? '' : 's'}`} onOpen={() => setPage('calendar')} delay={200} grow>
+              {/* The second station belongs to the role. Marketing writes, so it
+                  gets Create. Leadership signs off, so it gets the gate it owns —
+                  putting drafts there offered work that is not theirs to do. */}
+              {user?.role === 'leadership' ? (
+                <Panel
+                  title="Final Approval"
+                  hint={`${awaitingLeadership.length} waiting`}
+                  onOpen={() => setPage('leadership')}
+                  delay={200}
+                  grow
+                >
+                  {awaitingLeadership.length === 0 ? (
+                    <NotMeasured>
+                      Nothing is waiting on your sign-off. Posts arrive here once Marketing has approved them.
+                    </NotMeasured>
+                  ) : (
+                    <ul className="flex flex-col gap-[7px]">
+                      {awaitingLeadership.slice(0, 4).map((idea) => (
+                        <li key={idea.id}>
+                          <Row>
+                            <Thumb src={idea.media?.dataUri ?? null} platform={idea.platform} className="h-[30px] w-10 shrink-0" />
+                            <span className="min-w-0">
+                              <span className="block truncate text-[11.5px] font-medium text-ink">{idea.title}</span>
+                              <span className="mono mt-0.5 block truncate text-[8px] uppercase tracking-[0.1em] text-ink-3">
+                                marketing approved · {timeAgo(idea.marketing_approved_at ?? idea.updated_at)}
+                              </span>
+                            </span>
+                          </Row>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Panel>
+              ) : (
+                <Panel title="Create" hint={`${drafts.length} draft${drafts.length === 1 ? '' : 's'}`} onOpen={() => setPage('calendar')} delay={200} grow>
                 {topDrafts.length === 0 ? (
                   <NotMeasured>Nothing is written yet.</NotMeasured>
                 ) : (
@@ -314,35 +347,28 @@ export function Dashboard() {
                     ))}
                   </ul>
                 )}
-              </Panel>
+                </Panel>
+              )}
             </div>
 
             {/* ── centre: the agent ────────────────────────────────── */}
             <div className="relative flex min-w-0 flex-col items-center" style={{ transform: 'translateZ(26px)' }}>
               <div className="relative min-h-[200px] w-full flex-1">
                 <AgentHologram busy={busy} className="absolute inset-0" />
+                {/* The core is the click target, without a badge painted over
+                    it. Invisible by design; the focus ring is the only thing
+                    it draws, for anyone reaching it by keyboard. */}
                 <button
                   type="button"
                   onClick={() => openTheater()}
+                  aria-label="What the system is doing. Opens the run theater."
                   title="What the system is doing"
-                  className="absolute left-1/2 top-[42%] h-[118px] w-[118px] rounded-full transition-[box-shadow] duration-300 hover:shadow-[0_0_60px_var(--color-glow)]"
-                  style={{ marginLeft: -59, marginTop: -59, boxShadow: '0 0 44px -6px color-mix(in srgb, var(--color-accent) 70%, transparent)' }}
-                >
-                  <Logo size={118} className="rounded-full" />
-                </button>
+                  className="absolute left-1/2 top-[42%] h-[140px] w-[140px] -translate-x-1/2 -translate-y-1/2 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                />
               </div>
 
               <div className="text-center">
                 <p className="text-[19px] font-bold tracking-[0.2px] text-ink">AI Social Agent</p>
-                <p className="mono mt-[5px] text-[9px] uppercase tracking-[0.35em] text-ink-3">Autonomous mode</p>
-                <span className="mono mt-[9px] inline-flex items-center gap-[7px] rounded-full border border-line-strong bg-surface/60 px-[13px] py-1 text-[9px] uppercase tracking-[0.15em] text-ink-2">
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${busy ? 'bg-accent anim-pulse-dot' : 'bg-good'}`}
-                    style={{ boxShadow: `0 0 10px ${busy ? 'var(--color-accent)' : 'var(--color-good)'}` }}
-                    aria-hidden="true"
-                  />
-                  {busy ? 'running' : 'idle'}
-                </span>
               </div>
 
               <button

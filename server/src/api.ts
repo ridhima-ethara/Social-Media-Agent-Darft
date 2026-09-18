@@ -40,6 +40,8 @@ import { synonymsFor } from '../../shared/keywords'
 import { IMAGE_MODELS, IMAGE_MODEL_IDS } from '../../shared/image-models'
 import { TEXT_MODELS } from '../../shared/text-models'
 import { config, integrationStatuses } from './config'
+import * as bufferAdapter from './integrations/buffer'
+import { rasterise } from './integrations/rasterise'
 import { databaseReachable } from './db/pool'
 import {
   createKeyword,
@@ -87,6 +89,7 @@ import {
   upsertDraft,
   upsertSkillOverride,
   withdrawIdea,
+  mediaAssetById,
 } from './db/repo'
 import {
   conversationTranscript,
@@ -306,6 +309,61 @@ export function createApiRouter(): Router {
     res.json({ ok: true })
   })
 
+  /* ── PUBLIC MEDIA ────────────────────────────────────────────────────────────
+   *
+   * Serves a creative as a PNG for the one consumer that cannot authenticate:
+   * Buffer's fetcher. `ImageAssetInput.url` is the only way to attach an image to
+   * a Buffer post, so the bytes must be retrievable over the public internet by a
+   * machine that holds no session.
+   *
+   * SECURITY — THIS ROUTE IS DELIBERATELY UNAUTHENTICATED, and that is a real
+   * exposure worth stating rather than burying:
+   *
+   *   · It is mounted ABOVE `requireSession`, so anyone who can reach the API can
+   *     read it.
+   *   · It serves ONLY rendered creatives from `media_assets`, addressed by opaque
+   *     UUID. It exposes no captions, no ideas, no approvals, no metrics and no
+   *     account data.
+   *   · A UUID is not a secret, but it is unguessable, and the blast radius of a
+   *     leaked one is a single marketing image that is about to be published
+   *     publicly anyway.
+   *
+   * A narrower design — a signed, expiring URL — would be better and is the
+   * obvious next step if this ever fronts anything more sensitive than a brand
+   * card. It is not built yet, and pretending otherwise would be worse than
+   * saying so here.
+   */
+  api.get('/media/:id.png', async (req, res) => {
+    const id = String(req.params.id ?? '').replace(/\.png$/i, '')
+    if (!/^[0-9a-f-]{36}$/i.test(id)) {
+      res.status(400).type('text/plain').send('Not a media id.')
+      return
+    }
+    try {
+      const asset = await mediaAssetById(id)
+      if (asset === null || (asset.data_uri ?? '') === '') {
+        res.status(404).type('text/plain').send('No creative stored for that id.')
+        return
+      }
+      const raster = await rasterise(asset.data_uri ?? '', { width: 1200, format: 'png' })
+      if (raster === null) {
+        res.status(422).type('text/plain').send('That creative could not be rasterised.')
+        return
+      }
+      // Immutable: a creative is addressed by the id of a row that is never
+      // rewritten, so Buffer and any CDN in front of it may cache indefinitely.
+      res.setHeader('content-type', raster.contentType)
+      res.setHeader('cache-control', 'public, max-age=31536000, immutable')
+      res.setHeader('content-length', String(raster.bytes.length))
+      res.end(raster.bytes)
+    } catch (error) {
+      res
+        .status(500)
+        .type('text/plain')
+        .send(`Rasterising failed — ${error instanceof Error ? error.message : 'unknown error'}`)
+    }
+  })
+
   // Everything below that MUTATES needs an operator behind it. Mounted here so a
   // route added later is guarded by default rather than by memory.
   api.use(requireSession)
@@ -327,6 +385,16 @@ export function createApiRouter(): Router {
       registry: REGISTRY_SUMMARY,
       tools: TOOL_SUMMARY,
       integrations: {
+        // The one live publishing lane. Reported here because "will pressing
+        // publish actually post" must be answerable before pressing it, not
+        // discovered from a failed dispatch afterwards.
+        buffer: {
+          configured: bufferAdapter.isConfigured(),
+          publishMode: config.core.publishMode,
+          willPublishForReal:
+            config.core.publishMode === 'live' && bufferAdapter.isConfigured(),
+          detail: bufferAdapter.describeBuffer(),
+        },
         // WHICH source the four platform lanes will bind, for the same reason
         // `text.resolved` is reported below: "why does this post carry no
         // reaction count" should be answerable here rather than inferred from

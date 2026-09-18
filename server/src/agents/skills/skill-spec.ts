@@ -65,6 +65,34 @@ function section(body: string, heading: string): string {
 const cache = new Map<string, string>()
 const warned = new Set<string>()
 
+/*
+ * WHICH SECTIONS ARE DIRECTIVES.
+ *
+ * Rules and Boundaries alone were being injected, which silently dropped the
+ * parts of a SKILL.md that tell the model what audience it is writing for, which
+ * language mode to use, what to avoid, and what its own output must satisfy. A
+ * specification the writer never receives is documentation, not a specification.
+ *
+ * Purpose, Inputs, Outputs and Failure modes are deliberately excluded: they
+ * describe the skill to a reader of the repository, and repeating them in every
+ * prompt would spend context without changing what gets written.
+ *
+ * Order is fixed so the prompt is stable across runs — an unstable prompt makes
+ * two captions incomparable for no reason.
+ */
+const DIRECTIVE_SECTIONS = [
+  'Audience and positioning',
+  'Language modes',
+  'Rules',
+  // Worked examples teach the pattern in a way a rule cannot — a rule can say a
+  // hook must be specific; only an example shows the difference between
+  // "AI is changing everything" and a hook that names its own topic.
+  'Examples',
+  'Avoid',
+  'Boundaries',
+  'Acceptance checks',
+] as const
+
 export function skillSpecification(skillIds: string[]): string {
   const key = skillIds.join('+')
   const hit = cache.get(key)
@@ -83,11 +111,11 @@ export function skillSpecification(skillIds: string[]): string {
       continue
     }
     const body = readFileSync(path, 'utf8')
-    const rules = section(body, 'Rules')
-    const boundaries = section(body, 'Boundaries')
     const parts = [`## Skill · ${id}`]
-    if (rules) parts.push(`### Rules\n\n${rules}`)
-    if (boundaries) parts.push(`### Boundaries\n\n${boundaries}`)
+    for (const heading of DIRECTIVE_SECTIONS) {
+      const found = section(body, heading)
+      if (found) parts.push(`### ${heading}\n\n${found}`)
+    }
     if (parts.length > 1) blocks.push(parts.join('\n\n'))
   }
 

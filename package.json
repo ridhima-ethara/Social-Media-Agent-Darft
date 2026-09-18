@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Ethara SocialAI \u2014 a twelve-agent social media operations platform with the command plane",
+  "description": "Ethara SocialAI — a twelve-agent social media operations platform with the command plane",
   "engines": {
     "node": ">=22"
   },
@@ -23,7 +23,7 @@
     "db:seed": "npm --prefix server run db:seed",
     "db:reset": "npm --prefix server run db:reset",
     "db:embed": "npm --prefix server run db:embed",
-    "setup": "npm install && npm --prefix server install && (npm run db:up || echo '  \u00b7 docker compose unavailable \u2014 assuming an existing PostgreSQL, checking next') && node scripts/wait-for-db.mjs && npm run db:reset",
+    "setup": "npm install && npm --prefix server install && (npm run db:up || echo '  · docker compose unavailable — assuming an existing PostgreSQL, checking next') && node scripts/wait-for-db.mjs && npm run db:reset",
     "agent:check": "tsx scripts/check-agents.ts",
     "specs:build": "tsx scripts/build-specs.ts",
     "doctor": "tsx scripts/doctor.ts",
@@ -38,7 +38,8 @@
     "agents:run": "backend/.venv/bin/python backend/workflows/social_media_workflow.py",
     "agents:seed": "backend/.venv/bin/python backend/seed_brain.py",
     "agents:brain": "backend/.venv/bin/python backend/api.py brain",
-    "verify": "tsx scripts/verify.ts"
+    "verify": "tsx scripts/verify.ts",
+    "buffer:channels": "tsx server/scripts/buffer-channels.ts"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",
@@ -47,6 +48,7 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "recharts": "3.10.1",
+    "sharp": "0.34.4",
     "three": "^0.180.0",
     "zod": "3.25.76",
     "zustand": "5.0.15"

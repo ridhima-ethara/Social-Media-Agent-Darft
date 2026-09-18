@@ -1092,9 +1092,17 @@ export function ReviewPanel() {
 
       {/* ── Publish confirmation ─────────────────────────────────────── */}
       {confirmPublish ? (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-page/85 p-6 backdrop-blur-md">
-          <div className="anim-dialog-in card w-full max-w-2xl overflow-hidden">
-            <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-page/85 p-4 backdrop-blur-md sm:p-6">
+          {/*
+            A COLUMN THAT OWNS ITS HEIGHT.
+            The dialog is capped against the viewport and lays out as a column, so
+            the header and footer keep their natural height and the preview takes
+            whatever is left. The previous fixed `max-h-[52vh]` on the body alone
+            clipped a long caption while leaving empty space below the dialog —
+            the operator was asked to approve a post they could not finish reading.
+          */}
+          <div className="anim-dialog-in card flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden">
+            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
               <h3 className="display text-sm">Publish to {PLATFORM_LABEL[idea.platform]}?</h3>
               <button
                 type="button"
@@ -1106,21 +1114,42 @@ export function ReviewPanel() {
               </button>
             </header>
 
-            <div className="max-h-[52vh] overflow-y-auto p-4">
+            {/*
+              `min-h-0` is what makes the scroll work: a flex child defaults to
+              min-height:auto and refuses to shrink below its content, so without
+              it the body pushes the footer off-screen instead of scrolling.
+              `overscroll-contain` stops a scroll that reaches the end from
+              chaining to the page behind the dialog.
+            */}
+            <div
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4"
+              tabIndex={0}
+              role="region"
+              aria-label={`${PLATFORM_LABEL[idea.platform]} post preview`}
+            >
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <PlatformChip platform={idea.platform} />
                 <Badge tone="neutral">
                   {new Date(idea.scheduled_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ·{' '}
                   {idea.scheduled_time}
                 </Badge>
-                <Badge tone="warn">Demo mode — publishing is simulated</Badge>
+                {/* Conditional, not decorative. This badge was hardcoded and kept
+                    claiming demo mode after the deployment had been switched to
+                    live — the one label on this screen that must never be wrong,
+                    because it is what tells the operator whether the next click
+                    is reversible. */}
+                {canPublish ? (
+                  <Badge tone="good">Live — this will publish for real</Badge>
+                ) : (
+                  <Badge tone="warn">Demo mode — publishing is simulated</Badge>
+                )}
               </div>
               <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} />
             </div>
 
-            {/* Demo mode does not publish, and the button says so rather than
-                accepting a click and failing. The server refuses regardless. */}
-            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-3">
+            {/* The footer states what the button will do; the server refuses
+                independently, so a stale client cannot publish by accident. */}
+            <footer className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-3">
               {!canPublish ? (
                 <p className="mr-auto flex items-start gap-1.5 text-[11px] leading-relaxed text-warn">
                   <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />

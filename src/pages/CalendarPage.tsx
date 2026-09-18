@@ -21,14 +21,6 @@ import type { Idea, IdeaStatus, Platform } from '../types'
 
 const PLATFORMS: Platform[] = ['linkedin', 'instagram', 'x', 'facebook']
 const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'
-/**
- * How many suggestions a platform column shows before it scrolls.
- *
- * Five, matching the five calendar slots per platform: a column that shows
- * exactly as many candidates as there are slots reads as "these are the ones
- * that could go up next". Nothing is removed from the list — the rest scroll.
- */
-const SUGGESTION_ROWS = 5
 
 /*
  * ── Column width, shared across the whole week ──────────────────────────────
@@ -147,6 +139,84 @@ const STATUS_CHIP: Partial<Record<IdeaStatus, string>> = {
   drafted: 'DRAFTED',
   in_review: 'IN REVIEW',
   pending_leadership: 'WITH LEADERSHIP',
+}
+
+/**
+ * HORIZONTAL GESTURES CHANGE THE WEEK.
+ *
+ * The arrows worked, but a calendar is a thing people expect to swipe, and on a
+ * trackpad a two-finger horizontal gesture had no meaning at all — it nudged the
+ * grid a few pixels against its own edge and stopped.
+ *
+ * Three inputs, one outcome: touch drag, and trackpad horizontal wheel.
+ *
+ * WHY NOT JUST A SCROLL CONTAINER. The week is seven fixed columns; there is no
+ * eighth column to scroll to. Interpreting the gesture as a week change is what
+ * gives it meaning instead of letting it dead-end.
+ *
+ * The drag offset renders live so the grid follows the finger, then snaps back.
+ * A gesture that only acts on release feels broken on touch, because nothing
+ * moves while you are moving.
+ */
+function useWeekSwipe(onChange: (direction: 1 | -1) => void): {
+  handlers: {
+    onTouchStart: (e: React.TouchEvent) => void
+    onTouchMove: (e: React.TouchEvent) => void
+    onTouchEnd: () => void
+    onWheel: (e: React.WheelEvent) => void
+  }
+  style: { transform?: string; transition?: string }
+} {
+  const [dragX, setDragX] = useState(0)
+  const start = useRef<{ x: number; y: number } | null>(null)
+  /*
+   * A wheel gesture arrives as dozens of events. Without this latch one flick
+   * would advance five weeks — the same reason a carousel debounces a trackpad.
+   */
+  const wheelLocked = useRef(false)
+
+  /** Past this many pixels the gesture is a week change, not stray movement. */
+  const THRESHOLD = 70
+
+  return {
+    handlers: {
+      onTouchStart: (e) => {
+        const t = e.touches[0]
+        if (t) start.current = { x: t.clientX, y: t.clientY }
+      },
+      onTouchMove: (e) => {
+        const t = e.touches[0]
+        if (!t || start.current === null) return
+        const dx = t.clientX - start.current.x
+        const dy = t.clientY - start.current.y
+        // Vertical intent wins: someone scrolling the page must not change week.
+        if (Math.abs(dy) > Math.abs(dx)) return
+        setDragX(dx)
+      },
+      onTouchEnd: () => {
+        // Drag LEFT (negative) reveals what lies to the right: the next week.
+        if (Math.abs(dragX) >= THRESHOLD) onChange(dragX < 0 ? 1 : -1)
+        setDragX(0)
+        start.current = null
+      },
+      onWheel: (e) => {
+        // Only a decisively horizontal gesture. A slightly-off vertical scroll
+        // must keep scrolling the page.
+        if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || Math.abs(e.deltaX) < 24) return
+        if (wheelLocked.current) return
+        wheelLocked.current = true
+        onChange(e.deltaX > 0 ? 1 : -1)
+        window.setTimeout(() => {
+          wheelLocked.current = false
+        }, 420)
+      },
+    },
+    style:
+      dragX === 0
+        ? { transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)' }
+        : // Damped, so the grid follows the finger without sliding off-screen.
+          { transform: `translateX(${dragX * 0.35}px)`, transition: 'none' },
+  }
 }
 
 export function CalendarPage() {
@@ -326,6 +396,8 @@ export function CalendarPage() {
   }, [justMoved])
 
   const weekStart = useMemo(() => addDays(startOfWeek(new Date()), weekOffset * 7), [weekOffset])
+  /* Swipe or two-finger scroll the grid to move a week. */
+  const weekSwipe = useWeekSwipe((direction) => setWeekOffset((w) => w + direction))
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart])
   const todayIso = isoDate(new Date())
   const weekIsos = useMemo(() => new Set(days.map(isoDate)), [days])
@@ -371,7 +443,7 @@ export function CalendarPage() {
    * could not be reached by scrolling the page.
    */
   return (
-    <div className="-mx-6 -mt-5 -mb-5 flex min-h-[calc(100vh-56px)] flex-col">
+    <div className="-mx-4 -mt-4 -mb-2 flex min-h-0 flex-1 flex-col">
       {/* ── Command bar ─────────────────────────────────────────────────── */}
       <header className="glass relative z-20 flex min-h-[58px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
         <div className="min-w-0">
@@ -471,12 +543,20 @@ export function CalendarPage() {
            */}
           <div
             ref={gridRef}
-            className={
-              columnWidth > 0
-                ? 'grid items-start gap-2 overflow-x-auto pb-1'
-                : 'grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7'
-            }
-            style={columnWidth > 0 ? { gridTemplateColumns: `repeat(7, ${columnWidth}px)` } : undefined}
+              {...weekSwipe.handlers}
+              className={
+                // `touch-pan-y` keeps vertical page scrolling native while the
+                // horizontal axis becomes ours to read as a week change.
+                `touch-pan-y ${
+                  columnWidth > 0
+                    ? 'grid items-start gap-2 overflow-x-auto pb-1'
+                    : 'grid items-start gap-2 md:grid-cols-4 xl:grid-cols-7'
+                }`
+              }
+              style={{
+                ...(columnWidth > 0 ? { gridTemplateColumns: `repeat(7, ${columnWidth}px)` } : {}),
+                ...weekSwipe.style,
+              }}
           >
             {days.map((day, i) => {
               const iso = isoDate(day)
@@ -846,10 +926,22 @@ function Queue({
   const openReview = useStore((s) => s.openReview)
   const [armed, setArmed] = useState<string | null>(null)
 
-  /* One ranked line per idea, strongest rank first. */
-  const ranked = [...queued].sort(
-    (a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence,
-  )
+  /** Which platform the suggestions list is narrowed to, or null for all. */
+  const [suggestionFilter, setSuggestionFilter] = useState<Platform | null>(null)
+
+  /*
+   * One ranked line per idea, strongest rank first — narrowed to one platform
+   * when a chip is active.
+   *
+   * The filter applies to the LIST, not to `queued`: the chips themselves must
+   * keep showing every platform's counts, or selecting one would hide the way
+   * back to the others.
+   */
+  const ranked = [...queued]
+    .filter((i) => suggestionFilter === null || i.platform === suggestionFilter)
+    .sort(
+      (a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence,
+    )
   /* What each platform has free, and what a promotion there would displace. */
   const seats = new Map(
     capacity.map((c) => {
@@ -865,10 +957,6 @@ function Queue({
       ] as const
     }),
   )
-  const emptyPlatforms = capacity
-    .filter((c) => !queued.some((i) => i.platform === c.platform))
-    .map((c) => c.platform)
-
   return (
     <section ref={queueRef} className="flex w-full shrink-0 flex-col border-t border-line bg-surface-2" aria-label="Ranked queue">
       <header className="flex flex-wrap items-center gap-2.5 px-[18px] pb-2 pt-3.5">
@@ -876,30 +964,88 @@ function Queue({
         <span className="text-[10px] text-ink-3">
           {queued.length === 0
             ? 'everything the agents formed is on the calendar'
-            : `${queued.length} ranked below the cut · drag one onto a day, or promote it`}
+            : suggestionFilter !== null
+              ? `${ranked.length} ${PLATFORM_LABEL[suggestionFilter]} suggestion${ranked.length === 1 ? '' : 's'} · click the chip again to show all`
+              : `${queued.length} ranked below the cut · drag one onto a day, or promote it`}
         </span>
         <span className="flex-1" />
-        <span className="mono text-[7.5px] uppercase tracking-[0.06em] text-ink-3">slots free</span>
-        {capacity.map((c) => (
-          <span
-            key={c.platform}
-            className="mono inline-flex items-center gap-1 rounded-[5px] px-1.5 py-px text-[8px]"
-            style={{
-              color: PLATFORM_TOKEN[c.platform],
-              background: `color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} 13%, transparent)`,
-              border: `1px solid color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} 32%, transparent)`,
-            }}
-            title={`${PLATFORM_LABEL[c.platform]}: ${c.free} of ${cap} slots free`}
-          >
-            <PlatformIcon platform={c.platform} size={8} />
-            {c.free}
-          </span>
-        ))}
+        {/*
+          THE NUMBER MUST BE THE ONE THE CONTROL ACTS ON.
+          These chips filter the SUGGESTIONS list, but they were rendering
+          `free` — how many calendar slots were open — under a "slots free"
+          label. Instagram then read 5 while having nothing queued, so clicking
+          it filtered to an empty list, and the tooltip said "nothing waiting"
+          directly beneath the 5. Two true numbers, one of them answering a
+          question nobody asked here.
+        */}
+        <span className="mono text-[7.5px] uppercase tracking-[0.06em] text-ink-3">waiting</span>
+        {capacity.map((c) => {
+          const isActive = suggestionFilter === c.platform
+          const waiting = queued.filter((i) => i.platform === c.platform).length
+          return (
+            <button
+              key={c.platform}
+              type="button"
+              /*
+               * A FILTER, NOT A READOUT.
+               *
+               * These already carried the one piece of information needed to
+               * decide which platform to look at, so making them the control
+               * that narrows the list removes a separate filter row. Clicking an
+               * active chip clears it — a filter with no visible way back out
+               * traps the operator in a subset of their own queue.
+               */
+              onClick={() => setSuggestionFilter(isActive ? null : c.platform)}
+              aria-pressed={isActive}
+              title={
+                waiting === 0
+                  ? `${PLATFORM_LABEL[c.platform]}: nothing waiting · ${c.free} of ${cap} slots free`
+                  : isActive
+                    ? `Showing ${PLATFORM_LABEL[c.platform]} only — click to show every platform`
+                    : `Show only ${PLATFORM_LABEL[c.platform]} — ${waiting} waiting · ${c.free} of ${cap} slots free`
+              }
+              className={`mono inline-flex items-center gap-1 rounded-[5px] px-1.5 py-px text-[8px] transition-[box-shadow,opacity] duration-200 hover:opacity-100 ${
+                // A chip for a platform with nothing queued would filter to an
+                // empty list, so it is dimmed rather than presented as useful.
+                waiting === 0 ? 'opacity-45' : 'cursor-pointer'
+              }`}
+              style={{
+                color: PLATFORM_TOKEN[c.platform],
+                background: `color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} ${isActive ? 26 : 13}%, transparent)`,
+                border: `1px solid color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} ${isActive ? 70 : 32}%, transparent)`,
+                boxShadow: isActive
+                  ? `0 0 0 1px color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} 45%, transparent)`
+                  : undefined,
+              }}
+            >
+              <PlatformIcon platform={c.platform} size={8} />
+              {waiting}
+            </button>
+          )
+        })}
       </header>
-      {queued.length === 0 ? (
+      {ranked.length === 0 ? (
         <div className="px-[18px] pb-5">
-          <p className="text-[13px] font-medium text-ink">Nothing below the cut</p>
-          <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">Every idea the agents formed is on the calendar. Run discovery and Dora will rank more.</p>
+          {suggestionFilter === null ? (
+            <>
+              <p className="text-[13px] font-medium text-ink">Nothing below the cut</p>
+              <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">Every idea the agents formed is on the calendar. Run discovery and Dora will rank more.</p>
+            </>
+          ) : (
+            /* A filtered-empty list is a different fact from an empty queue, and
+               saying so is what tells the operator to clear the filter rather
+               than run discovery again. */
+            <>
+              <p className="text-[13px] font-medium text-ink">Nothing waiting for {PLATFORM_LABEL[suggestionFilter]}</p>
+              <button
+                type="button"
+                onClick={() => setSuggestionFilter(null)}
+                className="mt-1 text-[11.5px] leading-relaxed text-accent-bright underline decoration-dotted"
+              >
+                Show every platform
+              </button>
+            </>
+          )}
         </div>
       ) : (
         /*
@@ -913,13 +1059,7 @@ function Queue({
          * neighbours.
          */
         <div className="flex flex-col gap-2.5 px-[18px] pb-5">
-          <div
-            className="flex flex-col gap-1.5 overflow-y-auto overscroll-contain"
-            style={{ maxHeight: `calc(${SUGGESTION_ROWS} * 4.25rem)` }}
-            tabIndex={0}
-            role="group"
-            aria-label="Ranked suggestions, scrollable"
-          >
+          <div className="flex flex-col gap-1.5" role="list" aria-label="Ranked suggestions">
             {ranked.map((idea, i) => {
               const isArmed = armed === idea.id
               const seat = seats.get(idea.platform)
@@ -952,13 +1092,7 @@ function Queue({
 
           {/* What the list is not showing, said plainly. */}
           <footer className="mono flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-[9px] text-[8px] uppercase tracking-[0.06em] text-ink-3">
-            <span>
-              {emptyPlatforms.length === 0
-                ? 'every platform has something ranked below the cut'
-                : `nothing ranked below the cut for ${emptyPlatforms.map((pl) => PLATFORM_LABEL[pl]).join(' · ')}`}
-            </span>
-            <span className="flex-1" />
-            <span>{ranked.length} waiting · scroll for the full queue</span>
+            <span>{ranked.length} waiting · every one is listed</span>
           </footer>
         </div>
       )}
@@ -1115,14 +1249,6 @@ function QueueRow({
 
         <span className="tabular w-[30px] shrink-0 text-right text-[8.5px] text-accent-bright" title="Confidence">
           {idea.confidence}%
-        </span>
-
-        {/* What promoting this one would actually do, before it is done. */}
-        <span
-          className={`mono hidden w-[62px] shrink-0 text-center text-[7px] uppercase tracking-[0.08em] sm:block ${free > 0 ? 'text-good-ink' : 'text-serious'}`}
-          title={free > 0 ? `${PLATFORM_LABEL[idea.platform]} has ${free} free slot${free === 1 ? '' : 's'}` : `${PLATFORM_LABEL[idea.platform]} is full — promoting displaces the weakest placed post`}
-        >
-          {free > 0 ? `${free} free` : 'displaces'}
         </span>
 
         <button

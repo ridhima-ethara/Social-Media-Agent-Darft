@@ -1430,9 +1430,9 @@ const CAPTION_SKILLS: SkillSpec[] = [
     order: 7,
     enabledByDefault: true,
     config: [
-      num('count', 'Hashtags to attach', 4,
-        'How many hashtags to derive. The brand ceiling of five is absolute and no value here can exceed it.',
-        { min: 3, max: 5, step: 1 }),
+      num('count', 'Hashtags to attach', 6,
+          'How many hashtags to derive. The caption specification requires 5 to 7 topic-derived tags on every option, so the floor binds as hard as the ceiling — a value outside that band is clamped into it.',
+        { min: 5, max: 7, step: 1 }),
       bool('useSourceHashtag', 'Include the originating hashtag', true,
         'On, the hashtag that surfaced this trend is always one of the tags, which keeps lineage visible on the post itself.'),
     ],

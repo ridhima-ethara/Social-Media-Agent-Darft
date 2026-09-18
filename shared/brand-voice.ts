@@ -41,7 +41,16 @@ export const BRAND = {
   /** Zero. No knob may raise this. */
   emojiBudget: 0,
   /** Applies on every platform, identically. */
-  hashtags: { min: 3, max: 5 },
+  /*
+   * 5–7, raised from 3–5 by the caption-writing specification.
+   *
+   * The spec states the change explicitly: "This replaces the original 3-5 rule
+   * everywhere, including output validation." Both tiers, the publishing
+   * validator and `npm run verify` read this, so raising it here moves all of
+   * them together rather than leaving a validator that rejects what the writer
+   * was told to produce.
+   */
+  hashtags: { min: 5, max: 7 },
   /**
    * The nine-stage caption skeleton (rule 8).
    *
@@ -825,12 +834,79 @@ export interface EnforceResult {
   notes: string[]
 }
 
+/**
+ * SPLITS PARAGRAPH BLOCKS INTO ONE THOUGHT PER LINE.
+ *
+ * The caption specification asks for short connected lines with a blank line
+ * between thoughts. A language model treats that as stylistic advice and complies
+ * unevenly — measured across nine regenerated captions, every hard constraint
+ * (hashtag count, prohibited phrases, single close) was honoured and the line
+ * layout was not.
+ *
+ * So it is enforced rather than requested, exactly as the emoji budget is: this
+ * strips, it does not warn.
+ *
+ * WHAT IT DOES NOT DO. It does not split on every comma or clause — the
+ * specification explicitly forbids turning prose into fragments. It splits only at
+ * sentence boundaries, and only inside a block that is long enough to be a
+ * paragraph. A block already under the threshold is left exactly as written,
+ * because a deliberate two-sentence pairing is not a defect.
+ *
+ * Hashtag lines and list items are passed through untouched: they are not prose
+ * and re-flowing them would break the block the platform reads.
+ */
+export function enforceShortLines(
+  body: string,
+  opts: { maxWordsPerLine?: number } = {},
+): { body: string; changed: boolean } {
+  const threshold = opts.maxWordsPerLine ?? 28
+  const blocks = body.split(/\n{2,}/)
+  let changed = false
+
+  const rewritten = blocks.map((block) => {
+    const trimmed = block.trim()
+    if (trimmed === '') return block
+
+    // Not prose — leave it alone.
+    if (trimmed.startsWith('#') || /^\s*(?:[-*•]|\d+[.)])\s/.test(trimmed)) return block
+
+    // Already short enough to be one thought.
+    if (trimmed.split(/\s+/).length <= threshold) return block
+
+    /*
+     * Split after `.`, `?` or `!` when followed by whitespace and a capital or a
+     * digit. The lookahead matters: `2.5` and `e.g.` would otherwise break mid
+     * token, and an abbreviation is far more likely inside technical copy than a
+     * sentence starting lowercase.
+     */
+    const sentences = trimmed
+      .replace(/\s+/g, ' ')
+      .split(/(?<=[.?!])\s+(?=[A-Z0-9"'“'])/g)
+      .map((x) => x.trim())
+      .filter((x) => x !== '')
+
+    if (sentences.length < 2) return block
+    changed = true
+    return sentences.join('\n\n')
+  })
+
+  return { body: rewritten.join('\n\n'), changed }
+}
+
 export function enforceBrandVoice(caption: string, topic: string): EnforceResult {
   const notes: string[] = []
   const rulesApplied = new Set<number>()
   const original = caption
 
   let body = caption
+
+  // Short-line layout, enforced mechanically because the model complies unevenly.
+  const lines = enforceShortLines(body)
+  if (lines.changed) {
+    body = lines.body
+    rulesApplied.add(8)
+    notes.push('Split paragraph blocks into one thought per line.')
+  }
 
   // Rule 3 — forbidden language replacements.
   for (const { pattern, replacement, why } of FORBIDDEN_LANGUAGE) {

@@ -84,7 +84,7 @@ Derives the topical hashtag block from the post’s own subject, never from a re
 
 | Knob | Default | Description |
 |---|---|---|
-| `count` | `4` | How many hashtags to derive. The brand ceiling of five is absolute and no value here can exceed it. |
+| `count` | `6` | How many hashtags to derive. The caption specification requires 5 to 7 topic-derived tags on every option, so the floor binds as hard as the ceiling — a value outside that band is clamped into it. |
 | `useSourceHashtag` | `true` | On, the hashtag that surfaced this trend is always one of the tags, which keeps lineage visible on the post itself. |
 
 ### `generation.caption.adapt`

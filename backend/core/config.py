@@ -64,9 +64,9 @@ REGISTRY: dict[str, list[Knob]] = {
     "content_agent": [
         Knob(key="hook_max_words", label="Hook length", default=18, minimum=6, maximum=40, unit="words",
              description="The opening line's budget. Longer hooks lose the reader before the claim lands."),
-        Knob(key="min_hashtags", label="Minimum hashtags", default=3, minimum=1, maximum=10,
+        Knob(key="min_hashtags", label="Minimum hashtags", default=5, minimum=1, maximum=10,
              description="Fewer than this and the post is under-indexed on every platform."),
-        Knob(key="max_hashtags", label="Maximum hashtags", default=5, minimum=1, maximum=10,
+        Knob(key="max_hashtags", label="Maximum hashtags", default=7, minimum=1, maximum=10,
              description="More than this reads as reach-bait to a research audience. No knob may raise the emoji budget above zero."),
         Knob(key="similarity_cap", label="Similarity cap", default=70, minimum=0, maximum=100, unit="%",
              description="Above this similarity to a published caption, the draft is regenerated on a different angle."),

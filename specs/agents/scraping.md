@@ -23,6 +23,9 @@ Loads the active keywords, sorts them by weight, slices to the per-run ceiling a
 
 | Knob | Default | Description |
 |---|---|---|
+| `useWeekSchedule` | `true` | On, a run captures the keywords scheduled for the current cycle week — every constant plus that week’s rotating set. Off, the rota is ignored and the run falls back to the top-weighted active keywords, which is what you want for a one-off catch-up. |
+| `scheduleAnchorDate` | `2026-09-14` | The calendar date that week 1 of the rota begins, as YYYY-MM-DD. Moving it shifts the whole cycle without editing a single row. A Monday is conventional but not required — the cycle simply counts seven-day blocks from here. |
+| `scheduleFallback` | `weighted` | `weighted` falls back to the top-weighted active keywords, so a gap in the rota never costs a run. `skip` captures nothing and says so — honest, but a missing week then silently costs a week of capture. |
 | `maxKeywordsPerRun` | `12` | How many keywords a single run scrapes. Each one is a separate scrape call, so this is the main lever on run time and cost. |
 | `minWeight` | `40` | Keywords weighted below this are skipped, even when active. Lets you park a term without deleting it. |
 | `expandSynonyms` | `true` | Also searches the declared synonyms for each keyword. Widens the catch and increases the duplicate rate, which the Validation Agent then absorbs. |

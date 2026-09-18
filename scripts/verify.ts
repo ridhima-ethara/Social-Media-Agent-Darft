@@ -144,8 +144,8 @@ for (const check of checks) {
 if (BRAND.emojiBudget === 0) pass('emoji budget is 0 and no knob can raise it')
 else fail(`emoji budget is ${BRAND.emojiBudget}, expected 0`)
 
-if (BRAND.hashtags.min === 3 && BRAND.hashtags.max === 5) pass('hashtag block is clamped to 3–5')
-else fail(`hashtag block is ${BRAND.hashtags.min}–${BRAND.hashtags.max}, expected 3–5`)
+if (BRAND.hashtags.min === 5 && BRAND.hashtags.max === 7) pass('hashtag block is clamped to 5–7')
+else fail(`hashtag block is ${BRAND.hashtags.min}–${BRAND.hashtags.max}, expected 5–7`)
 
 /* ═══════════════════════════════════════════════════════════════════════════
    3b · THE SAME NUMBERS, IN THE OTHER TIER

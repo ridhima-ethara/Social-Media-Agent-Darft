@@ -605,7 +605,7 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<CaptionPayload>('generation.caption.hashtags', (payload, ctx) => {
-  const requested = ctx.num('count', 4)
+  const requested = ctx.num('count', 6)
   const useSourceHashtag = ctx.bool('useSourceHashtag', true)
 
   // The brand range is the ceiling and the floor. The knob narrows within it;

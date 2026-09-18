@@ -19,6 +19,8 @@ import {
   insertPostMetrics,
   postBaseline,
 } from '../../db/repo'
+import { BRAND } from '../../../../shared/brand-voice'
+import * as buffer from '../../integrations/buffer'
 import { clamp, PLATFORM_LABEL, seededFor } from '../corpus'
 import { registerSkill } from '../runtime'
 import type { PublishPayload } from '../skills/index'
@@ -46,7 +48,15 @@ export interface PlatformAdapter {
   isConfigured(): boolean
   unavailableReason(): string
   dispatch(input: PlatformDispatchInput): Promise<PlatformDispatchResult>
-  uploadMedia(dataUri: string, timeoutMs: number): Promise<string>
+  /**
+   * Returns a handle the dispatch can attach.
+   *
+   * `assetId` is required by the live lane and ignored by the simulator: Buffer
+   * fetches an image by URL, so what it needs is the creative's ADDRESS, not its
+   * bytes. The data URI is still passed because the demo adapter derives a
+   * deterministic handle from it.
+   */
+  uploadMedia(dataUri: string, timeoutMs: number, assetId: string | null): Promise<string>
 }
 
 /** Fabricates deterministic receipts. Never touches the network. */
@@ -75,20 +85,68 @@ export const demoAdapter: PlatformAdapter = {
  * pretending — silently succeeding in live mode would be the worst possible
  * failure in this product.
  */
+/**
+ * The live adapter — Buffer for every platform.
+ *
+ * One broker replaced four direct connectors. LinkedIn Company Page posting
+ * needed a scope LinkedIn refused to issue this app (`unauthorized_scope_error`
+ * on `w_organization_social`, gated behind the reviewed Community Management
+ * programme), and Instagram, X and Facebook had no live path at all. Buffer
+ * already holds all four grants, so the operator connects the channels there once
+ * and every lane becomes live together.
+ *
+ * The receipt is Buffer's update id rather than the platform's post id, because
+ * that is what this endpoint returns. Presenting it as a platform permalink would
+ * be inventing a receipt.
+ */
 export const liveAdapter: PlatformAdapter = {
   mode: 'live',
-  isConfigured: () => false,
-  unavailableReason: () =>
-    'No platform credentials are configured. Live publishing needs a LinkedIn, Instagram or X app credential, which this prototype does not carry.',
+  isConfigured: () => buffer.isConfigured(),
+  unavailableReason: () => buffer.unavailableReason(),
   async dispatch(input) {
-    throw new Error(
-      `publishing.post.dispatch cannot reach ${PLATFORM_LABEL[input.platform]} — ${liveAdapter.unavailableReason()} Set PUBLISH_MODE=demo to publish against the simulator.`,
-    )
+    const reason = buffer.unavailableReason()
+    if (reason !== '') {
+      throw new Error(
+        `publishing.post.dispatch cannot reach ${PLATFORM_LABEL[input.platform]} — ${reason}`,
+      )
+    }
+    return buffer.dispatch({
+      platform: input.platform,
+      body: input.body,
+      altText: input.altText,
+      // `uploadMedia` returns a URL Buffer can fetch, or null. Buffer pulls the
+      // image itself, so a data URI would be silently dropped.
+      mediaUrl: input.mediaHandle,
+      timeoutMs: input.timeoutMs,
+    })
   },
-  async uploadMedia() {
-    throw new Error(
-      `publishing.media.upload cannot run live — ${liveAdapter.unavailableReason()}`,
-    )
+  async uploadMedia(dataUri, _timeoutMs, assetId) {
+    /*
+     * Buffer FETCHES the image, so this resolves an address rather than uploading
+     * bytes. The creative is served as a PNG by `GET /api/media/:id.png`, which
+     * rasterises the stored SVG on demand — no platform accepts SVG for a feed
+     * image.
+     *
+     * An already-absolute URL passes through, which keeps a future hosted-creative
+     * path working without another branch here.
+     */
+    if (/^https?:\/\//i.test(dataUri)) return dataUri
+
+    if (config.buffer.publicBaseUrl === '') {
+      throw new Error(
+        'publishing.media.upload cannot attach this creative — PUBLIC_BASE_URL is not set, so ' +
+          'there is no address Buffer can fetch the image from. Set it in server/.env to a URL ' +
+          'reachable from the public internet (the Cloudflare tunnel host works). The caption ' +
+          'publishes without the image until then.',
+      )
+    }
+    if (assetId === null || assetId === '') {
+      throw new Error(
+        'publishing.media.upload cannot attach this creative — the post carries image data but no ' +
+          'media asset id, so it has no stable URL. The caption publishes without the image.',
+      )
+    }
+    return `${config.buffer.publicBaseUrl}/api/media/${assetId}.png`
   },
 }
 
@@ -100,11 +158,19 @@ export function adapterForMode(mode: 'demo' | 'live'): PlatformAdapter {
    1 · publishing.format.validate
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/*
+ * The ceiling is BRAND.hashtags.max, not a literal.
+ *
+ * It was hardcoded at 5 while the caption spec asks for 5–7, which would have
+ * flagged every compliant caption as over-tagged — a validator disagreeing with
+ * the instruction the writer was given is the worst kind of drift, because both
+ * look correct in isolation.
+ */
 const PLATFORM_LIMITS: Record<Platform, { maxChars: number; maxHashtags: number }> = {
-  linkedin: { maxChars: 3000, maxHashtags: 5 },
-  instagram: { maxChars: 2200, maxHashtags: 5 },
-  x: { maxChars: 280, maxHashtags: 5 },
-  facebook: { maxChars: 63206, maxHashtags: 5 },
+  linkedin: { maxChars: 3000, maxHashtags: BRAND.hashtags.max },
+  instagram: { maxChars: 2200, maxHashtags: BRAND.hashtags.max },
+  x: { maxChars: 280, maxHashtags: BRAND.hashtags.max },
+  facebook: { maxChars: 63206, maxHashtags: BRAND.hashtags.max },
 }
 
 registerSkill<PublishPayload>('publishing.format.validate', (payload, ctx) => {
@@ -181,8 +247,8 @@ registerSkill<PublishPayload>('publishing.media.upload', async (payload, ctx) =>
   let lastError: unknown
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      const handle = await adapter.uploadMedia(payload.mediaDataUri, timeoutMs)
-      ctx.log(`Media uploaded in ${adapter.mode} mode · handle ${handle}`)
+      const handle = await adapter.uploadMedia(payload.mediaDataUri, timeoutMs, payload.mediaAssetId)
+      ctx.log(`Media resolved in ${adapter.mode} mode · handle ${handle}`)
       return { mediaHandle: handle }
     } catch (error) {
       lastError = error

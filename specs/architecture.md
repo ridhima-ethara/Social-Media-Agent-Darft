@@ -7,7 +7,7 @@
 
 # Architecture
 
-**12 agents · 7 stages · 92 skills · 255 knobs · 37 tools**
+**12 agents · 7 stages · 92 skills · 258 knobs · 37 tools**
 
 Eleven specialist agents run a seven-stage pipeline; the twelfth is the command
 plane the operator talks to. Sequencing is derived from each agent's
