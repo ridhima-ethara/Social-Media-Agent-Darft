@@ -53,6 +53,12 @@ export const SKILLS = [
   'generation.caption.adapt',
   'generation.caption.variants',
   'generation.caption.sourceLink',
+  // The short-form family (ADR-007). Same agent, same grounding, different
+  // artefact — a spoken script and the hooks that open it.
+  'caption.voice.derive',
+  'caption.script.write',
+  'caption.hook.generate',
+  'caption.hook.score',
 ] as const
 
 /** Where this agent's handlers live, relative to the repo root. */

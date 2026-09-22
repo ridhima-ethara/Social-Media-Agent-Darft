@@ -1,423 +1,57 @@
 /**
- * APIFY — hosted capture for the four platform lanes.
+ * APIFY — platform capture, executed through the official agent skill.
  *
- * WHY THIS EXISTS. crawl4ai reads what a search engine indexed, and an indexed
- * page states no reaction count. Three of the Validation Agent's four trend
- * components — engagement, velocity, growth — are engagement maths, so under a
- * search-only capture they compute over zeros and 75 of the 100 points of
- * `trend_score` go inert. An Apify actor reads the platform itself and returns
- * real counts. That is the entire argument for paying for this.
+ * WHAT THIS FILE IS NOW. A thin adapter. It holds the `ServiceAdapter` surface
+ * that `capture.ts` and Sherlock bind to, and nothing else: actor selection,
+ * schema discovery, execution and dataset retrieval all live in
+ * `services/scraping/apify-cli.ts`, following the protocol that
+ * `apify/agent-skills → apify-ultimate-scraper` documents.
  *
- * ONE ACTOR PER LANE, SELECTED BY CONFIG. Actors are third-party artefacts that
- * get deprecated and repriced without notice, so every slug is an env-overridable
- * default and every request body is built per actor FAMILY rather than per
- * platform. Swapping an actor is a config change; adding a family is the only
- * thing that needs code.
+ * WHAT IT NO LONGER IS. It used to be a hand-written `api.apify.com/v2` client:
+ * ~780 lines carrying an eight-member `ActorFamily` union, a request body built
+ * by hand per family, one hardcoded actor per platform, a sync→async→poll run
+ * loop, and its own tolerant field readers. All of it is gone. That code had
+ * two defects the skill workflow does not:
  *
- * NO FIXTURES. The pre-crawl4ai version of this file fell back to a bundled
- * corpus when the token was blank. That corpus was deleted deliberately: an
- * empty lane is a real finding about that lane, and a plausible substitute for
- * it is fabricated evidence. A missing token means the lane reports what it
- * could not capture.
+ *   · ONE ACTOR PER PLATFORM, FIXED. `actorFor('instagram')` always returned
+ *     the hashtag scraper, so capturing an account meant capturing the wrong
+ *     thing. Selection is now per (platform, intent).
+ *   · INPUT SHAPES ASSUMED, NOT READ. A family's body was written by hand from
+ *     an actor's docs, so an author renaming `searchQueries` to `queries` broke
+ *     a lane silently — it kept returning zero items and looked like a quiet
+ *     week. Input is now built against the schema the actor itself reports.
+ *
+ * ═══ THERE IS NO HTTP FALLBACK, DELIBERATELY ═══
+ *
+ * An earlier revision kept the API client behind the CLI as a backup. That was
+ * the wrong shape: two execution paths reading the same actors is the "second
+ * scraper" the brief forbids, and which one ran was decided by whichever failed
+ * first — so two runs could differ in ways no log explained.
+ *
+ * The CLI is the only path. When it cannot serve, the lane reports what it
+ * could not do and captures nothing — the same standard every other lane here
+ * is held to. Nothing is substituted and nothing is fabricated.
+ *
+ * APIFY IS STILL REQUIRED. The skill is a workflow, not a replacement for
+ * Apify's infrastructure: the authentication, the actors and the datasets are
+ * all still Apify's. What has been removed is our own API client, not the
+ * vendor.
  */
 
 import type { Platform, ServiceAdapter } from '../../../shared/agent-contract'
 import { config } from '../config'
-import { AdapterError, fetchJson } from './adapter'
+import { AdapterError } from './adapter'
 import type { CaptureInput, RawPost } from './capture'
+import { breakerReason, cliInstalled, ensureLogin, scrapeViaSkill } from '../services/scraping/apify-cli'
+import { indexedActor } from '../services/scraping/actor-index'
+import { normalizeDataset, toCaptureShape } from '../services/scraping/normalize'
 
-const UNAVAILABLE = 'APIFY_API_TOKEN is not set'
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   TOLERANT FIELD READING
-
-   Four actors from three vendors, none of whose field names are a contract we
-   control. Every field is read through a list of candidate keys rather than
-   assumed, so a vendor renaming `likesCount` to `likeCount` costs a key in a
-   list instead of a broken run that reports zeros as measurements.
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-interface LooseRecord {
-  [key: string]: unknown
-}
-
-function str(row: LooseRecord, ...keys: string[]): string {
-  for (const key of keys) {
-    const v = row[key]
-    if (typeof v === 'string' && v.trim() !== '') return v.trim()
-    if (typeof v === 'number') return String(v)
-  }
-  return ''
-}
-
-function int(row: LooseRecord, ...keys: string[]): number {
-  for (const key of keys) {
-    const v = row[key]
-    if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v)
-    if (typeof v === 'string') {
-      const n = Number.parseInt(v.replace(/[^\d-]/g, ''), 10)
-      if (Number.isFinite(n)) return n
-    }
-  }
-  return 0
-}
-
-function nested(row: LooseRecord, path: string): unknown {
-  let cursor: unknown = row
-  for (const part of path.split('.')) {
-    if (cursor === null || typeof cursor !== 'object') return undefined
-    cursor = (cursor as LooseRecord)[part]
-  }
-  return cursor
-}
-
-/** A nested integer, e.g. `engagement.likes`. Zero when absent, so callers can `||` a flat fallback. */
-function nestedInt(row: LooseRecord, path: string): number {
-  const v = nested(row, path)
-  if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v)
-  if (typeof v === 'string') {
-    const n = Number.parseInt(v.replace(/[^\d-]/g, ''), 10)
-    if (Number.isFinite(n)) return n
-  }
-  return 0
-}
-
-/**
- * Whether ANY of these keys or dotted paths exists on the row at all.
- *
- * This is the difference between "the source said zero" and "the source said
- * nothing", and it is why `metricsAvailable` can no longer be a constant. One of
- * the four configured actors returns `stats.total_reactions`, another returns
- * flat `likesCount`, and a third returns no engagement keys whatsoever — and
- * stamping that third one as measured would put three fabricated zeros into the
- * engagement, velocity and growth components of the trend score. A key present
- * with the value 0 IS a measurement and counts as present; a key that is absent
- * does not.
- */
-function statesAny(row: LooseRecord, ...keys: string[]): boolean {
-  for (const key of keys) {
-    const value = key.includes('.') ? nested(row, key) : row[key]
-    if (value === undefined || value === null) continue
-    if (typeof value === 'number' && Number.isFinite(value)) return true
-    if (typeof value === 'string' && value.trim() !== '') return true
-  }
-  return false
-}
-
-function nestedStr(row: LooseRecord, ...paths: string[]): string {
-  for (const path of paths) {
-    const v = nested(row, path)
-    if (typeof v === 'string' && v.trim() !== '') return v.trim()
-    if (typeof v === 'number') return String(v)
-  }
-  return ''
-}
-
-function extractHashtagsFromText(text: string): string[] {
-  const matches = text.match(/#[\p{L}\p{N}_]+/gu)
-  if (!matches) return []
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const raw of matches) {
-    const tag = raw.slice(1)
-    const key = tag.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(tag)
-  }
-  return out
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   NORMALISATION
-   ═══════════════════════════════════════════════════════════════════════════ */
-
+/** What each lane calls itself on a captured row. */
 const SOURCE_NAME: Record<Platform, string> = {
   linkedin: 'LinkedIn · Post Search',
   instagram: 'Instagram · Hashtag Search',
   x: 'X · Post Search',
   facebook: 'Facebook · Post Search',
-}
-
-const POST_URL_BASE: Record<Platform, (id: string) => string> = {
-  linkedin: (id) => `https://www.linkedin.com/feed/update/${id}`,
-  instagram: (id) => `https://www.instagram.com/p/${id}/`,
-  x: (id) => `https://x.com/i/status/${id}`,
-  facebook: (id) => `https://www.facebook.com/${id}`,
-}
-
-/**
- * Normalises one dataset item into the shape the pipeline consumes.
- * Returns null when the item cannot yield both an id and some text — a
- * half-row downstream is worse than one fewer row.
- */
-function normalisePost(item: unknown, keyword: string, platform: Platform): RawPost | null {
-  if (item === null || typeof item !== 'object') return null
-  const row = item as LooseRecord
-
-  /*
-   * FOUR ACTORS, FOUR VOCABULARIES — AND TWO CASING CONVENTIONS.
-   *
-   * Every field is read through a list of candidate keys because none of these
-   * names is a contract we control. The snake_case spellings are not
-   * speculative: `apimaestro~linkedin-posts-search-scraper-no-cookies` returns
-   * `activity_id`, `post_url`, `stats.total_reactions` and `posted_at.date`, and
-   * against a camelCase-only reader every single row failed the id check and was
-   * discarded as unusable — a lane that reported "no usable items" while the
-   * actor was returning perfectly good posts with real engagement on them.
-   */
-  const text = str(
-    row,
-    'text', 'postText', 'caption', 'content', 'description', 'commentary', 'full_text',
-    'post_text', 'message',
-  )
-
-  const urlOf = str(
-    row,
-    'url', 'postUrl', 'linkedinUrl', 'twitterUrl', 'link',
-    'post_url', 'postLink', 'permalink', 'permalink_url',
-  )
-
-  const externalId =
-    str(
-      row,
-      'id', 'postId', 'urn', 'shortCode', 'activityUrn', 'shareUrn', 'feedbackId',
-      'activity_id', 'full_urn', 'post_id', 'shortcode', 'tweet_id', 'story_fbid',
-    ) || urlOf
-  if (text === '' || externalId === '') return null
-
-  const url = urlOf || POST_URL_BASE[platform](externalId)
-
-  // LinkedIn nests the date under `posted_at.date`, Instagram and Facebook use
-  // `timestamp`, X uses `createdAt`. An unparseable date becomes capture time
-  // rather than being dropped, because a post with no stated date is still
-  // evidence — but it is never invented as something more precise.
-  const postedRaw =
-    nestedStr(row, 'postedAt.date', 'posted_at.date', 'postedAt.timestamp', 'posted_at.timestamp') ||
-    str(row, 'postedAt', 'publishedAt', 'timestamp', 'createdAt', 'date', 'time', 'posted_at', 'created_at') ||
-    ''
-  const parsed = new Date(postedRaw)
-  const postedAt =
-    postedRaw !== '' && !Number.isNaN(parsed.getTime())
-      ? parsed.toISOString()
-      : new Date().toISOString()
-
-  const declaredHashtags = Array.isArray(row.hashtags)
-    ? (row.hashtags as unknown[])
-        .filter((h): h is string => typeof h === 'string')
-        .map((h) => h.replace(/^#/, ''))
-    : []
-
-  /* ── ENGAGEMENT, AND WHETHER IT WAS STATED AT ALL ────────────────────────── */
-
-  const REACTION_KEYS = [
-    'engagement.likes', 'stats.total_reactions', 'stats.reactions',
-    'likesCount', 'likeCount', 'reactionsCount', 'numLikes', 'reactions', 'totalReactions',
-    'likes', 'favorite_count', 'favoriteCount',
-  ]
-  const COMMENT_KEYS = [
-    'engagement.comments', 'stats.comments',
-    'commentsCount', 'replyCount', 'numComments', 'comments', 'comment_count',
-  ]
-  const REPOST_KEYS = [
-    'engagement.shares', 'stats.shares', 'stats.reposts',
-    'sharesCount', 'retweetCount', 'reshareCount', 'numShares', 'reposts', 'repostsCount',
-    'share_count', 'quoteCount',
-  ]
-
-  const readCount = (keys: string[]): number => {
-    for (const key of keys) {
-      const value = key.includes('.') ? nestedInt(row, key) : int(row, key)
-      if (value !== 0) return value
-    }
-    return 0
-  }
-
-  const reactions = readCount(REACTION_KEYS)
-  const comments = readCount(COMMENT_KEYS)
-  const reposts = readCount(REPOST_KEYS)
-
-  /*
-   * Measured only if the actor actually stated a count somewhere. An actor that
-   * returns no engagement keys at all — the Facebook search actor is one — used
-   * to have its three structural zeros stamped `metricsAvailable: true`, which
-   * is precisely the "N/A is never 0" violation the pipeline is built to avoid:
-   * the Validation Agent would then average those zeros into a measured
-   * engagement figure and quietly depress a real one.
-   */
-  const metricsAvailable = statesAny(row, ...REACTION_KEYS, ...COMMENT_KEYS, ...REPOST_KEYS)
-
-  return {
-    externalId,
-    text,
-    authorName:
-      nestedStr(row, 'author.name', 'author.userName', 'author.user_name', 'user.name') ||
-      str(row, 'ownerFullName', 'ownerUsername', 'authorName', 'author', 'profileName', 'author_name') ||
-      'Unknown author',
-    authorHeadline:
-      nestedStr(row, 'author.headline', 'author.info', 'author.description') ||
-      str(row, 'authorHeadline', 'headline', 'occupation'),
-    // Only some actors state this. Zero means "not stated" — the follower floor
-    // in the handler exempts unstated counts rather than reading them as tiny.
-    authorFollowers:
-      nestedInt(row, 'author.followersCount') ||
-      nestedInt(row, 'author.followers_count') ||
-      nestedInt(row, 'author.followers') ||
-      int(row, 'authorFollowers', 'followersCount', 'followers'),
-    url,
-    postedAt,
-    reactions,
-    comments,
-    reposts,
-    hashtags: declaredHashtags.length > 0 ? declaredHashtags : extractHashtagsFromText(text),
-    keyword,
-    sourceName: SOURCE_NAME[platform],
-    platform,
-    metricsAvailable,
-  }
-}
-
-/** Apify returns either a bare array or `{ items }` / `{ data }`, depending on route. */
-function datasetItems(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload
-  if (payload !== null && typeof payload === 'object') {
-    const items = (payload as LooseRecord).items
-    if (Array.isArray(items)) return items
-    const data = (payload as LooseRecord).data
-    if (Array.isArray(data)) return data
-  }
-  return []
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   REQUEST PLUMBING — per https://apify.com/agents.md
-
-   Bearer header, never a query-string token. Cost caps in the query string,
-   never the input body: an actor is free to ignore a `maxPosts` field it does
-   not recognise, but it cannot ignore Apify's own `maxItems` ceiling. Sync
-   first; async run → poll → dataset when sync cannot finish inside its window.
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function authHeaders(): Record<string, string> {
-  return { authorization: `Bearer ${config.apify.token}` }
-}
-
-/** Actor ids use `~` as the owner separator and must not be URL-escaped away. */
-function actorPath(actor: string): string {
-  return actor.replace(/\//g, '~')
-}
-
-/** `maxItems` caps a pay-per-result run's cost; `memory` sizes the container. */
-function capQuery(maxItems: number): string {
-  return `maxItems=${Math.max(1, Math.trunc(maxItems))}&memory=${config.apify.memoryMbytes}`
-}
-
-interface RunRecord {
-  id: string
-  status: string
-  defaultDatasetId: string
-}
-
-const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED'])
-
-async function runActor(
-  actor: string,
-  body: Record<string, unknown>,
-  maxItems: number,
-  adapterId: string,
-): Promise<unknown[]> {
-  const base = config.apify.baseUrl
-  try {
-    const payload = await fetchJson<unknown>(
-      `${base}/acts/${actorPath(actor)}/run-sync-get-dataset-items?${capQuery(maxItems)}`,
-      {
-        method: 'POST',
-        headers: authHeaders(),
-        timeoutMs: config.apify.runTimeoutMs,
-        adapterId,
-        body,
-      },
-    )
-    return datasetItems(payload)
-  } catch (error) {
-    // Only a timeout is worth a second, slower attempt. A 404 on the actor or a
-    // 401 on the token will fail identically the second time, and retrying them
-    // just doubles the wait before the operator sees the real reason.
-    const timedOut = error instanceof AdapterError && /timed out/i.test(error.message)
-    if (!timedOut) throw error
-  }
-
-  const started = await fetchJson<{ data?: RunRecord }>(
-    `${base}/acts/${actorPath(actor)}/runs?${capQuery(maxItems)}`,
-    { method: 'POST', headers: authHeaders(), timeoutMs: 30_000, adapterId, body },
-  )
-  const run = started.data
-  if (!run?.id) throw new AdapterError(adapterId, 'actor run did not start')
-
-  const deadline = Date.now() + config.apify.runTimeoutMs * 2
-  let status = run.status
-  let datasetId = run.defaultDatasetId
-
-  while (!TERMINAL.has(status)) {
-    if (Date.now() > deadline) {
-      throw new AdapterError(adapterId, `run ${run.id} did not finish in time`)
-    }
-    await new Promise((resolve) => setTimeout(resolve, 3_000))
-    const polled = await fetchJson<{ data?: RunRecord }>(`${base}/actor-runs/${run.id}`, {
-      headers: authHeaders(),
-      timeoutMs: 20_000,
-      adapterId,
-    })
-    status = polled.data?.status ?? status
-    datasetId = polled.data?.defaultDatasetId ?? datasetId
-  }
-
-  if (status !== 'SUCCEEDED') throw new AdapterError(adapterId, `run ${run.id} ended ${status}`)
-
-  const items = await fetchJson<unknown>(`${base}/datasets/${datasetId}/items?limit=${maxItems}`, {
-    headers: authHeaders(),
-    timeoutMs: 60_000,
-    adapterId,
-  })
-  return datasetItems(items)
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   ACTOR FAMILIES
-
-   Input field names belong to an actor, not to a platform. `harvestapi` wants
-   `searchQueries` + `maxPosts`; `apidojo` wants `searchTerms` + `maxItems`;
-   Apify's own Instagram actor wants `hashtags` + `resultsLimit`. Keying the
-   body on the family means an operator can point a lane at a different actor
-   without a deploy, as long as its family is known.
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-type ActorFamily =
-  | 'harvestapi'
-  | 'apimaestro'
-  | 'instagram-hashtag'
-  | 'instagram-search'
-  | 'tweet-scraper'
-  | 'facebook-search'
-  | 'facebook-hashtag'
-  | 'generic'
-
-function familyOf(actor: string): ActorFamily {
-  const slug = actor.toLowerCase()
-  if (slug.includes('harvestapi')) return 'harvestapi'
-  if (slug.includes('apimaestro')) return 'apimaestro'
-  if (slug.includes('instagram-hashtag')) return 'instagram-hashtag'
-  if (slug.includes('instagram-scraper')) return 'instagram-search'
-  if (slug.includes('tweet-scraper') || slug.includes('twitter')) return 'tweet-scraper'
-  if (slug.includes('facebook-posts-search') || slug.includes('facebook-search')) return 'facebook-search'
-  if (slug.includes('facebook-hashtag')) return 'facebook-hashtag'
-  return 'generic'
-}
-
-const POSTED_LIMIT: Record<CaptureInput['datePosted'], string> = {
-  'past-24h': '24h',
-  'past-week': 'week',
-  'past-month': 'month',
 }
 
 const WINDOW_DAYS: Record<CaptureInput['datePosted'], number> = {
@@ -426,97 +60,135 @@ const WINDOW_DAYS: Record<CaptureInput['datePosted'], number> = {
   'past-month': 30,
 }
 
-/** The start of the recency window, for actors that take a date instead of a token. */
+/** The start of the recency window, for actors whose schema declares a date field. */
 function windowStart(datePosted: CaptureInput['datePosted']): Date {
   const at = new Date()
   at.setDate(at.getDate() - WINDOW_DAYS[datePosted])
   return at
 }
 
-function isoDate(at: Date): string {
-  return at.toISOString().slice(0, 10)
+/* ═══════════════════════════════════════════════════════════════════════════
+   WHY A LANE CANNOT RUN
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Two distinct unavailable states, because the fixes are different.
+ *
+ * Collapsing them into one "Apify is not configured" would send an operator to
+ * regenerate a token that is already correct.
+ */
+function unavailable(): string {
+  if (!cliInstalled()) {
+    return (
+      'The Apify CLI is not installed, and it is the only way the platform lanes run. ' +
+      'Install it in the repository root with `npm i -D apify-cli` — it resolves from ' +
+      'node_modules/.bin and needs no global install.'
+    )
+  }
+  if (config.apify.token === '') {
+    return (
+      'APIFY_API_TOKEN is not set. The CLI needs it once to establish a stored login; ' +
+      'put it in server/secrets.env (gitignored). Apify console → Settings → API & Integrations.'
+    )
+  }
+
+  /*
+   * AN ACCOUNT-LEVEL FAILURE MAKES THE LANE UNAVAILABLE, NOT MERELY UNLUCKY.
+   *
+   * Once the breaker is open, every platform lane reports itself unavailable
+   * up front. That matters more than it sounds: the Scraping Agent checks
+   * `isConfigured()` when it builds its lane list, so the four platform lanes
+   * are dropped BEFORE any keyword is attempted rather than each failing
+   * separately for every keyword. One stated reason on the run instead of
+   * sixteen, and the open-web lane's result is legible instead of buried.
+   *
+   * The breaker expires, so an allowance that rolls over is picked up without
+   * a restart.
+   */
+  const tripped = breakerReason()
+  // Explained, not echoed. The breaker stores whatever the CLI said; an
+  // operator reading "apify actors call (exit 1)" learns nothing they can act
+  // on, and this is the string the run console shows for the whole lane.
+  if (tripped !== '') return explainApifyFailure(new Error(tripped), 'the platform lanes')
+
+  return ''
 }
 
-function actorFor(platform: Platform): string {
-  switch (platform) {
-    case 'linkedin':
-      return config.apify.postsActor
-    case 'instagram':
-      return config.apify.instagramActor
-    case 'x':
-      return config.apify.xActor
-    case 'facebook':
-      return config.apify.facebookActor
-  }
+/* ═══════════════════════════════════════════════════════════════════════════
+   EXPLAINING A FAILURE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Which actor a lane would use, for an error message.
+ *
+ * Selection is per-intent and can fall through to a live search, so this names
+ * the INDEXED default rather than claiming to know what a future run will pick.
+ */
+export function actorLabelFor(platform: Platform | undefined): string {
+  if (platform === undefined) return 'the open-web lane'
+  return indexedActor(platform, 'keyword')?.actorId ?? platform
 }
 
 /**
- * The run input for one keyword on one lane.
+ * Turns an Apify failure into a sentence naming the fix.
  *
- * Note what is NOT here: Instagram's hashtag actor has no sort or recency
- * control at all, so `datePosted` cannot be expressed on that lane. Rather
- * than pretend otherwise, the lane over-fetches and the handler filters on
- * `postedAt` — and says it did.
+ * Reads the CLI's stderr rather than an HTTP body now. The distinctions that
+ * matter are unchanged and are the reason this exists: an exhausted account, a
+ * missing credential and a withdrawn actor all look alike from the outside, and
+ * they need three different actions.
  */
-function searchBody(actor: string, input: CaptureInput, maxItems: number): Record<string, unknown> {
-  const term = input.keyword
-  switch (familyOf(actor)) {
-    case 'harvestapi':
-      return {
-        searchQueries: [term],
-        maxPosts: maxItems,
-        sortBy: input.sortBy,
-        postedLimit: POSTED_LIMIT[input.datePosted],
-      }
-    case 'apimaestro':
-      return {
-        keyword: term,
-        sort_type: input.sortBy === 'date' ? 'date_posted' : 'relevance',
-        // This actor's own enum happens to be exactly our `datePosted` vocabulary,
-        // so the recency window IS expressible on this lane and is passed rather
-        // than dropped. Verified against its published input schema.
-        date_filter: input.datePosted,
-        limit: Math.min(50, maxItems),
-        total_posts: maxItems,
-      }
-    case 'instagram-hashtag':
-      return {
-        // `keywordSearch` makes the actor treat the entry as a plain search
-        // term rather than a literal tag, which is what a trending keyword is.
-        hashtags: [term.replace(/^#/, '')],
-        keywordSearch: !term.startsWith('#'),
-        resultsType: 'posts',
-        resultsLimit: maxItems,
-      }
-    case 'instagram-search':
-      return {
-        search: term,
-        searchType: term.startsWith('#') ? 'hashtag' : 'user',
-        searchLimit: 1,
-        resultsType: 'posts',
-        resultsLimit: maxItems,
-        onlyPostsNewerThan: isoDate(windowStart(input.datePosted)),
-      }
-    case 'tweet-scraper':
-      return {
-        searchTerms: [term],
-        maxItems,
-        sort: input.sortBy === 'date' ? 'Latest' : 'Top',
-        start: isoDate(windowStart(input.datePosted)),
-      }
-    case 'facebook-search':
-      return {
-        // A single string, not an array — this actor is called once per keyword.
-        query: term,
-        resultsCount: maxItems,
-        searchType: input.sortBy === 'date' ? 'latest' : 'top',
-        startDate: isoDate(windowStart(input.datePosted)),
-      }
-    case 'facebook-hashtag':
-      return { keywordList: [term.replace(/^#/, '')], resultsLimit: maxItems }
-    default:
-      return { searchQuery: term, maxItems, sortBy: input.sortBy, datePosted: input.datePosted }
+export function explainApifyFailure(error: unknown, actor: string): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  // Defensive: a failed CLI login has been observed to echo the credential back.
+  const said = raw.replace(/apify_api_[A-Za-z0-9]+/g, '«token»')
+
+  if (/hard limit|usage limit|monthly usage/i.test(said)) {
+    return (
+      'Apify refused the run: the account has exceeded its monthly usage limit. This is an ' +
+      'ACCOUNT limit, not a configuration problem — the token is valid and the actor exists. ' +
+      'Every actor this product uses is priced per result, so runs draw on the plan’s monthly ' +
+      'allowance. Check console.apify.com/billing: the usage cycle has to roll over, the hard ' +
+      'limit has to be raised, or the plan has to be upgraded. Nothing in this repository can ' +
+      'work around it, and no substitute source is used for the platform lanes.'
+    )
   }
+
+  if (/APIFY_AUTH_MISSING|not logged in|authentication/i.test(said)) {
+    return (
+      'The Apify CLI holds no credentials. It does not read APIFY_TOKEN from the environment ' +
+      '(verified against CLI 1.10.0), so it must be logged in once. Set APIFY_API_TOKEN and ' +
+      'restart — the server establishes the login itself — or run `npx apify login`.'
+    )
+  }
+
+  if (/payment|insufficient credit/i.test(said)) {
+    return `Apify requires payment for this run. "${actor}" is priced per result and the account cannot be charged.`
+  }
+
+  if (/not found|does not exist|404/i.test(said)) {
+    return (
+      `Apify has no actor "${actor}", or it is no longer published. Actors are third-party ` +
+      'artefacts and their authors can rename or withdraw them. Check it with ' +
+      `\`npx apify actors info ${actor}\`, and if it is gone the lane needs a replacement in ` +
+      'server/src/services/scraping/actor-index.ts.'
+    )
+  }
+
+  if (/rate limit|429|too many requests/i.test(said)) {
+    return (
+      'Apify rate-limited this run. Lower "Posts per keyword, per lane" or "Concurrent captures" ' +
+      'on the capture skill, or space runs further apart.'
+    )
+  }
+
+  if (/exceeded \d+ms|timed out/i.test(said)) {
+    return (
+      'The actor did not finish in time. Raise APIFY_RUN_TIMEOUT_MS, or lower the per-keyword ' +
+      'item ceiling so the run has less to do.'
+    )
+  }
+
+  return said
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -524,52 +196,90 @@ function searchBody(actor: string, input: CaptureInput, maxItems: number): Recor
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Keyword search on one platform lane. The open web has no actor and is not
- * reachable through here — `captureFor()` routes it to crawl4ai instead.
+ * Keyword capture on one platform lane.
+ *
+ * The id, label and signature are unchanged from the HTTP implementation on
+ * purpose: `capture.ts` routes to this by id and Sherlock reports `.label` on
+ * every lane event, so neither can tell that the mechanism underneath changed.
+ * That is the property that made replacing the mechanism possible at all.
  */
 export const apifySearch: ServiceAdapter<CaptureInput, RawPost[]> = {
   id: 'apify.search',
   label: 'Apify · platform capture',
 
   isConfigured(): boolean {
-    return config.apify.configured
+    return unavailable() === ''
   },
 
   unavailableReason(): string {
-    return UNAVAILABLE
+    return unavailable()
   },
 
   async run(input: CaptureInput): Promise<RawPost[]> {
-    if (!this.isConfigured()) throw new AdapterError(this.id, UNAVAILABLE)
+    const reason = unavailable()
+    if (reason !== '') throw new AdapterError(this.id, reason)
+
     if (input.platform === undefined) {
-      throw new AdapterError(this.id, 'the open-web lane has no actor — it is captured by crawl4ai')
-    }
-
-    const platform = input.platform
-    const actor = actorFor(platform)
-    // The operator's knob asks; the env ceiling decides. Actors bill per result.
-    const maxItems = Math.max(1, Math.min(input.maxItems, config.apify.maxItemsPerKeyword))
-
-    const items = await runActor(actor, searchBody(actor, input, maxItems), maxItems, this.id)
-
-    const posts = items
-      .map((item) => normalisePost(item, input.keyword, platform))
-      .filter((p): p is RawPost => p !== null)
-
-    if (posts.length === 0) {
-      // An empty live result and a broken actor are indistinguishable from the
-      // caller's side, so say which keyword and lane produced nothing rather
-      // than reporting a successful zero.
       throw new AdapterError(
         this.id,
-        `${actor} returned no usable items for “${input.keyword}” on ${platform}`,
+        'the open-web lane has no actor — it is captured by the research adapter',
       )
     }
+    const platform = input.platform
+
+    // Established once per process, from APIFY_API_TOKEN. The token never
+    // reaches argv here, and never reaches a log anywhere.
+    const auth = await ensureLogin()
+    if (!auth.ok) throw new AdapterError(this.id, auth.reason)
+
+    /*
+     * selection → live schema → input → run → dataset.
+     *
+     * The item ceiling is clamped to APIFY_MAX_ITEMS_PER_KEYWORD inside
+     * `scrapeViaSkill`, so a knob in Agent Studio cannot exceed what the
+     * deployment allows. Actors bill per result.
+     */
+    const outcome = await scrapeViaSkill({
+      target: platform,
+      intent: 'keyword',
+      terms: [input.keyword],
+      maxItems: input.maxItems,
+      since: windowStart(input.datePosted).toISOString(),
+    })
+
+    const { items, rejected } = normalizeDataset(outcome.items, {
+      platform,
+      sourceActor: outcome.run.actorId,
+      apifyRunId: outcome.run.runId,
+      apifyDatasetId: outcome.run.datasetId,
+    })
+
+    const posts = items.map((item) =>
+      toCaptureShape(item, input.keyword, platform, SOURCE_NAME[platform]),
+    )
+
+    if (posts.length === 0) {
+      /*
+       * An empty live result and a broken actor are indistinguishable from the
+       * caller's side, so this names the keyword, the lane and the actor that
+       * produced nothing — and links the run, so the dataset can be opened.
+       * Reporting a successful zero here is how a broken lane stays broken for
+       * a month.
+       */
+      throw new AdapterError(
+        this.id,
+        `${outcome.via} returned ${outcome.items.length} row(s) for “${input.keyword}” on ${platform}` +
+          (rejected > 0 ? `, ${rejected} of which carried neither text nor a URL` : '') +
+          `. Run: ${outcome.runUrl}`,
+      )
+    }
+
+    if (rejected > 0) {
+      console.warn(
+        `  · ${outcome.run.actorId}: ${rejected} dataset row(s) yielded neither text nor a URL and were not used`,
+      )
+    }
+
     return posts
   },
-}
-
-/** Engagement, weighted the way the pipeline weights it. */
-export function rawPostEngagement(post: RawPost): number {
-  return post.reactions + post.comments * 3 + post.reposts * 5
 }

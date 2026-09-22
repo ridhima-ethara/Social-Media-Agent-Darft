@@ -12,6 +12,7 @@
 import {
   maxRisk,
   renderConfirmTemplate,
+  anyStepConfirmsAlways,
   requiresConfirmation,
   TOOL_BY_ID,
   type ToolRisk,
@@ -192,7 +193,19 @@ export function composePlan(opts: ComposeOptions): Plan {
 
   /* ── 5 · Risk propagates upward ────────────────────────────────────────── */
   const risk = maxRisk(kept.map((s) => TOOL_BY_ID[s.toolId]?.risk ?? 'safe'))
-  const needsConfirm = requiresConfirmation(risk, opts.alsoConfirmMutating)
+  /*
+   * A calendar edit is reversible, so its risk class stays `mutating` — calling
+   * it irreversible to force the gate would put it in the same class as
+   * publishing and make that class mean nothing.
+   *
+   * But reversible is not harmless. "Move all LinkedIn posts to mornings"
+   * rewrites a week in one step, and nobody can picture its blast radius from
+   * the sentence. So those tools declare `confirmsAlways` and reach the gate on
+   * their own terms, with the exact before/after in front of the operator.
+   */
+  const needsConfirm =
+    requiresConfirmation(risk, opts.alsoConfirmMutating) ||
+    anyStepConfirmsAlways(kept.map((s) => s.toolId))
 
   const plan: Plan = {
     id,
@@ -328,13 +341,83 @@ function summarise(
  * The confirmation prompt: what will happen, what cannot be undone, and the two
  * answers. Rendered from the tool's own `confirmTemplate`.
  */
+/**
+ * The confirm card for a calendar change: what is in scope, and what is not.
+ *
+ * It states the SELECTION rather than a per-post list, because the selection is
+ * what the operator can still get wrong — "all LinkedIn posts" and "all
+ * LinkedIn posts this week" are different instructions, and the difference is
+ * invisible once the moves have happened. Per-post before/after follows on the
+ * result, where it is a record rather than a prediction.
+ *
+ * It also says plainly that the change is reversible. A confirm gate that
+ * implies permanence for something that is not is a gate people learn to
+ * dismiss.
+ */
+function renderCalendarPrompt(step: ToolCall, snapshot: SituationSnapshot): string {
+  const a = step.args
+  const label = (key: string): string | null => (typeof a[key] === 'string' ? (a[key] as string) : null)
+
+  const scope: string[] = []
+  const platform = label('platform')
+  if (platform) scope.push(`${platform} posts only`)
+  const topic = label('topic')
+  if (topic) scope.push(`matching “${topic}”`)
+  const fromDay = label('fromDay')
+  if (fromDay) scope.push(`currently on ${fromDay}`)
+  if (scope.length === 0) scope.push('every scheduled post that matches')
+
+  const destination: string[] = []
+  const day = label('day')
+  if (day) destination.push(`to ${day}`)
+  const time = label('time') ?? label('timeOfDay')
+  if (time) destination.push(`at ${time}`)
+  if (Array.isArray(a.days) && a.days.length > 0) {
+    destination.push(`spread across ${(a.days as unknown[]).join(', ')}`)
+  }
+  const firstDay = label('firstDay')
+  const secondDay = label('secondDay')
+  if (firstDay && secondDay) destination.push(`swapping ${firstDay} with ${secondDay}`)
+
+  const placed = snapshot.thisWeek.length
+
+  /*
+   * TWO CLAUSES, NOT A PARAGRAPH.
+   *
+   * This card is read with a finger already on Confirm. It previously spent
+   * three sentences describing the diff it was about to show and promising to
+   * re-read the calendar — both of which the operator then sees happen, so the
+   * prose only delayed the thing it was describing. What genuinely cannot be
+   * recovered from the buttons is the scope: what moves, and how much.
+   * Reversibility stays because it is the reason this is a pause and not a
+   * warning.
+   */
+  return (
+    `${scope.join(', ')}${destination.length > 0 ? ' ' + destination.join(' ') : ''}` +
+    ` — ${placed} post${placed === 1 ? '' : 's'} on the calendar this week. Reversible.`
+  )
+}
+
 export function renderConfirmPrompt(
   steps: ToolCall[],
   intent: Intent,
   snapshot: SituationSnapshot,
 ): string {
   const irreversible = steps.find((s) => TOOL_BY_ID[s.toolId]?.risk === 'irreversible')
-  if (!irreversible) return 'This cannot be undone. Confirm, or cancel.'
+
+  /*
+   * A CALENDAR CHANGE GETS ITS OWN PROMPT.
+   *
+   * The generic line — "This cannot be undone" — would be false for a calendar
+   * edit, and a confirm card that overstates what it is asking about teaches an
+   * operator to click through confirms without reading them. This names the
+   * scope instead, which is the thing actually worth pausing over.
+   */
+  if (!irreversible) {
+    const bulk = steps.find((s) => TOOL_BY_ID[s.toolId]?.confirmsAlways === true)
+    if (bulk) return renderCalendarPrompt(bulk, snapshot)
+    return 'This cannot be undone. Confirm, or cancel.'
+  }
 
   const args = irreversible.args
   const title =

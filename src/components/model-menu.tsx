@@ -13,8 +13,8 @@
 
 import { useState } from 'react'
 import { ChevronDown, Check, AlertTriangle } from 'lucide-react'
-import { IMAGE_MODELS } from '@shared/image-models'
-import { IMAGE_MODEL_ADAPTER, TEXT_MODELS } from '@shared/text-models'
+import { SELECTABLE_IMAGE_MODELS } from '@shared/image-models'
+import { IMAGE_MODEL_ADAPTER, SELECTABLE_TEXT_MODELS } from '@shared/text-models'
 import { Badge, useOutsideClick } from './ui'
 import { useStore } from '../store'
 
@@ -46,14 +46,14 @@ export function ModelMenu({
 
   const entries: MenuEntry[] =
     target === 'caption'
-      ? TEXT_MODELS.map((model) => ({
+      ? SELECTABLE_TEXT_MODELS.map((model) => ({
           id: model.id,
           label: model.label,
           summary: model.summary,
           licence: model.licence,
           adapterId: model.adapterId,
         }))
-      : IMAGE_MODELS.map((model) => ({
+      : SELECTABLE_IMAGE_MODELS.map((model) => ({
           id: model.id,
           label: model.label,
           summary: model.summary,

@@ -18,6 +18,7 @@ import {
   IMAGE_MODEL_BY_ID,
 } from '../../../../../shared/image-models'
 import { withRetry } from '../../../integrations/adapter'
+import { config } from '../../../config'
 import { renderBrandSvg, svgToDataUri } from './brand-svg'
 import { flux2KleinPainter } from './flux2-klein'
 import { geminiImagePainter } from './gcp-gemini-image'
@@ -53,7 +54,35 @@ const PAINTERS: Partial<Record<ImageModelId, BackgroundPainter>> = {
  */
 const PAINTER_PREFERENCE: ImageModelId[] = ['gcp-imagen', 'gcp-gemini-image', 'flux2-klein', 'z-image-turbo']
 
+/**
+ * THE MODEL NAMED IN THE ENVIRONMENT OUTRANKS THE STATIC ORDER.
+ *
+ * `isConfigured()` on the two GCP painters answers "are there credentials",
+ * which is not the same question as "does this project serve this model".
+ * Imagen and Gemini share one credential, so with `GCP_IMAGE_MODEL` set to a
+ * Gemini image model, Imagen still reported itself configured, still won the
+ * static order, and still 404'd on every call — `Publisher model … not found`,
+ * because Imagen is not enabled on this project. Every render then fell through
+ * to the local vector renderer, which is why the reference art direction had
+ * never once reached a painter and every creative came back flat.
+ *
+ * `GCP_IMAGE_MODEL` is the deployment stating which model it actually has. The
+ * painter that consumes that model is therefore tried first. The static order
+ * still decides everything else, and a model the operator names by hand in the
+ * UI still wins outright — this only changes what `auto` resolves to.
+ */
+function painterForConfiguredModel(): ImageModelId | null {
+  const model = config.gcp.imageModel.toLowerCase()
+  if (model === '') return null
+  if (model.startsWith('gemini')) return 'gcp-gemini-image'
+  if (model.startsWith('imagen')) return 'gcp-imagen'
+  return null
+}
+
 export function preferredImageModel(): ImageModelId {
+  const named = painterForConfiguredModel()
+  if (named !== null && PAINTERS[named]?.isConfigured() === true) return named
+
   for (const id of PAINTER_PREFERENCE) {
     const painter = PAINTERS[id]
     if (painter?.isConfigured() === true) return id

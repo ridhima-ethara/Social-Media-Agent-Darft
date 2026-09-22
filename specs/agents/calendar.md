@@ -56,9 +56,9 @@ Picks the primary platform from a format-by-platform fit matrix, lists every via
 
 | Knob | Default | Description |
 |---|---|---|
-| `enabledPlatforms` | `linkedin,instagram,x,facebook` | Comma-separated platform ids an idea may be placed on: linkedin, instagram, x, facebook. Set it to `linkedin` and nothing else is ever suggested — the fit matrix only scores what is listed here. This is the restriction; `Tie-break toward` below is only a preference and never excluded a platform. |
+| `enabledPlatforms` | `linkedin,instagram,facebook` | Comma-separated platform ids an idea may be placed on: linkedin, instagram, x, facebook. Set it to `linkedin` and nothing else is ever suggested — the fit matrix only scores what is listed here. This is the restriction; `Tie-break toward` below is only a preference and never excluded a platform. X is OFF by default: it is the one channel this account does not currently publish to, and planning slots for a channel nobody ships to fills the calendar with work that will never run. Add `,x` to turn it back on — nothing else has to change, because every platform stays a first-class member of the union either way. |
 | `primaryPlatform` | `linkedin` | Which platform wins when two enabled platforms score equally. LinkedIn is where this audience actually is. |
-| `alternateThreshold` | `55` | An enabled platform scoring at or above this is offered as an alternate in the review panel. |
+| `alternateThreshold` | `45` | An enabled platform scoring at or above this is offered as an alternate, and is what the cross-platform step adapts an idea onto. Lowered from 55 for a specific arithmetic reason: this account’s work is mostly Thought Leadership, which the fit matrix scores LinkedIn 96, Facebook 74 and Instagram 46 — so at 55 Instagram could never receive a single post, and the calendar came back LinkedIn and Facebook only. 45 admits it. Raise it again if Instagram variants read as forced. |
 
 ### `calendar.cadence.balance`
 

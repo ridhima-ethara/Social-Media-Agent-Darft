@@ -33,7 +33,7 @@ import {
   seededFor,
   planningStart,
   weekdayName,
-  type ContentFormat,
+  type EditorialFormat,
 } from '../corpus'
 import { registerSkill } from '../runtime'
 import type { PipelinePayload, PlannedIdea } from '../skills/index'
@@ -423,7 +423,7 @@ registerSkill<PipelinePayload>('calendar.platform.select', (payload, ctx) => {
   const ideas = payload.ideas ?? []
 
   for (const idea of ideas) {
-    const fit = FORMAT_PLATFORM_FIT[idea.format as ContentFormat] ?? FORMAT_PLATFORM_FIT['Thought Leadership']
+    const fit = FORMAT_PLATFORM_FIT[idea.format as EditorialFormat] ?? FORMAT_PLATFORM_FIT['Thought Leadership']
 
     const scored = inPlay
       .map((platform) => ({

@@ -12,6 +12,7 @@ import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
 import { DownloadMenu } from '../components/download-menu'
 import { exportPerPost, exportSinglePost } from '../lib/export'
+import { PlatformPreview } from '../components/previews'
 import {
   Badge,
   Btn,
@@ -375,16 +376,33 @@ export function PublishedPosts() {
         subtitle={detail ? `${PLATFORM_LABEL[detail.platform]} · published ${formatDate(detail.published_at, true)}` : ''}
       >
         {detail ? (
-          <div className="grid gap-4 lg:grid-cols-[1fr_280px]">
-            <div>
-              {detail.data_uri ? (
-                <img src={detail.data_uri} alt="" className="mb-3 w-full rounded-lg border border-line" />
-              ) : null}
-              <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink-2">{detail.content}</p>
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_296px]">
+            {/*
+              THE POST AS THE FEED SHOWED IT.
+
+              This was a bare <img> above an unbroken wall of caption — a
+              thousand characters of body text at full width, which is neither
+              what the audience saw nor readable. The same preview the review
+              panel approves is the honest picture of what went out, and it
+              folds the caption where the platform folds it, so the modal opens
+              on the post rather than on a transcript of it.
+
+              It carries no engagement figures of its own; the real ones, from
+              the platform, are beside it.
+            */}
+            <div className="min-w-0">
+              <div className="mx-auto max-w-[520px]">
+                <PlatformPreview platform={detail.platform} body={detail.content} media={detail.data_uri} />
+              </div>
             </div>
 
-            <aside className="space-y-3">
-              <div className="grid grid-cols-3 gap-1.5">
+            <aside className="flex min-w-0 flex-col gap-3">
+              {/*
+                Two columns, not three. At 280px a third column left each label
+                about ninety pixels, so "IMPRESSIONS" ran past its tile and
+                collided with the one beside it.
+              */}
+              <div className="grid grid-cols-2 gap-1.5">
                 <Metric label="Reach" value={detail.reach === null ? '—' : fmt(detail.reach)} />
                 <Metric label="Impressions" value={detail.impressions === null ? '—' : fmt(detail.impressions)} />
                 <Metric label="Likes" value={detail.likes === null ? '—' : fmt(detail.likes)} />
@@ -396,21 +414,38 @@ export function PublishedPosts() {
                 />
               </div>
 
-              <section>
-                <h4 className="display text-[12px]">Publishing history</h4>
-                <ol className="mt-1.5 space-y-1.5">
-                  {detail.history.map((step, i) => (
-                    <li key={i} className="flex gap-2 text-[11px] leading-relaxed text-ink-3">
-                      <span className="tabular shrink-0 text-ink-2">{i + 1}.</span>
-                      <span>{String(step.label ?? '')}</span>
-                    </li>
-                  ))}
-                </ol>
-              </section>
+              {/*
+                "Publishing history" is gone. It listed `history` labels, and
+                every row's label was empty — the modal showed a numbered list
+                of nothing, "1. 2. 3. 4. 5.", which reads as five steps whose
+                names failed to load. The receipt below says what is actually
+                known about how this post went out.
+              */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={detail.publish_mode === 'demo' ? 'warn' : 'good'}>
+                  {detail.publish_mode === 'demo' ? 'Published in demo mode' : 'Published live'}
+                </Badge>
+                <span className="mono text-[10.5px] uppercase tracking-[0.1em] text-ink-3">
+                  {PLATFORM_LABEL[detail.platform]}
+                </span>
+              </div>
 
-              <Badge tone={detail.publish_mode === 'demo' ? 'warn' : 'good'}>
-                {detail.publish_mode === 'demo' ? 'Published in demo mode' : 'Published live'}
-              </Badge>
+              <dl className="flex flex-col gap-1.5 border-t border-line pt-3 text-[11.5px]">
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="shrink-0 text-ink-3">Published</dt>
+                  <dd className="tabular min-w-0 truncate text-right text-ink-2">
+                    {formatDate(detail.published_at, true)}
+                  </dd>
+                </div>
+                {detail.external_id ? (
+                  <div className="flex items-baseline justify-between gap-3">
+                    <dt className="shrink-0 text-ink-3">Receipt</dt>
+                    <dd className="mono min-w-0 truncate text-right text-ink-2" title={detail.external_id}>
+                      {detail.external_id}
+                    </dd>
+                  </div>
+                ) : null}
+              </dl>
             </aside>
 
             {detail.analysis_summary ? (

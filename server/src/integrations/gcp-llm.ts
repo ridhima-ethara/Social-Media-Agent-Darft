@@ -23,6 +23,80 @@ import { describeGcpAuth, gcpAuthAvailable, gcpAuthHeader } from './gcp-auth'
    TEXT
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE USER PARTS
+
+   Text first, then any images. Order matters to the model: the instruction
+   should be read before the material it applies to.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** At most this many images per request, whatever the caller asks for. */
+const MAX_IMAGE_PARTS = 4
+
+/** Roughly 6 MB of base64, matching the per-reference ceiling the API enforces. */
+const MAX_IMAGE_CHARS = 8_000_000
+
+interface GeminiPart {
+  text?: string
+  inlineData?: { mimeType: string; data: string }
+}
+
+/**
+ * Splits a `data:` URI into the two fields Gemini's `inlineData` wants.
+ * Returns `null` for anything that is not one, rather than sending a string the
+ * API will reject with a message nobody can act on.
+ */
+function inlinePart(dataUri: string): GeminiPart | null {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(dataUri)
+  if (!match) return null
+  const mimeType = match[1] as string
+  const data = match[2] as string
+  if (!mimeType.startsWith('image/')) return null
+  if (data.length > MAX_IMAGE_CHARS) return null
+  return { inlineData: { mimeType, data } }
+}
+
+/**
+ * The `parts` array for one request.
+ *
+ * WITHOUT IMAGES THIS RETURNS EXACTLY WHAT IT ALWAYS DID — a single text part —
+ * so no existing caller's request body changes by a byte.
+ *
+ * The ceilings are enforced here as well as at the API boundary, because a
+ * hosted model bills per request and this is the last place before the money is
+ * spent. A reference that cannot be turned into a part is dropped silently HERE
+ * and reported by the caller, which holds the context to say which attachment
+ * and why.
+ */
+function userParts(input: GcpTextInput): GeminiPart[] {
+  const parts: GeminiPart[] = [{ text: input.prompt }]
+  for (const image of (input.images ?? []).slice(0, MAX_IMAGE_PARTS)) {
+    const part = inlinePart(image.dataUri)
+    if (part) parts.push(part)
+  }
+  return parts
+}
+
+/** Which references a request could actually carry. Used by callers to report. */
+export function usableImageParts(
+  images: Array<{ dataUri: string; name: string }>,
+): { usable: string[]; rejected: Array<{ name: string; reason: string }> } {
+  const usable: string[] = []
+  const rejected: Array<{ name: string; reason: string }> = []
+  for (const [index, image] of images.entries()) {
+    if (index >= MAX_IMAGE_PARTS) {
+      rejected.push({ name: image.name, reason: `beyond the ${MAX_IMAGE_PARTS}-image ceiling for one request` })
+      continue
+    }
+    if (inlinePart(image.dataUri) === null) {
+      rejected.push({ name: image.name, reason: 'not a base64 image data URI, or larger than the per-image ceiling' })
+      continue
+    }
+    usable.push(image.name)
+  }
+  return { usable, rejected }
+}
+
 export interface GcpTextInput {
   /** The system instruction: brand definition plus retrieved grounding. */
   systemInstruction: string
@@ -32,6 +106,19 @@ export interface GcpTextInput {
   maxOutputTokens: number
   /** Use the fast model for short, cheap calls like a single rewrite. */
   fast?: boolean
+  /**
+   * Images the model should actually LOOK at, as `data:` URIs.
+   *
+   * Optional, and absent on every existing caller — a request without them
+   * composes byte-identically to what this adapter has always sent, which is
+   * what keeps every caption, hook and script path unchanged.
+   *
+   * Present only where the operator attached a picture and the selected model
+   * can accept one. A model that cannot is never handed these; it is told the
+   * attachment exists and that it could not be read, which is the same
+   * "state the absence" rule the capture tier applies to a missing metric.
+   */
+  images?: Array<{ dataUri: string; name: string }>
 }
 
 interface GeminiCandidate {
@@ -134,7 +221,7 @@ export const gcpText: ServiceAdapter<GcpTextInput, string> = {
       headers: await textHeaders(),
       body: {
         systemInstruction: { parts: [{ text: input.systemInstruction }] },
-        contents: [{ role: 'user', parts: [{ text: input.prompt }] }],
+        contents: [{ role: 'user', parts: userParts(input) }],
         generationConfig: {
           temperature: input.temperature,
           ...budgetFor(model, input.maxOutputTokens),

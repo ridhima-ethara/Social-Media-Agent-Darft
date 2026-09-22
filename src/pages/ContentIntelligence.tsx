@@ -6,13 +6,12 @@
  * something is waiting on a human.
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Check, Search, X, Sparkles, ArrowRight, Brain, ExternalLink, Download, Maximize2 } from 'lucide-react'
 import { API_BASE } from '../lib/api'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
 import { PlayButton } from '../components/play-button'
-import { KeywordBoard } from '../components/keyword-board'
 import {
   Badge,
   Btn,
@@ -23,9 +22,22 @@ import {
   Tabs,
   fmt,
   timeAgo,
+  Select,
 } from '../components/ui'
 import type { Platform } from '@shared/agent-contract'
 import type { Hashtag, ScrapedItem, ValidationVerdict } from '../types'
+
+/*
+ * Rows per page in the keyword table.
+ *
+ * A presentation constant, not a pipeline tunable: it describes how many rows
+ * fit before paging beats scrolling. Nothing about what gets scored changes
+ * with it, so it is not a knob an operator would set.
+ */
+const KEYWORD_PAGE = 20
+
+/** Rows per page in the scraped-data table. Same reasoning as KEYWORD_PAGE. */
+const SCRAPED_PAGE = 20
 
 type TabId = 'keywords' | 'hashtags' | 'scraped' | 'validation' | 'analysis'
 
@@ -170,6 +182,36 @@ function KeywordsTab() {
   const signals = useStore((s) => s.keywordSignals)
   const trending = [...signals].filter((s) => s.is_trending).sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99)).slice(0, 5)
 
+  /*
+   * SHOWCASE THE KEYWORDS ACTUALLY IN PLAY, NOT THE WHOLE RECORDED SET.
+   *
+   * Content Intelligence is the discovery/showcase screen, so it shows the
+   * keywords this run actually scored — ranked by trend score — rather than
+   * every recorded keyword. The full editable keyword table (all recorded
+   * terms, add/edit/weight) lives on Settings via `<KeywordBoard compact />`,
+   * which stays the single place to manage the set.
+   */
+  const showcased = [...signals].sort(
+    (a, b) => (a.rank ?? 999) - (b.rank ?? 999) || b.trend_score - a.trend_score,
+  )
+
+  /* ── Paging the keyword table ──────────────────────────────────────────
+     A run scores well over a hundred terms and every one of them landed in a
+     single table, so reading the tail meant scrolling past everything above it
+     and losing the header on the way.
+
+     Page 1 is the highest-ranked terms, which is the order the table already
+     sorts in — paging forward walks DOWN the ranking rather than back through
+     time, so `KEYWORD_PAGE` rows is simply the top twenty, then the next twenty.
+  */
+  const keywordPages = Math.max(1, Math.ceil(showcased.length / KEYWORD_PAGE))
+  const [keywordPage, setKeywordPage] = useState(1)
+
+  // Clamped rather than reset, so a shorter list after a new run does not throw
+  // the reader back to page 1 when page 2 still exists.
+  const kwPage = Math.min(keywordPage, keywordPages)
+  const pagedSignals = showcased.slice((kwPage - 1) * KEYWORD_PAGE, kwPage * KEYWORD_PAGE)
+
   return (
     <>
       {trending.length > 0 ? (
@@ -256,7 +298,122 @@ function KeywordsTab() {
         </section>
       ) : null}
 
-      <KeywordBoard signals={signals} />
+      {showcased.length > 0 ? (
+        <section className="card overflow-hidden">
+          <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+            <div>
+              <h3 className="display text-sm">Keywords in play this week</h3>
+              <p className="mt-0.5 text-[11px] text-ink-3">
+                <span className="tabular">{showcased.length}</span> scored this run, ranked by trend score.
+                Manage the full keyword set under Settings.
+              </p>
+            </div>
+          </header>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-[12px]">
+              <thead className="bg-surface">
+                <tr className="border-b border-line text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                  <th className="px-4 py-2 font-medium">Rank</th>
+                  <th className="px-4 py-2 font-medium">Term</th>
+                  <th className="px-3 py-2 font-medium">Posts</th>
+                  <th className="px-3 py-2 font-medium">Engagement</th>
+                  <th className="px-3 py-2 font-medium">Velocity</th>
+                  <th className="px-3 py-2 font-medium">Growth</th>
+                  <th className="px-3 py-2 font-medium">Score</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedSignals.map((signal) => {
+                  const growth = Number(signal.growth_pct ?? 0)
+                  return (
+                    <tr
+                      key={signal.id}
+                      className="border-b border-line/60 transition-colors last:border-0 hover:bg-surface-2"
+                    >
+                      <td className="px-4 py-2">
+                        {signal.is_trending ? (
+                          <Badge tone="accent">#{signal.rank}</Badge>
+                        ) : (
+                          <span className="tabular text-ink-3">{signal.rank ?? '—'}</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 font-medium text-ink">{signal.term}</td>
+                      <td className="tabular px-3 py-2 text-ink-2">{signal.post_count}</td>
+                      {/* N/A, never 0 — constraint 2. A keyword read from
+                          search-indexed pages has no engagement to report, and
+                          a literal 0 here reads as "this performed badly". */}
+                      <td className="tabular px-3 py-2 text-ink-2">
+                        {(signal.measured_count ?? 0) === 0 ? (
+                          <span
+                            className="text-ink-3"
+                            title="No captured post for this keyword stated an engagement figure, so there is no total to report."
+                          >
+                            N/A
+                          </span>
+                        ) : (
+                          fmt(signal.total_engagement)
+                        )}
+                      </td>
+                      <td className="tabular px-3 py-2 text-ink-2">{Number(signal.velocity).toFixed(1)}</td>
+                      <td className={`tabular px-3 py-2 ${growth >= 0 ? 'text-good-ink' : 'text-critical-ink'}`}>
+                        {`${growth >= 0 ? '+' : ''}${growth.toFixed(0)}%`}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span
+                          className="tabular font-semibold"
+                          style={{
+                            color:
+                              signal.trend_score >= 75
+                                ? 'var(--color-good-ink)'
+                                : signal.trend_score >= 50
+                                  ? 'var(--color-accent-bright)'
+                                  : 'var(--color-ink-3)',
+                          }}
+                        >
+                          {signal.trend_score}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Stated as a range, not a page number: "21–40 of 151" answers where
+              in the ranking you are, which is the only thing this table is for. */}
+          {keywordPages > 1 ? (
+            <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-2.5">
+              <button
+                type="button"
+                disabled={kwPage <= 1}
+                onClick={() => setKeywordPage(Math.max(1, kwPage - 1))}
+                className="rounded-[7px] border border-line-strong px-2.5 py-1 text-[11px] text-ink-2 transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-line-strong disabled:hover:text-ink-2"
+              >
+                Previous
+              </button>
+              <span className="tabular text-[11px] text-ink-3">
+                {(kwPage - 1) * KEYWORD_PAGE + 1}\u2013{Math.min(kwPage * KEYWORD_PAGE, showcased.length)} of{' '}
+                {showcased.length}
+              </span>
+              <button
+                type="button"
+                disabled={kwPage >= keywordPages}
+                onClick={() => setKeywordPage(Math.min(keywordPages, kwPage + 1))}
+                className="rounded-[7px] border border-line-strong px-2.5 py-1 text-[11px] text-ink-2 transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-line-strong disabled:hover:text-ink-2"
+              >
+                Next
+              </button>
+            </div>
+          ) : null}
+        </section>
+      ) : (
+        <EmptyState
+          icon={<Search size={22} />}
+          title="No keywords scored yet"
+          body="Run discovery and the keywords in play this week will be ranked here. Manage the full keyword set under Settings."
+        />
+      )}
     </>
   )
 }
@@ -435,13 +592,58 @@ function ScrapedTab() {
 
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<ValidationVerdict | 'all'>('all')
+  /** The content-scraper specification asks for a table sorted by views, highest first. */
+  const [sort, setSort] = useState<'views' | 'engagement' | 'captured'>('views')
+  const [viralOnly, setViralOnly] = useState(false)
 
-  const rows = scraped.filter((item) => {
-    if (filter !== 'all' && item.validation !== filter) return false
-    if (query.trim().length === 0) return true
-    const haystack = `${item.title} ${item.snippet ?? ''} ${item.keyword_term ?? ''} ${item.author_name ?? ''}`.toLowerCase()
-    return haystack.includes(query.toLowerCase())
-  })
+  const rows = scraped
+    .filter((item) => {
+      if (filter !== 'all' && item.validation !== filter) return false
+      if (viralOnly && !(item.signal_flags ?? []).includes('VIRAL')) return false
+      if (query.trim().length === 0) return true
+      const haystack = `${item.title} ${item.snippet ?? ''} ${item.keyword_term ?? ''} ${item.author_name ?? ''}`.toLowerCase()
+      return haystack.includes(query.toLowerCase())
+    })
+    /*
+     * ROWS THAT STATE THE FIGURE SORT ABOVE ROWS THAT DO NOT.
+     *
+     * Sorting by views with an absent count read as 0 would bury every
+     * open-web capture at the bottom as though it had been watched by nobody.
+     * They are not the worst performers; they are unmeasured, so they sort
+     * after the measured ones as a group and the cell says so.
+     */
+    .slice()
+    .sort((a, b) => {
+      if (sort === 'captured') return b.scraped_at.localeCompare(a.scraped_at)
+      if (sort === 'engagement') {
+        if (a.metrics_available !== b.metrics_available) return a.metrics_available ? -1 : 1
+        return b.engagement - a.engagement
+      }
+      if (a.views_available !== b.views_available) return a.views_available ? -1 : 1
+      return b.views - a.views
+    })
+
+  const viralCount = scraped.filter((s) => (s.signal_flags ?? []).includes('VIRAL')).length
+
+  /* ── Paging the scraped table ─────────────────────────────────────────
+     A run leaves hundreds of captured pages here and every one of them was in
+     a single table, so the sort order only ever showed its own head and the
+     tail was reachable by scrolling alone.
+
+     Page 1 is the top of whatever sort is selected, so paging forward walks
+     down the ranking the operator chose rather than back through time. The
+     page resets whenever the filter, search or sort changes, because the list
+     underneath is then a different list and holding position in it would land
+     the reader somewhere arbitrary.
+  */
+  const scrapedPages = Math.max(1, Math.ceil(rows.length / SCRAPED_PAGE))
+  const [scrapedPage, setScrapedPage] = useState(1)
+  const sPage = Math.min(scrapedPage, scrapedPages)
+  const pagedRows = rows.slice((sPage - 1) * SCRAPED_PAGE, sPage * SCRAPED_PAGE)
+
+  useEffect(() => {
+    setScrapedPage(1)
+  }, [filter, query, sort, viralOnly])
 
   if (scraped.length === 0) {
     return (
@@ -475,6 +677,27 @@ function ScrapedTab() {
             className="w-full rounded-lg border border-line bg-surface-2 py-1.5 pl-8 pr-3 text-[12px] outline-none focus:border-accent"
           />
         </label>
+        <Select
+          value={sort}
+          onChange={(v) => setSort(v as 'views' | 'engagement' | 'captured')}
+          ariaLabel="Sort captured posts"
+          options={[
+            { value: 'views', label: 'Sort: views' },
+            { value: 'engagement', label: 'Sort: engagement' },
+            { value: 'captured', label: 'Sort: newest' },
+          ]}
+        />
+        <button
+          type="button"
+          onClick={() => setViralOnly(!viralOnly)}
+          aria-pressed={viralOnly}
+          title="Posts at or above the viral engagement rate or the play floor. Both thresholds are knobs on the validation agent."
+          className={`rounded-lg border px-3 py-1.5 text-[11.5px] font-semibold transition-colors ${
+            viralOnly ? 'border-magenta text-magenta-ink' : 'border-line text-ink-3 hover:text-ink'
+          }`}
+        >
+          VIRAL <span className="tabular">{viralCount}</span>
+        </button>
         <Tabs<ValidationVerdict | 'all'>
           active={filter}
           onChange={setFilter}
@@ -492,67 +715,175 @@ function ScrapedTab() {
         <table className="w-full min-w-[880px] text-left text-[12px]">
           <thead>
             <tr className="border-b border-line text-[10px] uppercase tracking-[0.08em] text-ink-3">
-              <th className="px-4 py-2 font-medium">Topic</th>
-              <th className="px-3 py-2 font-medium">Source</th>
+              <th className="px-4 py-2 font-medium">Hook &amp; caption</th>
               <th className="px-3 py-2 font-medium">Platform</th>
-              <th className="px-3 py-2 font-medium">Keyword</th>
-              <th className="px-3 py-2 font-medium">Engagement</th>
-              <th className="px-3 py-2 font-medium">Relevance</th>
+              <th className="px-3 py-2 font-medium">Format</th>
+              <th className="px-3 py-2 font-medium">Views</th>
+              <th className="px-3 py-2 font-medium">Likes</th>
+              <th className="px-3 py-2 font-medium">Comments</th>
+              <th className="px-3 py-2 font-medium">ER</th>
+              <th className="px-3 py-2 font-medium">Posted</th>
               <th className="px-3 py-2 font-medium">Status</th>
-              <th className="px-3 py-2 font-medium">Captured</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((item) => {
+            {pagedRows.map((item) => {
               const fresh = Date.now() - new Date(item.scraped_at).getTime() < 15 * 60_000
               return (
                 <tr key={item.id} className="border-b border-line/60 transition-colors last:border-0 hover:bg-surface-2">
-                  <td className="max-w-[320px] px-4 py-2">
-                    <span className="flex items-center gap-1.5">
-                      <span className="truncate font-medium text-ink">{item.title}</span>
-                      {fresh ? <Badge tone="magenta">NEW</Badge> : null}
+                  {/* Hook first: it is what a reader decides on, and the
+                      specification collects it as a field of its own. */}
+                  <td className="max-w-[340px] px-4 py-2">
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      {/*
+                        THE HOOK LINKS TO THE PAGE IT WAS SCRAPED FROM.
+
+                        This row carries a hook, a snippet, an author and a
+                        verdict, all lifted from a page it never named — so a
+                        row that looked wrong could not be checked against its
+                        source, which is the first thing anyone wants to do with
+                        scraped data.
+
+                        Plain text when the capture recorded no URL. Some lanes
+                        genuinely return none, and a dead link that looks live
+                        is worse than no link at all.
+                      */}
+                      {item.url ? (
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="group/src inline-flex min-w-0 items-center gap-1 truncate font-medium text-ink underline decoration-line-strong decoration-dotted underline-offset-[3px] transition-colors hover:text-accent-bright hover:decoration-accent"
+                          title={`${item.title}\n${item.url}`}
+                        >
+                          <span className="truncate">{item.hook ?? item.title}</span>
+                          <ExternalLink
+                            size={11}
+                            className="shrink-0 opacity-0 transition-opacity group-hover/src:opacity-100"
+                            aria-hidden="true"
+                          />
+                          <span className="sr-only">(opens the scraped page in a new tab)</span>
+                        </a>
+                      ) : (
+                        <span className="truncate font-medium text-ink">{item.hook ?? item.title}</span>
+                      )}
+                      {(item.signal_flags ?? []).includes('VIRAL') ? (
+                        <Badge tone="magenta">VIRAL</Badge>
+                      ) : null}
+                      {fresh ? <Badge tone="accent">NEW</Badge> : null}
                     </span>
-                    <span className="mt-0.5 block truncate text-[11px] text-ink-3">{item.snippet}</span>
+                    <span className="mt-0.5 block truncate text-[11px] text-ink-3">
+                      {item.snippet}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[10.5px] text-ink-3">
+                      {item.author_name ?? 'Unknown author'} · {item.keyword_term ?? 'no keyword'}
+                      {item.transcript === null ? '' : ' · transcribed'}
+                    </span>
                   </td>
-                  <td className="px-3 py-2 text-ink-3">{item.source_name}</td>
                   <td className="px-3 py-2 text-ink-3">{platformLabel(item.platform)}</td>
-                  <td className="px-3 py-2 text-ink-3">{item.keyword_term}</td>
-                  {/* Constraint 2: a source that stated no figure has none. An
-                      em dash is the honest cell; a zero would read as a verdict. */}
+                  <td className="px-3 py-2 text-ink-3">{item.media_format ?? '—'}</td>
+                  {/*
+                    CONSTRAINT 2, THREE TIMES OVER.
+
+                    Views, likes and engagement rate each have their OWN
+                    availability, and an em dash with a title attribute is the
+                    honest cell for each. A zero in any of these would read as a
+                    verdict on the post rather than as the absence of a figure —
+                    and "0 views" is the single most misleading thing this table
+                    could say about an article that was never a video.
+                  */}
                   <td className="tabular px-3 py-2 text-ink-2">
-                    {item.metrics_available ? (
-                      fmt(item.engagement)
+                    {item.views_available ? (
+                      fmt(item.views)
                     ) : (
-                      <span className="text-ink-3" title="This source states no engagement figures">
-                        —
+                      <span className="text-ink-3" title="This source states no play count. It is not a video that nobody watched.">
+                        n/a
                       </span>
                     )}
                   </td>
-                  <td className="px-3 py-2">
-                    <span
-                      className="tabular font-medium"
-                      style={{
-                        color:
-                          item.relevance >= 70
-                            ? 'var(--color-good-ink)'
-                            : item.relevance >= 40
-                              ? 'var(--color-warn)'
-                              : 'var(--color-critical-ink)',
-                      }}
-                    >
-                      {item.relevance}%
-                    </span>
+                  <td className="tabular px-3 py-2 text-ink-2">
+                    {item.metrics_available ? (
+                      fmt(item.reactions)
+                    ) : (
+                      <span className="text-ink-3" title="This source states no engagement figures">
+                        n/a
+                      </span>
+                    )}
+                  </td>
+                  <td className="tabular px-3 py-2 text-ink-2">
+                    {item.metrics_available ? (
+                      fmt(item.comments)
+                    ) : (
+                      <span className="text-ink-3" title="This source states no engagement figures">
+                        n/a
+                      </span>
+                    )}
+                  </td>
+                  <td className="tabular px-3 py-2">
+                    {item.engagement_rate === null ? (
+                      <span
+                        className="text-ink-3"
+                        title="Not computable: an engagement rate needs both a play count and a reaction count, and this post states only one."
+                      >
+                        n/a
+                      </span>
+                    ) : (
+                      <span
+                        className="font-medium"
+                        style={{
+                          color: (item.signal_flags ?? []).includes('viral-er')
+                            ? 'var(--color-magenta-ink)'
+                            : 'var(--color-ink-2)',
+                        }}
+                      >
+                        {item.engagement_rate}%
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-ink-3">
+                    {item.posted_at === null ? (
+                      <span title="This source stated no post date; capture time was used instead.">
+                        {timeAgo(item.scraped_at)}
+                      </span>
+                    ) : (
+                      timeAgo(item.posted_at)
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     <Badge tone={VERDICT_TONE[item.validation]}>{VERDICT_LABEL[item.validation]}</Badge>
                   </td>
-                  <td className="px-3 py-2 text-ink-3">{timeAgo(item.scraped_at)}</td>
                 </tr>
               )
             })}
           </tbody>
         </table>
       </div>
+
+      {/* Stated as a range against the filtered total, so the count agrees with
+          the tabs above it rather than with the whole capture history. */}
+      {scrapedPages > 1 ? (
+        <div className="mt-2 flex items-center justify-between gap-3 rounded-[10px] border border-line px-4 py-2.5">
+          <button
+            type="button"
+            disabled={sPage <= 1}
+            onClick={() => setScrapedPage(Math.max(1, sPage - 1))}
+            className="rounded-[7px] border border-line-strong px-2.5 py-1 text-[11px] text-ink-2 transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-line-strong disabled:hover:text-ink-2"
+          >
+            Previous
+          </button>
+          <span className="tabular text-[11px] text-ink-3">
+            {(sPage - 1) * SCRAPED_PAGE + 1}–{Math.min(sPage * SCRAPED_PAGE, rows.length)} of {rows.length}
+          </span>
+          <button
+            type="button"
+            disabled={sPage >= scrapedPages}
+            onClick={() => setScrapedPage(Math.min(scrapedPages, sPage + 1))}
+            className="rounded-[7px] border border-line-strong px-2.5 py-1 text-[11px] text-ink-2 transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-line-strong disabled:hover:text-ink-2"
+          >
+            Next
+          </button>
+        </div>
+      ) : null}
     </>
   )
 }

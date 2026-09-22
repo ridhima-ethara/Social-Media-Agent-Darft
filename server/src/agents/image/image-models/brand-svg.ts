@@ -307,6 +307,111 @@ export interface BrandLayerOptions {
  * the bottom layer and the local concept geometry is omitted, because the model
  * already provided the field. The brand layer is drawn either way.
  */
+
+/**
+ * THE CALLOUT SPINE — a labelled node per annotation, drawn as vectors.
+ *
+ * This is the shape the house references use to make artwork informative: a
+ * column of ring-nodes down the composition, a thin dotted leader running out
+ * from each, and a small-caps label at the end of it. The iceberg reference is
+ * exactly this and nothing more.
+ *
+ * ═══ WHY IT SITS ON THE RIGHT, ALWAYS ═══
+ *
+ * Every layout in `layoutGeometry` anchors its headline to the left edge at
+ * `margin`. Putting callouts on the right means the two type blocks can never
+ * collide without either needing to know about the other, so a long headline
+ * pushes nothing around and the annotations do not reflow when it wraps.
+ *
+ * The nodes span the vertical middle, clear of the kicker above and the footer
+ * and logomark below. On a canvas too short to seat `minRowHeight` per label
+ * the spine is dropped entirely rather than crushed — an unreadable label is
+ * worth less than the space it costs.
+ */
+function calloutSpine(
+  annotations: ReadonlyArray<{ label: string }>,
+  w: number,
+  h: number,
+  margin: number,
+  accent: string,
+  ink: string,
+  inkMuted: string,
+  bodyFont: string,
+): string {
+  if (annotations.length === 0) return ''
+
+  const labelSize = Math.max(9, w * 0.0145)
+  const minRowHeight = labelSize * 2.6
+  const band = h * 0.52
+
+  if (band < minRowHeight * annotations.length) return ''
+
+  /*
+   * THE LEFT COLUMN, BECAUSE IT IS THE ONLY SPACE WE CONTROL.
+   *
+   * These first sat on the right, and the painter put its hero there — six
+   * labels lying across a monolith. Asking the painter for a clear right third
+   * did not fix it: the reference clauses describe a hero, the model composes
+   * one where it wants, and the brand layer draws last and simply covers it.
+   *
+   * The left column is empty by construction. With the hook suppressed, the
+   * brand layer owns everything on this side — kicker, accent bar, footer — so
+   * the space is guaranteed clear without the painter agreeing to anything.
+   * The leaders then run rightward, INTO the artwork, which is what an
+   * annotation on a diagram is supposed to do.
+   */
+  const labelLeft = margin
+  const radius = Math.max(3, w * 0.0052)
+  const leaderGap = radius * 2.4
+
+  const rowHeight = band / annotations.length
+  const top = h / 2 - band / 2 + rowHeight / 2
+
+  return annotations
+    .map((annotation, i) => {
+      const cy = top + i * rowHeight
+      // Node sits just past the end of its own label, so the column of dots is
+      // ragged in the same way the type is and the two read as one object.
+      const labelWidth = measureLabel(annotation.label, labelSize)
+      const nodeX = labelLeft + labelWidth + labelSize * 1.1
+      const leaderStart = nodeX + leaderGap
+      const leaderEnd = Math.min(w - margin, labelLeft + w * 0.42)
+
+      // A leader shorter than this reads as a smudge rather than a connector,
+      // so the label stands alone and the node keeps its place in the column.
+      const leader =
+        leaderEnd - leaderStart > labelSize
+          ? `<line x1="${leaderStart.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${leaderEnd.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${inkMuted}" stroke-width="1" stroke-dasharray="2 4" opacity="0.55"/>`
+          : ''
+
+      return `<g>
+    <circle cx="${nodeX.toFixed(1)}" cy="${cy.toFixed(1)}" r="${(radius * 2.1).toFixed(1)}" fill="${accent}" opacity="0.18"/>
+    <circle cx="${nodeX.toFixed(1)}" cy="${cy.toFixed(1)}" r="${radius.toFixed(1)}" fill="none" stroke="${accent}" stroke-width="${Math.max(1.2, w * 0.0016).toFixed(1)}"/>
+    <circle cx="${nodeX.toFixed(1)}" cy="${cy.toFixed(1)}" r="${(radius * 0.34).toFixed(1)}" fill="${ink}"/>
+    ${leader}
+    <text x="${labelLeft.toFixed(1)}" y="${(cy + labelSize * 0.36).toFixed(1)}" text-anchor="start" font-family="${bodyFont}, Inter, system-ui, sans-serif" font-size="${labelSize.toFixed(1)}" font-weight="500" letter-spacing="0.14em" fill="${ink}">${esc(annotation.label.toUpperCase())}</text>
+  </g>`
+    })
+    .join('\n  ')
+}
+
+/**
+ * Approximate rendered width of a small-caps label.
+ *
+ * SVG has no text metrics without a layout engine, so this estimates from the
+ * character count at the tracking the labels are drawn with. It only decides
+ * where a dotted leader stops, so an estimate a few pixels out costs nothing —
+ * whereas measuring properly would mean shipping a font metrics table.
+ */
+function measureLabel(label: string, fontSize: number): number {
+  return label.length * fontSize * 0.72
+}
+
+/** The kicker's type size, needed before the geometry that positions it. */
+function kickerSizeFor(w: number): number {
+  return Math.max(10, w * 0.019)
+}
+
 export function renderBrandSvg(
   request: RenderRequest,
   options: BrandLayerOptions = {},
@@ -326,7 +431,32 @@ export function renderBrandSvg(
   // Shrink slightly when the headline needs four lines, so it stays inside the
   // safe area on the smaller canvases.
   const fontSize = lines.length >= 4 ? baseSize * 0.86 : baseSize
-  const geo = layoutGeometry(request.layout, w, h, margin, lines.length, fontSize)
+  const baseGeo = layoutGeometry(request.layout, w, h, margin, lines.length, fontSize)
+
+  /*
+   * THE KICKER MOVES OUT OF THE LABEL COLUMN'S WAY.
+   *
+   * `layoutGeometry` seats the kicker immediately above the headline, which is
+   * correct while there IS a headline. With the hook suppressed and a spine of
+   * labels running down the same left column, that position lands the kicker in
+   * the middle of the list — it rendered directly across a label, reading as a
+   * seventh annotation that had somehow been styled differently.
+   *
+   * Annotated creatives therefore lift it to the top of the column, above the
+   * band the spine occupies, where it reads as the eyebrow it is. The accent bar
+   * follows it. Unannotated creatives are untouched.
+   */
+  const annotated = (request.annotations ?? []).length > 0
+  const spineTop = h / 2 - h * 0.52 / 2
+  const geo = annotated
+    ? {
+        ...baseGeo,
+        x: margin,
+        anchor: 'start',
+        kickerY: Math.min(baseGeo.kickerY, spineTop - kickerSizeFor(w) * 2.6),
+        barY: Math.min(baseGeo.barY, spineTop - kickerSizeFor(w) * 1.6),
+      }
+    : baseGeo
 
   const kickerSize = Math.max(10, w * 0.019)
   const footerSize = Math.max(10, w * 0.017)
@@ -342,7 +472,16 @@ export function renderBrandSvg(
   <circle cx="${(w * 0.16).toFixed(1)}" cy="${(h * 0.86).toFixed(1)}" r="${(w * 0.24).toFixed(1)}" fill="${p.via}" opacity="${(alpha * 0.3).toFixed(3)}"/>
   ${conceptGeometry(request.concept, w, h, request.accentIntensity, seed)}`
 
-  const headlineLines = lines
+  /*
+   * THE HOOK IS THE CAPTION'S JOB, NOT THE CANVAS'S.
+   *
+   * Suppressing the headline is what turns this from a poster into a diagram:
+   * the annotated structure becomes the content of the image rather than
+   * decoration behind a sentence the reader is about to read anyway.
+   */
+  const headlineLines = !(request.showHeadline ?? false)
+    ? ''
+    : lines
     .map(
       (line, i) =>
         `<text x="${geo.x.toFixed(1)}" y="${(geo.headlineTop + i * fontSize * 1.18).toFixed(1)}" text-anchor="${geo.anchor}" font-family="${BRAND.visual.displayFont}, Inter, system-ui, sans-serif" font-size="${fontSize.toFixed(1)}" font-weight="600" letter-spacing="-0.015em" fill="${INK}">${esc(line)}</text>`,
@@ -353,6 +492,11 @@ export function renderBrandSvg(
     geo.barY > 0
       ? `<rect x="${geo.x.toFixed(1)}" y="${geo.barY.toFixed(1)}" width="${(w * 0.072).toFixed(1)}" height="${Math.max(4, w * 0.005).toFixed(1)}" rx="${Math.max(2, w * 0.0025).toFixed(1)}" fill="${ACCENT}"/>`
       : ''
+
+  const callouts = calloutSpine(
+    request.annotations ?? [],
+    w, h, margin, ACCENT, INK, INK_MUTED, BRAND.visual.bodyFont,
+  )
 
   const mark = request.showLogomark
     ? logomark(w - margin - w * 0.024, h - margin - w * 0.024, w * 0.048)
@@ -370,6 +514,7 @@ export function renderBrandSvg(
   ${accentBar}
   <text x="${geo.x.toFixed(1)}" y="${geo.kickerY.toFixed(1)}" text-anchor="${geo.anchor}" font-family="${BRAND.visual.bodyFont}, Inter, system-ui, sans-serif" font-size="${kickerSize.toFixed(1)}" font-weight="500" letter-spacing="0.18em" fill="${ACCENT_LIGHT}">${esc(request.kicker.toUpperCase())}</text>
   ${headlineLines}
+  ${callouts}
   <text x="${geo.x.toFixed(1)}" y="${(h - margin * 0.55).toFixed(1)}" text-anchor="${geo.anchor}" font-family="${BRAND.visual.bodyFont}, Inter, system-ui, sans-serif" font-size="${footerSize.toFixed(1)}" fill="${INK_MUTED}">${esc(request.footer)}</text>
   ${mark}
 </svg>`

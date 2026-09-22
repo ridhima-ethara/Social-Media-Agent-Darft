@@ -38,6 +38,37 @@ export interface ToolSpec {
   returns: string
   /** Required when risk === 'irreversible'. Rendered into the confirm card. */
   confirmTemplate?: string
+  /**
+   * Stops at the confirmation gate even though the tool is only `mutating`.
+   *
+   * WHY A SECOND WAY TO REACH THE GATE. Risk classes answer "can this be
+   * undone". Calendar edits can — a post moved to Thursday moves back — so
+   * calling them `irreversible` to force a confirm would be a lie, and it would
+   * put them in the same class as publishing, which genuinely cannot be undone.
+   *
+   * But reversible is not the same as harmless. A bulk move rewrites a week of
+   * scheduling in one step, and "move all LinkedIn posts to mornings" is a
+   * sentence whose blast radius an operator cannot picture before they see it.
+   * So these stop and show the exact before/after, while the risk class keeps
+   * telling the truth about reversibility.
+   *
+   * ═══ WHICH TOOLS CARRY IT, AND WHY NOT ALL OF THEM ═══
+   *
+   * Only the BULK tools: `calendar.swap`, `calendar.bulk.move`,
+   * `calendar.spread`, and `calendar.reshuffle`. One sentence there rewrites a
+   * week, and nobody can picture the blast radius before seeing it.
+   *
+   * Single-idea edits — `idea.move`, `idea.promote`, `idea.demote` — do NOT
+   * carry it. They briefly did, and it was wrong: "move that to Friday" names
+   * one post, its effect is obvious from the sentence, and a gate in front of
+   * it turns a one-second instruction into a two-step dialogue. Confirming
+   * everything is how people learn to confirm without reading, which costs more
+   * than it protects on the one instruction that deserved a pause.
+   *
+   * `alsoConfirmMutating` remains the blanket setting for every mutating tool;
+   * this is per-tool and is not switchable off.
+   */
+  confirmsAlways?: boolean
   /** Utterances that should route here — also the parser's grammar. */
   examples: string[]
   /** Optional grouping for the Capabilities accordion in the console. */
@@ -528,6 +559,7 @@ export const TOOLS: ToolSpec[] = [
       'Re-ranks the week and re-draws the top slots against a stated preference, and stores the preference so the next run honours it too.',
     agentId: 'calendar',
     risk: 'mutating',
+    confirmsAlways: true,
     args: z
       .object({
         platform: platformEnum.optional().describe('Favour this platform for the calendar slots'),
@@ -575,6 +607,100 @@ export const TOOLS: ToolSpec[] = [
   },
 
   /* ── Drafting ──────────────────────────────────────────────────────────── */
+  /* ── Calendar, in bulk ─────────────────────────────────────────────────
+   *
+   * Everything above acts on ONE idea. These three act on a set, which is the
+   * shape most real calendar instructions actually take — "move all LinkedIn
+   * posts to mornings", "swap Tuesday and Thursday", "spread these across the
+   * week". Expressing those as a chain of single moves would blow the
+   * eight-step plan ceiling on a normal week and would apply half a change if a
+   * step failed partway.
+   *
+   * All three stop at the confirmation gate and show the exact before/after,
+   * then re-read the calendar afterwards and report any slot that did not land
+   * where it was asked to.
+   */
+  {
+    id: 'calendar.swap',
+    name: 'Swap two slots',
+    summary: 'Exchanges the days and times of two scheduled posts, so each takes the other\u2019s slot.',
+    agentId: 'calendar',
+    risk: 'mutating',
+    confirmsAlways: true,
+    args: z
+      .object({
+        firstDay: dayRef.optional().describe('One day, when swapping whole days'),
+        secondDay: dayRef.optional().describe('The other day'),
+        firstId: z.string().optional().describe('One idea, by id'),
+        secondId: z.string().optional().describe('The other idea, by id'),
+        platform: platformEnum.optional().describe('Limit a day swap to one platform'),
+      })
+      .strict(),
+    returns: 'Both slots after the exchange, and a line per post naming where it moved from and to.',
+    group: 'Calendar',
+    examples: [
+      'swap tuesday and thursday',
+      'swap the tuesday and friday posts',
+      'exchange wednesday with monday',
+      'swap those two posts',
+      'switch thursday and tuesday on linkedin',
+    ],
+  },
+  {
+    id: 'calendar.bulk.move',
+    name: 'Move several posts',
+    summary: 'Moves every post matching a filter to a new day, a new time of day, or both.',
+    agentId: 'calendar',
+    risk: 'mutating',
+    confirmsAlways: true,
+    args: z
+      .object({
+        platform: platformEnum.optional().describe('Only posts on this platform'),
+        fromDay: dayRef.optional().describe('Only posts currently on this day'),
+        topic: z.string().optional().describe('Only posts whose title or topic contains this'),
+        day: dayRef.optional().describe('The day to move them to'),
+        time: z.string().optional().describe('The time to move them to, e.g. 9:00 AM'),
+        timeOfDay: z
+          .enum(['morning', 'afternoon', 'evening'])
+          .optional()
+          .describe('A band rather than an exact time'),
+      })
+      .strict(),
+    returns: 'Every post that moved, with its old and new slot, and every post that did not and why.',
+    group: 'Calendar',
+    examples: [
+      'move all linkedin posts to mornings',
+      'shift everything on tuesday to wednesday',
+      'move the RL posts to the afternoon',
+      'put all instagram posts at 6pm',
+      'move everything on monday to friday',
+    ],
+  },
+  {
+    id: 'calendar.spread',
+    name: 'Spread posts across days',
+    summary: 'Distributes a set of posts evenly across the days given, one per day before any day takes a second.',
+    agentId: 'calendar',
+    risk: 'mutating',
+    confirmsAlways: true,
+    args: z
+      .object({
+        days: z.array(dayRef).min(1).describe('The days to spread across'),
+        platform: platformEnum.optional().describe('Only posts on this platform'),
+        topic: z.string().optional().describe('Only posts whose title or topic contains this'),
+        limit: z.number().int().min(1).max(20).optional().describe('At most this many posts'),
+      })
+      .strict(),
+    returns: 'The resulting day-by-day placement, and a line per post naming why it landed where it did.',
+    group: 'Calendar',
+    examples: [
+      'spread the RL posts across the week',
+      'spread these across tuesday thursday and friday',
+      'distribute the linkedin posts over the week',
+      'spread them out across monday to friday',
+      'even out the posts across the week',
+    ],
+  },
   {
     id: 'draft.generate',
     name: 'Write a draft',
@@ -767,6 +893,154 @@ export const TOOLS: ToolSpec[] = [
   },
 
   /* ── Analytics ─────────────────────────────────────────────────────────── */
+  /* ── Short-form: scripts, hooks and the learned voice (ADR-007) ────────── */
+  {
+    id: 'script.write',
+    name: 'Write a short-form script',
+    summary:
+      'Writes the beat-structured spoken script for an idea whose content format is a short-form script, and generates its hook variants.',
+    agentId: 'caption',
+    risk: 'mutating',
+    args: z
+      .object({
+        id: z.string().optional().describe('The idea id'),
+        title: z.string().optional().describe('The idea, by title'),
+        day: dayRef.optional().describe('The idea scheduled on this day'),
+      })
+      .strict(),
+    returns: 'The script, its hook variants, and which model wrote each.',
+    group: 'Content',
+    examples: [
+      'write the script for that idea',
+      'draft the reel script',
+      'write a short form script for thursday',
+      'turn that into a video script',
+      'script that one',
+    ],
+  },
+  {
+    id: 'hook.generate',
+    name: 'Generate hooks',
+    summary:
+      'Writes one hook per declared pattern for an idea and scores each against the stored posts it resembles, leaving a hook with no comparable post unscored and saying why.',
+    agentId: 'caption',
+    risk: 'mutating',
+    args: z
+      .object({
+        id: z.string().optional().describe('The idea id'),
+        title: z.string().optional().describe('The idea, by title'),
+        day: dayRef.optional().describe('The idea scheduled on this day'),
+      })
+      .strict(),
+    returns: 'Each hook with its pattern, its confidence where one could be derived, and the evidence behind it.',
+    group: 'Content',
+    examples: [
+      'generate hooks for that idea',
+      'give me five hooks',
+      'write some hook options',
+      'what hooks could open this reel',
+      'regenerate the hooks',
+    ],
+  },
+  {
+    id: 'hook.list',
+    name: 'List hooks',
+    summary: 'The hook variants stored for an idea, with the evidence behind each confidence.',
+    agentId: 'caption',
+    risk: 'safe',
+    args: z
+      .object({
+        id: z.string().optional(),
+        title: z.string().optional(),
+        day: dayRef.optional(),
+      })
+      .strict(),
+    returns: 'Every stored variant, its pattern, its rank and which one is selected.',
+    group: 'Content',
+    examples: [
+      'show me the hooks for that idea',
+      'what hooks do we have',
+      'list the hook options',
+      'which hook is selected',
+      'read me the hooks',
+    ],
+  },
+  {
+    id: 'voice.profile.list',
+    name: 'List voice profiles',
+    summary:
+      'The learned voice profiles and how many stored samples each rests on. A profile governs short-form scripts only; posts follow the brand rules.',
+    agentId: 'caption',
+    risk: 'safe',
+    args: z.object({}).strict(),
+    returns: 'Each profile with its sample count, when it was derived, and whether it is active.',
+    group: 'Content',
+    examples: [
+      'what voice profiles do we have',
+      'show me the learned voice',
+      'how many voice samples are stored',
+      'is there an active voice profile',
+      'list voice profiles',
+    ],
+  },
+  {
+    id: 'voice.profile.derive',
+    name: 'Derive a voice profile',
+    summary:
+      'Derives a voice profile by counting what the stored samples actually do. Refuses below the sample floor and names the count it has.',
+    agentId: 'caption',
+    risk: 'mutating',
+    args: z.object({}).strict(),
+    returns: 'The derived profile and the sample count behind it, or a refusal naming how many samples are missing.',
+    group: 'Content',
+    examples: [
+      'derive the voice profile',
+      'learn our voice from the samples',
+      'rebuild the voice profile',
+      'update the learned voice',
+      'derive voice',
+    ],
+  },
+  {
+    id: 'account.track',
+    name: 'Track an account',
+    summary: 'Adds a handle to the tracked-account capture lane, or reactivates one that was switched off.',
+    agentId: 'scraping',
+    risk: 'mutating',
+    args: z
+      .object({
+        platform: platformEnum,
+        handle: z.string().min(1).describe('The account handle, with or without the @'),
+        label: z.string().optional().describe('What to call it on screen'),
+      })
+      .strict(),
+    returns: 'The tracked account, and whether it was newly added or reactivated.',
+    group: 'Discovery',
+    examples: [
+      'track @openai on x',
+      'start watching that account',
+      'add a competitor handle',
+      'follow anthropic on linkedin',
+      'track this account',
+    ],
+  },
+  {
+    id: 'account.list',
+    name: 'List tracked accounts',
+    summary: 'The accounts the tracked-account lane reads, and when each was last captured.',
+    agentId: 'scraping',
+    risk: 'safe',
+    args: z.object({}).strict(),
+    returns: 'Each tracked account with its platform, whether it is active, and when it was last read.',
+    group: 'Discovery',
+    examples: [
+      'which accounts are we tracking',
+      'list tracked accounts',
+      'show me the competitor handles',
+      'who are we watching',
+      'tracked accounts',
+    ],
+  },
   {
     id: 'analytics.query',
     name: 'Query analytics',
@@ -938,6 +1212,11 @@ export function requiresConfirmation(risk: ToolRisk, alsoConfirmMutating = false
   if (risk === 'irreversible') return true
   if (alsoConfirmMutating && risk === 'mutating') return true
   return false
+}
+
+/** True when ANY step's tool insists on the gate regardless of its risk class. */
+export function anyStepConfirmsAlways(toolIds: readonly string[]): boolean {
+  return toolIds.some((id) => TOOL_BY_ID[id]?.confirmsAlways === true)
 }
 
 /** Renders a tool's confirm template against the resolved arguments. */

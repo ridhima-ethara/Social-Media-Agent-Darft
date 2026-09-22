@@ -10,7 +10,7 @@
 - **Id**: `caption`
 - **Stage**: `create`
 - **Hands off to**: `image`
-- **Skills**: 10
+- **Skills**: 14
 - **Handlers**: `server/src/agents/caption/handlers.ts`
 
 Writes the post. Retrieves the Knowledge Base entries for the originating hashtag and uses them as the grounding for the model call, builds the caption through the nine-stage structure, adapts it per platform, and passes the result through the brand-voice enforcer unconditionally.
@@ -24,6 +24,7 @@ Decides whether this post is written long-form, as a short observation, or as a 
 | Knob | Default | Description |
 |---|---|---|
 | `mode` | `Auto` | Auto follows the recommended format. The others force one shape regardless of what the Analysis Agent suggested. |
+| `stance` | `Rotate` | The argumentative shape of the post, separate from the writing mode. Rotate mixes the three across the week so a calendar does not repeat one shape. "How Ethara thinks" gives our reading of a scraped topic. "Problem and solution" states the problem, what Ethara does about it, and where the world is moving. A stance that has no Knowledge Base corpus entry behind it degrades to Default and says why — it is never satisfied by the positioning line. |
 | `preferModel` | `true` | Off forces the deterministic template writer even when Google Cloud is configured. The output shape is identical either way. |
 
 ### `generation.caption.voice`
@@ -117,4 +118,52 @@ Adds the citation the caption rests on, where the platform and the grounding bot
 |---|---|---|
 | `enabled` | `true` | Off, citations stay in the Knowledge Base and never appear on the post. |
 | `placement` | `End of post` | LinkedIn suppresses reach on posts with outbound links in the body, so end of post or first comment is usually right. |
+
+### `caption.voice.derive`
+
+Reads the stored samples for one content format and records what it OBSERVES in them — vocabulary, sentence length, opening and closing shape, how a call to action is phrased.
+
+| Knob | Default | Description |
+|---|---|---|
+| `voiceSampleMinimum` | `20` | How many stored samples must exist before a profile may be derived at all. Below it the skill refuses and names the count it actually has, because a "learned voice" from four scripts is a claim the evidence does not support. The specification asks for 20 to 30. |
+| `maxSamples` | `40` | A ceiling on how many of the most recent samples are read. Beyond a point more samples stop sharpening the profile and only lengthen the derivation. |
+| `vocabularyTerms` | `40` | How many of the most distinctive terms are kept on the profile. These are counted from the samples, never invented — the profile is an observation, and this is how much of the observation is stored. |
+| `minTermOccurrences` | `3` | A term must appear this many times across the samples before it is treated as characteristic. One appearance is the subject of one script, not a habit of the writer. |
+
+### `caption.script.write`
+
+Writes the spoken script as an ordered set of beats ending in a call to action, grounded in the Knowledge Base and in the voice profile for this format — and deliberately without a hook, which is a separate skill.
+
+| Knob | Default | Description |
+|---|---|---|
+| `scriptBeatCount` | `3` | How many beats the script works through before its call to action. Three is the specification’s structure. Each beat is one move in the argument; more beats means a longer read-to-camera. |
+| `sentencesPerBeat` | `3` | The ceiling on each beat. The specification says two to three, on the grounds that the speaker talks fast; going over turns a beat into a paragraph nobody can deliver. |
+| `temperature` | `55` | How much latitude the model has. Lower is flatter and more repeatable; higher varies the phrasing between scripts, which is what stops two scripts on neighbouring topics reading identically. The compliance check runs after generation either way, so this cannot loosen it. |
+| `includeHook` | `false` | Off, and it should stay off: the hook is generated separately as several competing variants, and a script that already opens with one produces two first lines that fight each other. On exists only for exporting a single self-contained block. |
+| `requireCta` | `true` | On, the script ends by asking the viewer to do one specific thing. Off ends on the last beat, which reads as a stop rather than a close. |
+| `useVoiceProfile` | `true` | On, the active profile for this format shapes the phrasing. Off writes in the brand register alone. Either way the profile governs SHORT-FORM only — it is never consulted for a post, and it cannot relax a brand rule. |
+
+### `caption.hook.generate`
+
+Writes one hook per declared pattern, each within the spoken-length ceiling, so the operator chooses between real alternatives rather than regenerating one line repeatedly.
+
+| Knob | Default | Description |
+|---|---|---|
+| `hookVariantCount` | `5` | How many variants to produce. There are five declared patterns and one hook per pattern, so five is the whole set; below it the weakest-fitting patterns are dropped in order and the run says which. |
+| `hookMaxLines` | `2` | The hard ceiling on a hook’s length in lines. Past this it stops being something said before the viewer decides to stay. |
+| `hookMaxSpokenSeconds` | `4` | How long a hook may take to say. Converted to a word ceiling at the speaking rate below, because a model can count words and cannot time speech. |
+| `spokenWordsPerMinute` | `150` | The rate used to turn the spoken-length ceiling into a word count. 150 is an ordinary conversational pace; raise it if the delivery is genuinely faster, and the hooks get correspondingly longer. |
+| `temperature` | `70` | Higher than the script’s on purpose: five hooks that all sound the same defeat the point of writing five. The patterns keep them structurally distinct; this is what keeps them lexically distinct. |
+| `minDivergence` | `30` | How different two hooks must be from each other to both be kept. A variant too close to one already written is regenerated once and then dropped with the reason recorded, rather than shipped as a fake alternative. |
+
+### `caption.hook.score`
+
+Finds the stored post each hook most resembles and derives a confidence from that post’s real measured performance — or returns no score and says why no comparison was possible.
+
+| Knob | Default | Description |
+|---|---|---|
+| `minMatchSimilarity` | `35` | How similar a hook must be to a stored post before that post counts as evidence about it. Below this there is no comparison to make, and the honest output is no score — not a low one. |
+| `lookbackDays` | `180` | The window of stored posts a hook may be compared against. Older posts were measured under a different audience and a different feed, so a confidence derived from them is a weaker claim than it looks. |
+| `minComparisons` | `1` | How many matching stored posts must be found before a confidence is derived at all. Raising it makes every score rest on more evidence and leaves more hooks unscored, which is the honest trade and not a loss. |
+| `includeCaptured` | `true` | On, other accounts’ captured posts count as comparisons alongside our own published ones — useful early, when the account has published little. The basis line always names which kind of post it used, because "this resembles a reel of ours that did well" and "this resembles someone else’s reel that did well" are different claims. |
 

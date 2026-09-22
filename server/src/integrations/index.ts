@@ -48,6 +48,7 @@ export {
   type GcpTextInput,
   type PaintedBackground,
   type TemplateRewriteResult,
+  usableImageParts,
   type TemplateWriterInput,
 } from './gcp-llm'
 
@@ -76,7 +77,21 @@ export {
   type EmbedInput,
   type EmbedOutcome,
 } from './embeddings'
-export { apifySearch, rawPostEngagement } from './apify'
+/*
+ * `rawPostEngagement` is gone with the HTTP client. It weighted a RawPost's
+ * counts and had no caller outside this barrel — the pipeline's engagement
+ * weighting lives in `agents/corpus.ts`, where the Validation Agent reads it.
+ */
+export { apifySearch, actorLabelFor, explainApifyFailure } from './apify'
+
+export {
+  describeWhisper,
+  transcriptionBudget,
+  whisperPython,
+  whisperTranscribe,
+  type TranscribeInput,
+  type TranscribeOutput,
+} from './whisper'
 
 export {
   captureChainFor,
@@ -94,6 +109,7 @@ import { apifySearch } from './apify'
 import { gcpImage, gcpText } from './gcp-llm'
 import { ollamaImage, ollamaText } from './ollama'
 import { parallelResearch } from './parallel'
+import { whisperTranscribe } from './whisper'
 
 /** Every adapter in the product, for a single reachability sweep. */
 export function allAdapters() {
@@ -104,6 +120,10 @@ export function allAdapters() {
     gcpImage,
     ollamaText,
     ollamaImage,
+    // R7: a new adapter joins the boot sweep and `/api/health` the day it is
+    // written, not the day someone remembers. An unreported adapter is one
+    // whose absence is discovered from a failed run.
+    whisperTranscribe,
   ]
 }
 

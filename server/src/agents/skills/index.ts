@@ -11,12 +11,14 @@
 
 import type {
   Confidence,
+  ContentFormat,
+  HookPattern,
   Platform,
   ValidationVerdict,
 } from '../../../../shared/agent-contract'
 import type { ImageConcept, ImageModelId } from '../../../../shared/image-models'
 import type { BrandCheck } from '../../../../shared/brand-voice'
-import type { ContentFormat } from '../corpus'
+import type { EditorialFormat } from '../corpus'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    DISCOVER
@@ -61,6 +63,43 @@ export interface ScrapedPost {
    * readable as "not applicable" rather than as zero (constraint 2).
    */
   metricsAvailable: boolean
+  /**
+   * Plays, and whether the lane stated any. A THIRD state, deliberately not
+   * folded into `metricsAvailable` — see `capture.ts` and ADR-009. Every
+   * view-derived figure runs over `viewsAvailable` rows only.
+   */
+  views: number
+  viewsAvailable: boolean
+  /** The post's own opening line — what a reader decides on. */
+  hook: string
+  /**
+   * (reactions + comments) / views, as a percentage, or `null`.
+   *
+   * `null` means NOT COMPUTABLE — the post stated one of the two figures and
+   * not the other. It never means zero, which would be the much stronger claim
+   * that the post was seen and ignored.
+   */
+  engagementRate: number | null
+  /** reel | short | video | post | article. */
+  mediaFormat: string
+  /**
+   * The spoken words of a captured video, or `null` for "not transcribed".
+   *
+   * `null` and `''` are different facts and stay different all the way to the
+   * column: `''` would mean the transcriber ran and heard nothing. Filled by
+   * `scraping.transcript.fetch`; stays `null` when the Whisper sidecar is not
+   * configured, which is a supported configuration (ADR-011).
+   *
+   * UNTRUSTED. It goes through `prepareEvidence()` before any model sees it.
+   */
+  transcript: string | null
+  transcriptSource: string | null
+  transcriptConfidence: number | null
+  /**
+   * Flags raised by `validation.item.filter` — `high-signal-views`, `viral-er`.
+   * A flag is an observation with a stated threshold behind it, never a verdict.
+   */
+  signalFlags: string[]
   /**
    * 0–100. How well the body aligns with the brand topic set and the live
    * Knowledge Base, scored at capture by `scraping.linkedin.fetch`. Anything
@@ -138,6 +177,35 @@ export interface HashtagCandidate {
   inTopSet: boolean
 }
 
+/**
+ * A term the corpus surfaced that is not in the keyword set (ADR-012).
+ *
+ * Every count here travels with the number of rows it was measured over, so the
+ * emergence score can divide by what was actually measured rather than by the
+ * post count. A candidate surfaced entirely by open-web captures has
+ * `measuredPosts: 0`, and its engagement is absent rather than zero.
+ */
+export interface KeywordCandidate {
+  term: string
+  /** Distinct captured posts carrying it. A repeat inside one post is not two. */
+  posts: number
+  /** Distinct authors. Unattributed posts count as one shared unknown. */
+  distinctAuthors: number
+  totalEngagement: number
+  measuredPosts: number
+  totalViews: number
+  viewedPosts: number
+  /** Mean brand alignment of the posts carrying it, 0-100. */
+  brandRelevance: number
+  /** Up to three URLs, so the candidate can be checked rather than trusted. */
+  examples: string[]
+  /* Written by `validation.keyword.emerge`. */
+  emergenceScore?: number
+  emergenceReason?: string
+  stored?: boolean
+  activated?: boolean
+}
+
 export interface CompetitorPostRecord {
   competitor: string
   text: string
@@ -165,6 +233,14 @@ export interface KeywordTrend {
   term: string
   postCount: number
   totalEngagement: number
+  /**
+   * How many of this keyword's posts stated an engagement figure.
+   *
+   * Zero means the total is N/A, not nil. Travels beside `totalEngagement`
+   * rather than being inferred from it, because `0` is a legitimate measured
+   * total and indistinguishable from an unmeasured one otherwise.
+   */
+  measuredCount: number
   avgEngagement: number
   velocity: number
   growthPct: number
@@ -177,6 +253,18 @@ export interface KeywordTrend {
   isTrending: boolean
   trendReason: string
   priorRuns: number
+  /**
+   * "This has come up N times." Set by `validation.signal.repeat` from stored
+   * `keyword_signals` rows, never inferred from this run alone.
+   */
+  isRepeatSignal?: boolean
+  repeatCount?: number
+  /**
+   * "This held its rank." A DIFFERENT claim from the one above — recurrence is
+   * not continuity — which is why two skills write two fields.
+   */
+  isSustainedSignal?: boolean
+  sustainedRuns?: number
   /** LinkedIn content search for the term — a URL the operator can open. */
   searchUrl: string
   /** The strongest post for the keyword this run, by engagement. */
@@ -229,7 +317,7 @@ export interface Opportunity {
   capturedRelevance: number
   predictedEngagement: number
   engagementLevel: string
-  format: ContentFormat
+  format: EditorialFormat
   angle: string
   audience: string
   saturation: number
@@ -259,7 +347,7 @@ export interface PlannedIdea {
   platformRank: number | null
   calendarSlot: 'primary' | 'suggestion'
   isNewTrend: boolean
-  format: ContentFormat
+  format: EditorialFormat
   angle: string
   audience: string
   brandRelevance: number
@@ -295,6 +383,17 @@ export interface CaptionPayload extends Record<string, unknown> {
   format: string
   /* Produced along the way. */
   writingMode?: string
+  /**
+   * The argumentative shape of the post, resolved before the hook is written.
+   * Separate from `writingMode`: the stance decides what the post argues, the
+   * mode decides how plainly it is expressed. See the caption-writing skill.
+   */
+  stance?: 'default' | 'how-ethara-thinks' | 'problem-solution-trajectory'
+  /**
+   * Why the resolved stance is not the one that was asked for — set only when a
+   * stance degraded for want of grounding, never when it was honoured.
+   */
+  stanceDegradedReason?: string
   grounding?: GroundingEntry[]
   voiceInstruction?: string
   hook?: string
@@ -312,6 +411,56 @@ export interface CaptionPayload extends Record<string, unknown> {
   captionModel?: string
   captionFallbackReason?: string
   brandNotes?: string[]
+
+  /* ── The short-form branch (ADR-007) ──────────────────────────────────────
+   * Present on the same payload rather than a second one: the two paths share
+   * grounding retrieval, and splitting the type would mean two retrievals or a
+   * cast between them.
+   */
+  contentFormat?: ContentFormat
+  /** `null` with a reason when the sample floor was not met. Never a stub. */
+  voiceProfile?: VoiceProfileShape | null
+  voiceProfileReason?: string | null
+  voiceProfileId?: string | null
+  script?: string
+  scriptSource?: 'live' | 'fixture'
+  scriptModel?: string
+  scriptFallbackReason?: string
+  hooks?: Array<{ pattern: HookPattern; body: string; rank: number }>
+  /** Written by `caption.hook.score`. A null confidence is a real outcome. */
+  scoredHooks?: ScoredHook[]
+  hookSource?: 'live' | 'fixture'
+  hookModel?: string
+  hookFallbackReason?: string
+  /** Patterns that were not written, each with the reason. */
+  hookNotes?: string[]
+}
+
+/** What a derived voice profile looks like once it has crossed the payload. */
+export interface VoiceProfileShape {
+  id: string
+  name: string
+  content_format: ContentFormat
+  sample_count: number
+  derived_at: string
+}
+
+/**
+ * A hook with its evidence, or with the stated absence of any.
+ *
+ * `confidence: null` is a FIRST-CLASS OUTCOME, not a missing value — it means
+ * no stored post resembled this hook closely enough to say anything about it.
+ * `confidenceBasis` is always present and always names either the evidence or
+ * its absence, which is what stops a score being a bare assertion.
+ */
+export interface ScoredHook {
+  pattern: HookPattern
+  body: string
+  rank: number
+  confidence: number | null
+  confidenceBasis: string
+  matchedPostId: string | null
+  matchedItemId: string | null
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -327,6 +476,11 @@ export interface ImagePayload extends Record<string, unknown> {
   /** Produced along the way. */
   concept?: ImageConcept
   references?: string[]
+  /** Licensed by `agents/image/annotations.ts`; drawn as vectors, never prompted. */
+  annotations?: Array<{ label: string; citation: string; reason: string }>
+  labelCitations?: Array<{ label: string; citation: string }>
+  unsupportedLabels?: string[]
+  showHeadline?: boolean
   layout?: string
   headline?: string
   kicker?: string
@@ -366,7 +520,22 @@ export interface ReviewPayload extends Record<string, unknown> {
   /** The caption model the operator chose in the review panel, if any. */
   captionModel?: string
   /** Files the operator attached for the model to work from. */
-  references?: Array<{ name: string; mimeType: string; text?: string; note?: string }>
+  /**
+   * Files the operator attached.
+   *
+   * `image` carries the actual bytes as a `data:` URI, and is the difference
+   * between a model being TOLD an image exists and being able to see it. It is
+   * present only for image attachments, and only survives to a model that can
+   * accept image parts — a text-only writer still receives the name and a note
+   * saying it could not be read, exactly as before.
+   */
+  references?: Array<{
+    name: string
+    mimeType: string
+    text?: string
+    note?: string
+    image?: string
+  }>
   /** Produced along the way. */
   revisedBody?: string
   appliedNote?: string
@@ -380,6 +549,25 @@ export interface ReviewPayload extends Record<string, unknown> {
   revisionApplied?: boolean
   /** Why the text model was not used, when it was not. */
   revisionFallbackReason?: string
+  /**
+   * One line per attachment saying whether the chosen model actually read it.
+   *
+   * The panel renders these on the chips. Without them "Attached by name only"
+   * was the only label available, and it was shown whether the file was
+   * unreadable or the model simply could not see pictures — two different
+   * facts with two different fixes.
+   */
+  referenceNotes?: string[]
+  /**
+   * Whether the revision did what was asked — measured where measurable, and
+   * stated as unverifiable where not. Distinct from `revisionApplied`, which
+   * only reports that the text changed.
+   */
+  honoured?: {
+    verdict: 'honoured' | 'not-honoured' | 'unverifiable'
+    reason: string
+    measured: string | null
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -503,6 +691,9 @@ export interface PipelinePayload extends Record<string, unknown> {
   unreachable?: string[]
   posts?: ScrapedPost[]
   postsBeforeDedupe?: number
+  /** Terms the corpus surfaced that nobody seeded (ADR-012). */
+  keywordCandidates?: KeywordCandidate[]
+  discoveredKeywords?: Array<{ id: string; term: string; score: number; active: boolean }>
   hashtagCandidates?: HashtagCandidate[]
   competitorPosts?: CompetitorPostRecord[]
   captureSource?: 'live' | 'fixture'

@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Play, X } from 'lucide-react'
+import { ExternalLink, Play, X } from 'lucide-react'
 import { useStore } from '../store'
 import { Logo } from '../components/logo'
 import type { GraphBucket } from '../components/pipeline-graph'
@@ -24,18 +24,10 @@ import type { LiveLane, Platform, ValidationVerdict } from '../types'
  * page must clear to be admitted at all.
  */
 const PREFILTER = defaultSkillConfig('scraping.dedupe.prefilter')
-const CAPTURE = defaultSkillConfig('scraping.linkedin.fetch')
 const HISTORY_DAYS = Number(PREFILTER.historyDays)
-const BRAND_FLOOR = Number(CAPTURE.minBrandRelevance)
-
 /** Age of an ISO timestamp in days. The one place this screen reads the clock. */
-function daysSince(iso: string): number {
-  return (Date.now() - new Date(iso).getTime()) / 86_400_000
-}
 
 /** Lanes that are mostly login-walled, and so cost time for little return. */
-const WALLED_LANES = new Set(['instagram', 'facebook'])
-
 /* ═══════════════════════════════════════════════════════════════════════════
    THE FEED
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -57,6 +49,8 @@ type FeedRow =
        */
       engagement: number | null
       relevance: number
+      /** The page this row was captured from, when the source named one. */
+      url: string | null
       /** Held back by the scraping stage as already on record. Never reached scoring. */
       held: { since: string; originalTitle: string } | null
     }
@@ -115,6 +109,16 @@ const TICK_MS = 50
  */
 const REPLAY_LIMIT = 26
 
+/*
+ * Rows per page in the run feed.
+ *
+ * A presentation constant, not a tunable: it describes how much of a list fits
+ * in a column before paging beats scrolling, which is a property of this screen
+ * rather than a decision an operator would make about the pipeline. Nothing in
+ * the run changes with it.
+ */
+const FEED_PAGE = 20
+
 export function PipelineTheater() {
   const theaterOpen = useStore((s) => s.theaterOpen)
   const closeTheater = useStore((s) => s.closeTheater)
@@ -125,6 +129,8 @@ export function PipelineTheater() {
   const setValidation = useStore((s) => s.setValidation)
   const scrapeRunning = useStore((s) => s.scrapeRun.running)
   const runSummary = useStore((s) => s.scrapeRun.summary)
+  const pipelineRun = useStore((s) => s.pipeline)
+  const trendingNowList = useStore((s) => s.trending)
   const liveCaptures = useStore((s) => s.scrapeRun.captures)
   const liveLanes = useStore((s) => s.scrapeRun.lanes)
   const liveVerdicts = useStore((s) => s.scrapeRun.verdicts)
@@ -140,7 +146,18 @@ export function PipelineTheater() {
   const [paused, setPaused] = useState(false)
   const [filter, setFilter] = useState<string | null>(null)
   const [resolved, setResolved] = useState<Record<string, string>>({})
-  const feedRef = useRef<HTMLDivElement | null>(null)
+  const feedRef = useRef<HTMLElement | null>(null)
+
+  /*
+   * THE REPORT OPENS ITSELF ONCE PER RUN, AND STAYS CLOSED IF DISMISSED.
+   *
+   * Keyed on the run rather than on `finished` alone: `finished` stays true for
+   * as long as the console is open, so reopening on every render would make the
+   * dialog impossible to dismiss. Recording WHICH run was reported means the
+   * next run raises it again without the operator doing anything.
+   */
+  const [reportedRun, setReportedRun] = useState<string | null>(null)
+  const [reportOpen, setReportOpen] = useState(false)
   // The 3D graph needs WebGL; without it the SVG graph is the same picture.
 
   /**
@@ -174,6 +191,7 @@ export function PipelineTheater() {
         platform: item.platform,
         engagement: item.metrics_available ? item.engagement : null,
         relevance: item.relevance,
+        url: item.url,
         held: null,
       })
     }
@@ -249,6 +267,7 @@ export function PipelineTheater() {
         // A crawled page carries no reaction count and none is invented.
         engagement: null,
         relevance: capture.relevance ?? 0,
+        url: capture.url,
         held: capture.held,
       })
     }
@@ -358,18 +377,55 @@ export function PipelineTheater() {
         event.preventDefault()
         setPaused((p) => !p)
       }
-      if (event.key === 'Escape') closeTheater()
+      if (event.key !== 'Escape') return
+      // The report is the innermost layer, so Escape dismisses it first and
+      // leaves the console standing. A second Escape then closes the console.
+      if (reportOpen) {
+        setReportOpen(false)
+        return
+      }
+      closeTheater()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [theaterOpen, closeTheater])
-
-  useEffect(() => {
-    if (paused) return
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' })
-  }, [revealed, paused])
+  }, [theaterOpen, closeTheater, reportOpen])
 
   const rows = live ? liveRows : script.slice(0, revealed)
+
+  /*
+   * THE FEED FOLLOWS THE RUN.
+   *
+   * This depended on `revealed` alone — the scripted-playback counter — so it
+   * worked while replaying a recorded run and did nothing at all during a live
+   * one, where rows arrive over the event stream and `revealed` never moves.
+   * A live run therefore filled the feed from the top while the viewport stayed
+   * pinned to the first few rows, and the latest lane had to be scrolled to by
+   * hand exactly when it was changing fastest.
+   *
+   * `rows.length` is the dependency that is true in both modes.
+   */
+  useEffect(() => {
+    if (paused) return
+    const element = feedRef.current
+    if (!element) return
+    // Only follow when the reader is already at the end. Yanking the viewport
+    // back while someone is reading an earlier row is worse than not following.
+    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120
+    if (!atBottom && rows.length > 0) return
+    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+  }, [rows.length, revealed, paused])
+
+  /*
+   * Raise the report when a run finishes, once. `runId ?? 'scripted'` covers
+   * replayed runs, which carry no id but still end with a verdict worth showing.
+   */
+  useEffect(() => {
+    if (!finished) return
+    const key = runId ?? 'scripted'
+    if (reportedRun === key) return
+    setReportedRun(key)
+    setReportOpen(true)
+  }, [finished, runId, reportedRun])
 
   const filtered = filter
     ? rows.filter((row) => {
@@ -379,9 +435,72 @@ export function PipelineTheater() {
       })
     : rows
 
-  const buckets: GraphBucket[] = BUCKET_META.map((meta) => ({
+  /* ── Paging the feed ──────────────────────────────────────────────────────
+     A finished run leaves hundreds of rows here, and a single list that long is
+     only navigable by scrolling past everything you are not looking for.
+
+     Paging is anchored to the END of the list, not the start: page 1 is the
+     OLDEST rows, and the last page is where a live run is writing. `FEED_PAGE`
+     rows per page.
+
+     A live run pins itself to the last page — during a run the interesting row
+     is the one arriving, and having the view sit on page 1 while work happens
+     out of sight is the behaviour this replaces. Once the run finishes the page
+     stops moving, so an operator reading page 3 of a finished run stays there.
+  */
+  const pageCount = Math.max(1, Math.ceil(filtered.length / FEED_PAGE))
+  const [feedPage, setFeedPage] = useState(1)
+
+  // Clamp rather than reset: a filter that shortens the list should not throw
+  // away the operator's place any further than it has to.
+  const page = Math.min(feedPage, pageCount)
+
+  useEffect(() => {
+    if (finished) return
+    setFeedPage(pageCount)
+  }, [pageCount, finished])
+
+  const paged = filtered.slice((page - 1) * FEED_PAGE, page * FEED_PAGE)
+
+  /*
+   * VERDICT COUNTS COME FROM THE RUN'S OWN RECORD ONCE IT HAS ONE.
+   *
+   * These counted live SSE rows only. That works while a run is streaming and
+   * reports FOUR ZEROS the moment it is not — which is exactly when the
+   * completion panel renders. So a run that validated three pages and marked
+   * fifteen duplicates finished by announcing "0 validated · 0 needs review ·
+   * 0 duplicate · 0 rejected" directly above the ideas it had just placed on
+   * the calendar. The numbers were not wrong so much as absent, and absent
+   * rendered as zero.
+   *
+   * `pipeline.summary` is what the orchestrator persisted for this run, so it
+   * survives the stream ending, a reload, and reopening the theater later. Law
+   * 8: state is server-truth. Live rows still win WHILE they exist, because
+   * mid-run they are ahead of the summary — which is only written at the end.
+   */
+  const liveBucketCounts = BUCKET_META.map(
+    (meta) => rows.filter((row) => row.kind === 'verdict' && row.verdict === meta.id).length,
+  )
+  const anyLiveVerdict = liveBucketCounts.some((n) => n > 0)
+  const persisted = (pipelineRun?.summary ?? {}) as Record<string, unknown>
+  const persistedCount = (key: string): number => {
+    const value = persisted[key]
+    return typeof value === 'number' ? value : 0
+  }
+
+  const buckets: GraphBucket[] = BUCKET_META.map((meta, i) => ({
     ...meta,
-    count: rows.filter((row) => row.kind === 'verdict' && row.verdict === meta.id).length,
+    count: anyLiveVerdict
+      ? (liveBucketCounts[i] ?? 0)
+      : persistedCount(
+          meta.id === 'needs_review'
+            ? 'needsReview'
+            : meta.id === 'validated'
+              ? 'validated'
+              : meta.id === 'duplicate'
+                ? 'duplicate'
+                : 'rejected',
+        ),
   }))
 
 
@@ -391,6 +510,21 @@ export function PipelineTheater() {
 
   /** Pages that carry a verdict at all — the denominator for every share. */
   const verdictTotal = rows.filter((r) => r.kind === 'verdict').length
+
+  /**
+   * Pages the run CAPTURED, which is a different number from pages it SCORED.
+   *
+   * The header counted verdicts and called them "pages", so for the whole of
+   * the capture stage — minutes, on a real run — it read "This run · 0 pages"
+   * while the footer counted 55 captured and Sherlock's own caption said 55
+   * kept. Three figures on one screen, two of them agreeing and the loudest one
+   * contradicting both.
+   *
+   * Nothing about the scoring was wrong: Dexter genuinely had nothing to score
+   * yet. The defect was calling the scored count "pages" and showing it before
+   * scoring had happened, which reads as a run that found nothing.
+   */
+  const capturedTotal = rows.filter((r) => r.kind === 'capture').length
 
   /**
    * Verdicts this run actually produced. A page held back carries the verdict
@@ -454,48 +588,9 @@ export function PipelineTheater() {
    * than guessed at — an unmeasured "this might help" is exactly the kind of
    * claim this product does not make.
    */
-  const levers = useMemo((): Array<{ knob: string; consequence: string }> => {
-    const out: Array<{ knob: string; consequence: string }> = []
-
-    // Look-back: pages held back solely because they were seen recently.
-    if (heldCount > 0) {
-      // Pages older than half the window but still inside it: halving the
-      // window would let exactly these through again.
-      const wouldReturn = liveCaptures.filter(
-        (c) => c.held !== null && daysSince(c.held.since) > HISTORY_DAYS / 2 && daysSince(c.held.since) <= HISTORY_DAYS,
-      ).length
-      if (wouldReturn > 0) {
-        out.push({
-          knob: `Look-back window ${HISTORY_DAYS}d → ${Math.round(HISTORY_DAYS / 2)}d`,
-          consequence: `${wouldReturn} of the ${heldCount} held pages would reach Dexter again.`,
-        })
-      }
-    }
-
-    // Brand floor: pages a lane saw but did not admit.
-    const seen = liveLanes.reduce((sum, l) => sum + (l.captured ?? 0), 0)
-    const kept = liveLanes.reduce((sum, l) => sum + (l.kept ?? 0), 0)
-    if (seen > kept) {
-      out.push({
-        knob: `Minimum brand alignment ${BRAND_FLOOR}%`,
-        consequence: `${seen - kept} page${seen - kept === 1 ? '' : 's'} the lanes found ${seen - kept === 1 ? 'was' : 'were'} dropped at capture for scoring under it.`,
-      })
-    }
-
-    // Login-walled lanes: time spent for what came back.
-    const walled = liveLanes.filter((l) => WALLED_LANES.has(l.platform))
-    const walledEmpty = walled.filter((l) => l.status === 'warn').length
-    if (walled.length > 0 && walledEmpty > 0) {
-      out.push({
-        knob: 'Turn off the login-walled lanes',
-        consequence:
-          `${walled.length} of ${liveLanes.length} crawls ran on Instagram and Facebook, and ` +
-          `${walledEmpty} came back empty.`,
-      })
-    }
-
-    return out
-  }, [heldCount, liveCaptures, liveLanes])
+  /* The "What would change the outcome" panel and the `levers` memo that fed
+     it were removed on request. The knobs themselves are unchanged and live in
+     Agent Studio, where they can be changed rather than merely suggested. */
 
   /**
    * The pipeline as stations, in the order the orchestrator runs them.
@@ -519,7 +614,28 @@ export function PipelineTheater() {
   const stations = useMemo((): Station[] => {
     const captured = rows.filter((r) => r.kind === 'capture').length
     const emptyLanes = liveLanes.filter((l) => l.status === 'warn').length
-    const keywords = live ? new Set(liveLanes.map((l) => l.keyword)).size : keywordCount
+    /*
+     * HOW MANY KEYWORDS THIS RUN ACTUALLY TOOK.
+     *
+     * This read `keywordCount` — every ACTIVE keyword in the workspace — the
+     * moment there were no live lane events, so the source card announced
+     * "151 keywords" for a run that scanned three. Before lanes arrived it
+     * showed the other failure, "0 keywords", because an empty live set counts
+     * zero. Neither number described the run.
+     *
+     * The run itself records the answer: `pipeline.summary.keywordsScanned` is
+     * written by the orchestrator from the resolved set. Live lanes still win
+     * while they exist — mid-run they are ahead of a summary only written at
+     * the end — and the active-set count survives only as the last resort,
+     * when no run has happened at all.
+     */
+    const scannedThisRun = (() => {
+      const summary = (pipelineRun?.summary ?? {}) as Record<string, unknown>
+      const n = summary.keywordsScanned
+      return typeof n === 'number' && n > 0 ? n : null
+    })()
+    const liveKeywords = new Set(liveLanes.map((l) => l.keyword)).size
+    const keywords = liveKeywords > 0 ? liveKeywords : (scannedThisRun ?? keywordCount)
     const gateHeld = heldCount > 0 && scoredNow === 0
     const count = (id: ValidationVerdict): number => buckets.find((b) => b.id === id)?.count ?? 0
 
@@ -528,8 +644,16 @@ export function PipelineTheater() {
         id: 'source',
         tag: 'SOURCE',
         name: `${keywords} keyword${keywords === 1 ? '' : 's'}`,
-        sub: liveLanes.length > 0 ? `${liveLanes.length} lanes opened` : 'resolved by weight',
-        figure: liveLanes.length > 0 ? 'resolved by weight' : 'on record',
+        sub: liveLanes.length > 0
+          ? `${liveLanes.length} lanes opened`
+          : scannedThisRun !== null
+            ? 'scanned this run'
+            : 'active in the workspace',
+        figure: liveLanes.length > 0
+          ? 'resolved by weight'
+          : scannedThisRun !== null
+            ? 'this run'
+            : 'on record',
         caption:
           `${keywords} active keyword${keywords === 1 ? '' : 's'} resolved by weight` +
           (liveLanes.length > 0 ? `, opening ${liveLanes.length} keyword-and-lane crawls.` : '.'),
@@ -587,7 +711,7 @@ export function PipelineTheater() {
         status: stage === 'done' ? (newTrendCount > 0 ? 'done' : 'idle') : 'idle',
       },
     ]
-  }, [rows, liveLanes, live, keywordCount, stage, finished, scoredNow, heldCount, newTrendCount, buckets, verdictTotal, onRecordOnly, heldSince])
+  }, [rows, liveLanes, live, keywordCount, pipelineRun, stage, finished, scoredNow, heldCount, newTrendCount, buckets, verdictTotal, onRecordOnly, heldSince])
 
   /**
    * The four rails between the stations, each in the state its hand-off is
@@ -714,7 +838,15 @@ export function PipelineTheater() {
 
   if (!theaterOpen) return null
 
-  const trending = [...signals].filter((s) => s.is_trending).sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9)).slice(0, 5)
+  /*
+   * The LATEST RUN's trending set, not the accumulated one.
+   *
+   * `signals` is the newest row per keyword across every run, so filtering it
+   * by `is_trending` returned whatever each past run had flagged — five
+   * keywords from five different runs, all showing rank 1, listed beside
+   * source cards naming three completely different terms.
+   */
+  const trending = [...trendingNowList].sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9)).slice(0, 5)
   const newTrendIdeas = ideas.filter((i) => i.is_new_trend)
 
   return (
@@ -890,7 +1022,26 @@ export function PipelineTheater() {
         </section>
 
         {/* ── RIGHT · what it produced, and what you still owe ────────── */}
-        <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto px-[18px] py-3.5 lg:w-[470px]">
+        {/*
+          ONE SCROLLER IN THIS COLUMN, NOT TWO.
+
+          This aside scrolled, and the feed section inside it scrolled as well.
+          A `flex-1 overflow-y-auto` child only bounds itself when an ancestor
+          gives it a height to fill; inside a scrolling parent it simply grows
+          to its content instead, so the inner scroller never engaged and the
+          aside moved the whole column — header, counts and feed together.
+
+          That is why rows appeared sliced at the top and bottom: what looked
+          like a clipped list was the outer scroller cutting through a list that
+          had no viewport of its own.
+
+          The aside owns the scroll. `scroll-pt-7` keeps the sticky "row by row"
+          header from landing on top of whatever row was just scrolled to.
+        */}
+        <aside
+          ref={feedRef}
+          className="flex w-full shrink-0 scroll-pt-7 flex-col gap-3 overflow-y-auto px-[18px] py-3.5 lg:w-[470px]"
+        >
           {filter ? (
             <button
               type="button"
@@ -911,7 +1062,15 @@ export function PipelineTheater() {
                 {onRecordOnly ? 'On record' : 'This run'}
               </h3>
               <span className="mono text-[11px] text-ink-3">
-                {verdictTotal} {verdictTotal === 1 ? 'page' : 'pages'}
+                {/*
+                  Scored where there is scoring; captured-but-unscored says so
+                  in words rather than showing a zero that means "not yet".
+                */}
+                {verdictTotal > 0
+                  ? `${verdictTotal} ${verdictTotal === 1 ? 'page' : 'pages'} scored`
+                  : capturedTotal > 0
+                    ? `${capturedTotal} captured · not scored yet`
+                    : '0 pages'}
                 {onRecordOnly ? ' · earlier run' : ''}
               </span>
             </header>
@@ -1011,78 +1170,66 @@ export function PipelineTheater() {
             </section>
           ) : null}
 
-          {/* ── The knobs that produced this outcome ─────────────────── */}
-          <section
-            className="shrink-0 rounded-[10px] border border-line-strong bg-surface px-3.5 py-3"
-            style={{ animation: 'eth-rise 560ms cubic-bezier(0.22, 1, 0.36, 1) 480ms both' }}
-          >
-            <p className="mono text-[10.5px] uppercase tracking-[0.14em] text-ink-3">What would change the outcome</p>
-            {levers.length === 0 ? (
-              <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">
-                This run reported nothing that a settings change would have altered. Every lever here is
-                measured against what actually happened, so none is offered until there is something to
-                measure.
-              </p>
-            ) : (
-              <ol className="mt-[9px] flex flex-col gap-2">
-                {levers.map((lever, i) => (
-                  <li key={lever.knob}>
-                    <button
-                      type="button"
-                      onClick={() => { closeTheater(); setPage('studio') }}
-                      title="Open this knob in Agent Studio"
-                      className="flex w-full items-start gap-[9px] rounded-[7px] border border-line-strong bg-page px-2.5 py-2 text-left transition-colors hover:border-accent"
-                    >
-                      <span className="mono mt-px shrink-0 text-[11px] text-accent-bright">{String(i + 1).padStart(2, '0')}</span>
-                      <span className="min-w-0">
-                        <span className="block text-[12px] font-medium text-ink">{lever.knob}</span>
-                        <span className="block text-[11px] leading-[1.5] text-ink-3">{lever.consequence}</span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            )}
-            {levers.length === 0 ? (
-              <button
-                type="button"
-                onClick={() => { closeTheater(); setPage('studio') }}
-                className="mono mt-2.5 inline-flex items-center gap-1.5 rounded-[5px] border border-line-strong px-2 py-1 text-[11px] uppercase tracking-[0.08em] text-ink-2 transition-colors hover:border-accent hover:text-ink"
-              >
-                Open Agent Studio
-              </button>
-            ) : null}
-
-          </section>
+          {/*
+            "What would change the outcome" lived here.
+            Removed on request: the run console's job is to report what the run
+            did, and a panel of settings advice sat between the verdict counts
+            and the row-by-row feed — the two things an operator is actually
+            reading. The knobs themselves are unchanged and still live in Agent
+            Studio, where they can be changed rather than merely suggested.
+          */}
 
           {/* ── The feed: every row the run reported, in order ───────── */}
-          <section ref={feedRef} className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
-            <p className="mono sticky top-0 z-10 bg-page/95 py-1 text-[10.5px] uppercase tracking-[0.14em] text-ink-3 backdrop-blur-sm">
+          {/* Not a scroller — the aside is. `pb-6` keeps the final row clear of
+              the column's bottom edge instead of flush against it. */}
+          <section className="flex flex-col gap-1.5 pb-6">
+            {/*
+              OPAQUE, AND AS WIDE AS THE COLUMN.
+
+              This was `bg-page/95` at the section's own width. Two gaps let
+              rows show through as they passed: the 5% transparency, and the
+              column's 18px side padding, which the header did not cover — so a
+              row scrolling underneath stayed visible down both edges and read
+              as overlapping the heading.
+
+              Negative margins pull it out to the column's full bleed and the
+              padding puts the text back where it was. Opaque ground, and a hair
+              more vertical padding so a row's rounded border cannot peek above
+              the cap line.
+            */}
+            <p className="mono sticky top-0 z-10 -mx-[18px] border-b border-line/60 bg-page px-[18px] pb-1.5 pt-2 text-[10.5px] uppercase tracking-[0.14em] text-ink-3">
               The run, row by row
             </p>
-            {filtered.map((row) => (
+            {paged.map((row) => (
               <FeedItem key={row.id} row={row} resolved={resolved} onResolve={resolveInline} />
             ))}
 
-            {finished ? (
-              <CompletionPanel
-                trending={trending.map((t) => ({ term: t.term, score: t.trend_score, rank: t.rank ?? 0 }))}
-                topHashtags={topHashtags.map((h) => ({ tag: h.display_tag, score: h.hashtag_score }))}
-                buckets={buckets}
-                needsReview={rows.filter((r) => r.kind === 'verdict' && r.verdict === 'needs_review')}
-                newTrendIdeas={newTrendIdeas.map((i) => ({
-                  id: i.id,
-                  title: i.title,
-                  platform: i.platform,
-                  slot: i.calendar_slot,
-                  rank: i.platform_rank,
-                }))}
-                resolved={resolved}
-                onResolve={resolveInline}
-                onFilter={setFilter}
-                onNavigate={leaveFor}
-                onClose={closeTheater}
-              />
+            {/* The pager states the range it is showing, not just the page
+                number — "41–60 of 317" answers where you are; "page 3" does
+                not. Hidden entirely when everything fits on one page. */}
+            {pageCount > 1 ? (
+              <div className="mt-1 flex items-center justify-between gap-2 border-t border-line pt-2">
+                <button
+                  type="button"
+                  disabled={page <= 1}
+                  onClick={() => setFeedPage(Math.max(1, page - 1))}
+                  className="mono rounded-[6px] border border-line-strong px-2 py-1 text-[10.5px] uppercase tracking-[0.1em] text-ink-2 transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-line-strong disabled:hover:text-ink-2"
+                >
+                  Newer
+                </button>
+                <span className="mono tabular text-[10.5px] uppercase tracking-[0.1em] text-ink-3">
+                  {(page - 1) * FEED_PAGE + 1}–{Math.min(page * FEED_PAGE, filtered.length)} of{' '}
+                  {filtered.length}
+                </span>
+                <button
+                  type="button"
+                  disabled={page >= pageCount}
+                  onClick={() => setFeedPage(Math.min(pageCount, page + 1))}
+                  className="mono rounded-[6px] border border-line-strong px-2 py-1 text-[10.5px] uppercase tracking-[0.1em] text-ink-2 transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-line-strong disabled:hover:text-ink-2"
+                >
+                  Older
+                </button>
+              </div>
             ) : null}
           </section>
         </aside>
@@ -1129,6 +1276,52 @@ export function PipelineTheater() {
           <span className="ml-auto rounded-[3px] border border-line px-1.5 py-px">space · pause</span>
         </div>
       </footer>
+
+      {/* ── The completion report ──────────────────────────────────────────
+          A run ends with a verdict, and a verdict deserves the screen. This
+          used to be the last card in a 470px column: an operator finished a
+          run and then had to scroll a feed to find out what it had produced,
+          with the way through to the calendar below that again.
+
+          It is a real dialog now — `role="dialog"` and `aria-modal`, Escape to
+          dismiss, and `data-overlay` so `overscroll-behavior: contain` applies
+          here and a scroll inside it cannot chain out to the page behind.
+          Dismissing leaves the run console exactly as it was, so nothing is
+          lost by closing it.
+      */}
+      {finished && reportOpen ? (
+        <div
+          data-overlay
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-[rgba(4,6,12,0.72)] p-4 backdrop-blur-sm sm:p-8"
+          style={{ animation: 'eth-fade 200ms ease both' }}
+          onClick={(event) => { if (event.target === event.currentTarget) setReportOpen(false) }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Pipeline run complete"
+            className="w-full max-w-[880px]"
+          >
+            <RunReport
+              captures={rows.filter((r): r is Extract<FeedRow, { kind: 'capture' }> => r.kind === 'capture')}
+              lanes={rows.filter((r): r is Extract<FeedRow, { kind: 'lane' }> => r.kind === 'lane')}
+              trending={trending.map((t) => ({ term: t.term, score: t.trend_score, rank: t.rank ?? 0 }))}
+              topHashtags={topHashtags.map((h) => ({ tag: h.display_tag, score: h.hashtag_score }))}
+              buckets={buckets}
+              newTrendIdeas={newTrendIdeas.map((i) => ({
+                id: i.id,
+                title: i.title,
+                platform: i.platform,
+                slot: i.calendar_slot,
+                rank: i.platform_rank,
+              }))}
+              summary={runSummary}
+              onNavigate={leaveFor}
+              onClose={() => setReportOpen(false)}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1848,9 +2041,39 @@ function FeedItem({
             <PlatformIcon platform={row.platform} size={12} />
           )}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2" title={row.title}>
-          {row.title}
-        </span>
+        {/*
+          THE TITLE IS THE LINK TO THE PAGE IT CAME FROM.
+
+          A capture row named a page and gave no way to reach it, so nothing on
+          this screen could be checked against its source — the one thing an
+          operator wants when a title looks wrong or a relevance score looks
+          generous. The title carries the link because it is already the thing
+          you would click.
+
+          Plain text when the source named no URL: a dead link that looks live
+          is worse than no link, and some rows genuinely have none.
+        */}
+        {row.url ? (
+          <a
+            href={row.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="group/src flex min-w-0 flex-1 items-center gap-1 text-[12px] text-ink-2 underline decoration-line-strong decoration-dotted underline-offset-[3px] transition-colors hover:text-accent-bright hover:decoration-accent"
+            title={`${row.title}\n${row.url}`}
+          >
+            <span className="min-w-0 truncate">{row.title}</span>
+            <ExternalLink
+              size={10}
+              className="shrink-0 opacity-0 transition-opacity group-hover/src:opacity-100"
+              aria-hidden="true"
+            />
+            <span className="sr-only">(opens the source page in a new tab)</span>
+          </a>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2" title={row.title}>
+            {row.title}
+          </span>
+        )}
         <span className="mono shrink-0 text-[10px] text-ink-3" title={row.source}>
           {row.engagement === null ? 'N/A' : fmt(row.engagement)}
         </span>
@@ -1986,130 +2209,244 @@ function FeedItem({
    COMPLETION
    ═══════════════════════════════════════════════════════════════════════════ */
 
-function CompletionPanel({
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE RUN REPORT
+
+   What a finished run produced, on one screen: the tally, what it captured and
+   where each page came from, and the way through to the calendar.
+
+   SCOPED TO THE RUN THAT JUST FINISHED, DELIBERATELY. Every figure here is
+   derived from this run's own rows — not from the workspace totals, which
+   include everything every previous run left behind. A report that silently
+   mixed the two would answer "how are we doing" when the question being asked
+   is "what did THAT do".
+
+   The captures list is the part that did not exist before. A run could report
+   "97 duplicate, 16 validated" and give no way to see a single page behind
+   those numbers, so a bad keyword looked exactly like a good one.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function RunReport({
+  captures,
+  lanes,
   trending,
   topHashtags,
   buckets,
-  needsReview,
   newTrendIdeas,
-  resolved,
-  onResolve,
-  onFilter,
+  summary,
   onNavigate,
   onClose,
 }: {
+  captures: Array<Extract<FeedRow, { kind: 'capture' }>>
+  lanes: Array<Extract<FeedRow, { kind: 'lane' }>>
   trending: Array<{ term: string; score: number; rank: number }>
   topHashtags: Array<{ tag: string; score: number }>
   buckets: GraphBucket[]
-  needsReview: FeedRow[]
-  newTrendIdeas: Array<{ id: string; title: string; platform: 'linkedin' | 'instagram' | 'x' | 'facebook'; slot: string; rank: number | null }>
-  resolved: Record<string, string>
-  onResolve: (entityId: string, verdict: ValidationVerdict) => void
-  onFilter: (filter: string | null) => void
+  newTrendIdeas: Array<{ id: string; title: string; platform: Platform; slot: string; rank: number | null }>
+  summary: { postsScraped?: number; duplicate?: number; trending?: number; ideas?: number } | null
   onNavigate: (page: 'calendar' | 'intelligence') => void
   onClose: () => void
 }) {
-  const outstanding = needsReview.filter((row) => row.kind === 'verdict' && !resolved[row.entityId])
+  const held = captures.filter((c) => c.held !== null)
+  const kept = captures.filter((c) => c.held === null)
+  const placed = newTrendIdeas.filter((i) => i.slot === 'primary')
+
+  // N/A, never 0: a lane that reported no engagement is not a lane that
+  // measured zero. Averaging over rows that stated nothing would invent a figure.
+  const measured = kept.filter((c) => c.engagement !== null)
+  const avgRelevance =
+    kept.length === 0 ? null : Math.round(kept.reduce((sum, c) => sum + c.relevance, 0) / kept.length)
+
+  const stat = (label: string, value: string, tone = 'text-ink') => (
+    <div key={label} className="rounded-[10px] border border-line-strong bg-surface px-3 py-2.5">
+      <p className={`tabular text-[19px] font-semibold leading-none tracking-[-0.02em] ${tone}`}>{value}</p>
+      <p className="mono mt-1.5 text-[9.5px] uppercase leading-tight tracking-[0.1em] text-ink-3">{label}</p>
+    </div>
+  )
 
   return (
     <section
-      className="mt-3 rounded-[10px] border border-line-strong bg-surface-2 p-4"
+      className="flex max-h-[88vh] flex-col overflow-hidden rounded-[14px] border border-line-strong bg-surface-2 shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
       style={{ animation: 'eth-rise 460ms cubic-bezier(0.22, 1, 0.36, 1) both' }}
     >
-      <div className="flex items-center gap-2">
-        <span className="text-good-ink">
-          <Commit size={15} tone="var(--color-good)" />
+      {/* ── Header ───────────────────────────────────────────────────────── */}
+      <header className="flex shrink-0 items-start gap-3 border-b border-line px-5 py-4 sm:px-6">
+        <span className="mt-0.5 text-good-ink">
+          <Commit size={16} tone="var(--color-good)" />
         </span>
-        <h3 className="text-[13.5px] font-semibold tracking-[-0.01em] text-ink">Pipeline run complete</h3>
-      </div>
-      <p className="mt-0.5 text-[12px] leading-relaxed text-ink-3">
-        {newTrendIdeas.length > 0 ? 'Dora placed the strongest trends into the week.' : 'No new trend to place this run.'}
-      </p>
-
-      <div className="mt-3">
-        <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">Top 5 keywords</p>
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {trending.map((item) => (
-            <span key={item.term} className="flex items-center gap-1.5 rounded-full border border-hud-strong bg-accent/10 px-2.5 py-1 text-[11px]">
-              <span className="mono text-[11px] text-ink-3">{item.rank}</span>
-              <span className="font-medium text-ink">{item.term}</span>
-              <span className="mono text-[10px] text-accent-bright">{item.score}</span>
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <div className="mt-3">
-        <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
-          Top {topHashtags.length} hashtags · consolidated
-        </p>
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {topHashtags.map((item) => (
-            <span key={item.tag} className="rounded-full border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink-2">
-              #{item.tag}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {buckets.map((bucket) => (
-          <button
-            key={bucket.id}
-            type="button"
-            onClick={() => onFilter(bucket.id)}
-            className="rounded-md border border-line-strong bg-surface px-2.5 py-2 text-left transition-colors hover:border-accent"
-          >
-            <p className="mono text-[19px] leading-none" style={{ color: bucket.tone }}>
-              {bucket.count}
-            </p>
-            <p className="mono mt-1 text-[10.5px] uppercase tracking-[0.08em] text-ink-3">{bucket.label}</p>
-          </button>
-        ))}
-      </div>
-
-      {outstanding.length > 0 ? (
-        <div className="mt-3 rounded-[10px] border border-warn/40 bg-warn/8 p-3">
-          <p className="flex items-center gap-2 text-[12px] font-medium text-warn">
-            <Breathe tone="var(--color-warn)" />
-            {outstanding.length} item{outstanding.length === 1 ? '' : 's'} still need a verdict
+        <div className="min-w-0 flex-1">
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Pipeline run complete</h2>
+          <p className="mt-0.5 text-[12px] leading-relaxed text-ink-3">
+            {captures.length === 0
+              ? 'Nothing was captured on this run. The rows below say which lanes reported and why.'
+              : `${fmt(captures.length)} page${captures.length === 1 ? '' : 's'} read across ${lanes.length} lane${lanes.length === 1 ? '' : 's'}, and Dora placed the strongest trends into the week.`}
           </p>
-          <ul className="mt-2 space-y-1.5">
-            {outstanding.slice(0, 4).map((row) =>
-              row.kind === 'verdict' ? (
-                <li key={row.id} className="flex flex-wrap items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{row.title}</span>
-                  <Btn variant="primary" onClick={() => onResolve(row.entityId, 'validated')}>
-                    Approve
-                  </Btn>
-                  <Btn variant="ghost" onClick={() => onResolve(row.entityId, 'rejected')}>
-                    Reject
-                  </Btn>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close the run report"
+          className="shrink-0 rounded-[7px] border border-line-strong p-1.5 text-ink-3 transition-colors hover:border-accent hover:text-ink"
+        >
+          <X size={13} aria-hidden="true" />
+        </button>
+      </header>
+
+      {/* ── Body ─────────────────────────────────────────────────────────── */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6">
+        {/* The tally. Every figure is this run's. */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+          {stat('Captured', fmt(captures.length))}
+          {stat('Kept', fmt(kept.length), 'text-good-ink')}
+          {stat('Held · on record', fmt(held.length), held.length > 0 ? 'text-ink-2' : 'text-ink')}
+          {buckets.map((b) =>
+            stat(b.label, fmt(b.count), b.id === 'needs_review' && b.count > 0 ? 'text-warn' : 'text-ink'),
+          )}
+        </div>
+
+        <p className="mono mt-2 text-[10.5px] leading-relaxed text-ink-3">
+          Average relevance {avgRelevance === null ? 'N/A' : `${avgRelevance}%`} ·{' '}
+          {measured.length === 0
+            ? 'no lane reported engagement figures on this run'
+            : `${fmt(measured.length)} of ${fmt(kept.length)} pages carried engagement figures`}
+          {summary?.ideas === undefined ? '' : ` · ${fmt(summary.ideas)} idea(s) placed`}
+        </p>
+
+        {/* ── Keywords and hashtags this run produced ───────────────────── */}
+        {trending.length > 0 || topHashtags.length > 0 ? (
+          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {trending.length > 0 ? (
+              <div>
+                <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
+                  Top {trending.length} keyword{trending.length === 1 ? '' : 's'}
+                </p>
+                <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                  {trending.map((t) => (
+                    <li
+                      key={t.term}
+                      className="flex items-center gap-1.5 rounded-full border border-line-strong px-2.5 py-1 text-[11.5px] text-ink-2"
+                    >
+                      <span className="mono tabular text-[10px] text-ink-3">{t.rank}</span>
+                      <span className="truncate">{t.term}</span>
+                      <span className="mono tabular text-[10px] text-accent-bright">{t.score}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {topHashtags.length > 0 ? (
+              <div>
+                <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
+                  Top {topHashtags.length} hashtag{topHashtags.length === 1 ? '' : 's'} · consolidated
+                </p>
+                <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                  {topHashtags.map((h) => (
+                    <li
+                      key={h.tag}
+                      className="rounded-full border border-line-strong px-2.5 py-1 text-[11.5px] text-ink-2"
+                    >
+                      {h.tag}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* ── Every page this run read ──────────────────────────────────── */}
+        <div className="mt-5">
+          <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
+            Everything captured on this run
+          </p>
+          {captures.length === 0 ? (
+            <p className="mt-1.5 rounded-[10px] border border-line-strong bg-surface px-3 py-2.5 text-[12px] leading-relaxed text-ink-3">
+              No page was captured. This is a real result, not a gap — the run console above names the
+              lane that could not read and the reason it gave.
+            </p>
+          ) : (
+            <ul className="mt-1.5 space-y-1">
+              {captures.map((row) => (
+                <li
+                  key={row.id}
+                  className={`flex flex-wrap items-center gap-2 rounded-[9px] border px-2.5 py-1.5 ${
+                    row.held ? 'border-line bg-surface opacity-70' : 'border-line-strong'
+                  }`}
+                >
+                  <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                    {row.keyword}
+                  </span>
+                  <span className="flex h-3 w-3 shrink-0 items-center justify-center">
+                    {row.platform === null ? (
+                      <span className="mono text-[9.5px] uppercase tracking-[0.06em] text-ink-3" title="Read from the open web">
+                        web
+                      </span>
+                    ) : (
+                      <PlatformIcon platform={row.platform} size={12} />
+                    )}
+                  </span>
+
+                  {/* The link is the whole point of this list: every claim here
+                      can be opened and checked against the page it came from. */}
+                  {row.url ? (
+                    <a
+                      href={row.url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="group/src flex min-w-0 flex-1 items-center gap-1 text-[11.5px] text-ink-2 underline decoration-line-strong decoration-dotted underline-offset-[3px] transition-colors hover:text-accent-bright hover:decoration-accent"
+                      title={`${row.title}\n${row.url}`}
+                    >
+                      <span className="min-w-0 truncate">{row.title}</span>
+                      <ExternalLink size={10} className="shrink-0 opacity-0 transition-opacity group-hover/src:opacity-100" aria-hidden="true" />
+                    </a>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2" title={row.title}>
+                      {row.title}
+                    </span>
+                  )}
+
+                  <span className="mono shrink-0 text-[10px] text-ink-3" title={`Source: ${row.source}`}>
+                    {row.engagement === null ? 'N/A' : fmt(row.engagement)}
+                  </span>
+                  {row.held ? (
+                    <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                      held · {timeAgo(row.held.since)}
+                    </span>
+                  ) : (
+                    <span className="mono tabular shrink-0 text-[10px] text-ink-3">{row.relevance}%</span>
+                  )}
                 </li>
-              ) : null,
-            )}
-          </ul>
+              ))}
+            </ul>
+          )}
         </div>
-      ) : null}
 
-      {newTrendIdeas.length > 0 ? (
-        <div className="mt-3">
-          <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">New trends added to the calendar</p>
-          <ul className="mt-1.5 space-y-1">
-            {newTrendIdeas.map((idea) => (
-              <li key={idea.id} className="flex flex-wrap items-center gap-2 rounded-md border border-line-strong px-2.5 py-1.5">
-                <PlatformIcon platform={idea.platform} size={12} />
-                <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{idea.title}</span>
-                <Badge tone={idea.slot === 'primary' ? 'good' : 'neutral'}>
-                  {idea.slot === 'primary' ? `On the calendar · #${idea.rank}` : `More suggestions · #${idea.rank}`}
-                </Badge>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
+        {/* ── What reached the calendar ─────────────────────────────────── */}
+        {newTrendIdeas.length > 0 ? (
+          <div className="mt-5">
+            <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
+              New trends added to the calendar · {placed.length} placed, {newTrendIdeas.length - placed.length} in
+              more suggestions
+            </p>
+            <ul className="mt-1.5 grid grid-cols-1 gap-1 lg:grid-cols-2">
+              {newTrendIdeas.map((idea) => (
+                <li key={idea.id} className="flex flex-wrap items-center gap-2 rounded-[9px] border border-line-strong px-2.5 py-1.5">
+                  <PlatformIcon platform={idea.platform} size={12} />
+                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{idea.title}</span>
+                  <Badge tone={idea.slot === 'primary' ? 'good' : 'neutral'}>
+                    {idea.slot === 'primary' ? `On the calendar · #${idea.rank}` : `More suggestions · #${idea.rank}`}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      {/* ── Actions ──────────────────────────────────────────────────────── */}
+      <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-line px-5 py-3 sm:px-6">
         <Btn variant="primary" onClick={() => onNavigate('calendar')}>
           Open Weekly Calendar
         </Btn>
@@ -2117,9 +2454,10 @@ function CompletionPanel({
           View Content Intelligence
         </Btn>
         <Btn variant="ghost" onClick={onClose}>
-          Close
+          Back to the run
         </Btn>
-      </div>
+      </footer>
     </section>
   )
 }
+

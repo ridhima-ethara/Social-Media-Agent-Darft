@@ -32,6 +32,10 @@ import type {
   ToolListEntry,
   ToolSuggestion,
   ValidationVerdict,
+  HookVariant,
+  TrackedAccount,
+  VoiceProfile,
+  VoiceSample,
 } from '../types'
 
 /**
@@ -314,6 +318,17 @@ export const api = {
     skills: unknown[]
   }> => request(`/ideas/${id}/instruct`, { method: 'POST', body, timeoutMs: 120_000 }),
 
+  /**
+   * Returns the caption to the text it held at an earlier step on the thread.
+   * The step is addressed by its `at` stamp — a revision number can address two
+   * entries, because an instruction that changed nothing leaves it where it was.
+   */
+  revert: (
+    id: string,
+    body: { platform: Platform; at: string },
+  ): Promise<{ draft: Draft; note: string }> =>
+    request(`/ideas/${id}/revert`, { method: 'POST', body }),
+
   updateIdea: (
     id: string,
     body: {
@@ -355,6 +370,56 @@ export const api = {
     }),
 
   /* ── Analytics, images, lineage, review ────────────────────────────────── */
+
+  /* ── Short-form: scripts, hooks and the learned voice (ADR-007) ───────── */
+
+  voiceProfiles: (): Promise<{ profiles: VoiceProfile[]; sampleCount: number }> =>
+    request('/voice-profiles'),
+
+  voiceSamples: (): Promise<{ samples: VoiceSample[] }> => request('/voice-samples'),
+
+  addVoiceSamples: (
+    samples: Array<{ body: string; label?: string }>,
+  ): Promise<{ inserted: number; duplicates: number; total: number }> =>
+    request('/voice-samples', { method: 'POST', body: { samples } }),
+
+  /**
+   * Derives a profile. Answers 422 with the count it has when there are too few
+   * samples — a well-formed request whose answer is no, not a breakage.
+   */
+  deriveVoiceProfile: (): Promise<{ profile: VoiceProfile }> =>
+    request('/voice-profiles/derive', { method: 'POST', body: {} }),
+
+  setVoiceProfileActive: (id: string, active: boolean): Promise<{ profile: VoiceProfile }> =>
+    request(`/voice-profiles/${id}`, { method: 'PATCH', body: { active } }),
+
+  trackedAccounts: (): Promise<{ accounts: TrackedAccount[] }> => request('/tracked-accounts'),
+
+  addTrackedAccount: (body: {
+    platform: Platform
+    handle: string
+    label?: string
+  }): Promise<{ account: TrackedAccount }> =>
+    request('/tracked-accounts', { method: 'POST', body }),
+
+  setTrackedAccountActive: (id: string, active: boolean): Promise<{ account: TrackedAccount }> =>
+    request(`/tracked-accounts/${id}`, { method: 'PATCH', body: { active } }),
+
+  hooks: (ideaId: string): Promise<{ hooks: HookVariant[] }> =>
+    request(`/ideas/${ideaId}/hooks`),
+
+  generateHooks: (ideaId: string): Promise<{ hooks: HookVariant[]; note?: string }> =>
+    request(`/ideas/${ideaId}/hooks`, { method: 'POST', body: {}, timeoutMs: 180_000 }),
+
+  // Selects one and unselects the rest. The others are kept — "the four we did
+  // not pick" is evidence about what this account decided.
+  selectHook: (hookId: string): Promise<{ hooks: HookVariant[] }> =>
+    request(`/hooks/${hookId}/select`, { method: 'PATCH', body: {} }),
+
+  writeScript: (
+    ideaId: string,
+  ): Promise<{ script: string; source: string; model: string; hooks: unknown[] }> =>
+    request(`/ideas/${ideaId}/script`, { method: 'POST', body: {}, timeoutMs: 180_000 }),
 
   refreshAnalytics: (body: { platform?: Platform; month?: string } = {}): Promise<
     Record<string, unknown>

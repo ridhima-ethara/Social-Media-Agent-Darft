@@ -33,6 +33,36 @@ short-line layout: technical does not mean dense.
 
 The factual thesis is identical in both. Only the expression changes.
 
+## Narrative stances
+
+A stance is the **argumentative shape** of a post. It is chosen per post and rotated across the week,
+and it is orthogonal to the language mode above: the stance decides what the post argues, the mode
+decides how plainly it is expressed. Every grounding rule in this skill applies unchanged in all
+three stances.
+
+**`default`** — the standard post: hook, context, mechanism, evidence, implication, close, exactly as
+rule 4 describes. This stays the most common stance, and it is the fallback whenever the grounding
+another stance needs is absent.
+
+**`how-ethara-thinks`** — Ethara's reading of a scraped topic. The post states what the topic is, then
+what we take from it: which distinction matters, which assumption we would not make, what we would
+measure instead. The topic comes from the scraped corpus; the reasoning comes from Knowledge Base
+corpus entries carrying the brand domain vocabulary. It is a point of view on evidence, never a
+product claim.
+
+**`problem-solution-trajectory`** — a three-beat post:
+
+1. **The problem** — drawn from the scraped topic and its evidence. What breaks, and for whom.
+2. **How Ethara addresses it** — drawn *only* from Knowledge Base corpus entries that describe an
+   actual Ethara capability. Describe the approach, not an outcome. No customer, deployment, result
+   or figure may appear unless a cited entry states it.
+3. **Where the world is moving** — the closing beat. One supported forward statement about the
+   direction the evidence points, framed as a trajectory rather than a prediction of fact.
+
+The middle beat is the one that fails dangerously, because it is the one a model will invent. If no
+corpus entry supports an Ethara capability for the topic, the post **degrades to `default`** and
+records why. A stance is never satisfied by inference from the positioning line.
+
 ## Inputs
 
 - The `CalendarEntry` being written for, and the shared CoreContext
@@ -186,6 +216,21 @@ Output passes to `brand-voice` for compliance review.
     the output is stamped `fixture` with the env key that would enable the model. The output shape is
     identical, so nothing downstream branches on which produced it.
 
+14. **The stance is resolved before the hook is written, and it is grounded or it is abandoned.**
+
+    - The stance is selected per post from the configured stance rotation, so a week carries a mix of
+      shapes rather than one shape repeated. The rotation is a declared ConfigField, never a literal
+      stated here.
+    - `how-ethara-thinks` requires at least one active Knowledge Base corpus entry carrying the brand
+      domain vocabulary. `problem-solution-trajectory` additionally requires an entry describing an
+      Ethara capability relevant to this topic.
+    - When the required grounding is absent, the stance degrades to `default`, the caption is written
+      normally, and the reason is recorded on the draft. The positioning line never satisfies a stance.
+    - The stance changes the argument, not the thesis. Hashtag rules, length targets, the similarity
+      cap, platform treatment and brand-voice enforcement all apply unchanged.
+    - The resolved stance and its grounding entry ids travel on the artefact, so a reader can tell
+      which shape was intended and what it rested on.
+
 ## Examples
 
 Editorial illustrations, **not** approved factual claims and not an opening bank. Rotate approaches;
@@ -277,6 +322,11 @@ The Caption Writing skill **must not**:
 - Select a hook before identifying the central claim.
 - Force an Ethara connection where it is not genuinely relevant, or infer a product, customer or
   result from the company's positioning line.
+- **Claim or imply an Ethara capability, solution or outcome that no cited corpus entry states** —
+  including in the solution beat of `problem-solution-trajectory`, which is grounded or dropped.
+- Present the "where the world is moving" beat as a prediction of fact rather than a supported
+  trajectory.
+- Repeat one stance across every post on a week's calendar.
 - Use generic engagement bait as the close.
 - Use a fixed reusable hashtag set instead of topic-derived tags.
 - Rewrite, shorten or replace the paired Instagram hook, body or CTA.
@@ -310,6 +360,11 @@ The Caption Writing skill **must not**:
 - Any attribution line sits with the prose, above the footer — the keyword line is last.
 - Claims match the cited `key_points`; research sources are retained; hypotheticals are clearly framed.
 - No invented Ethara products, results, clients or capabilities, and no forced brand connection.
+- The resolved stance is recorded on the caption, and either its grounding requirement was met or it
+  degraded to `default` with a stated reason.
+- Under `problem-solution-trajectory`, the solution beat names an approach traceable to a cited corpus
+  entry, and the closing beat reads as a supported trajectory rather than an assertion of fact.
+- A week's calendar carries more than one stance.
 - Platform treatments and option angles are distinct, except for an explicitly configured cross-post.
 - No decorative Unicode letterforms and no Markdown bold in publishable copy.
 
@@ -318,6 +373,9 @@ The Caption Writing skill **must not**:
 | Situation | Correct behaviour |
 |---|---|
 | No knowledge entry matches the topic | Write the structural caption with no factual claims and report the ungrounded state |
+| No corpus entry describes an Ethara capability for this topic | Degrade the stance to `default`, write the post without a solution beat, and record the reason |
+| The model asserts an Ethara outcome with no entry behind it | Remove the claim, raise the finding, keep the rest of the post |
+| The stance rotation would repeat one shape all week | Advance the rotation; a week must carry a mix |
 | The model returns text with an emoji | Enforcement strips it; the finding is recorded |
 | Similarity exceeds the cap twice | Report that the angle is exhausted rather than shipping a near-duplicate |
 | A human instruction conflicts with a brand rule | Apply the instruction, raise the finding alongside it |

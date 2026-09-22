@@ -6,9 +6,16 @@
  */
 
 import { similarity } from '../../../../shared/brand-voice'
-import type { Confidence } from '../../../../shared/agent-contract'
+import type { Confidence, ValidationVerdict } from '../../../../shared/agent-contract'
 import { SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
-import { listHashtags, listKnowledge, listScrapedItems, priorKeywordAverages } from '../../db/repo'
+import {
+  insertDiscoveredKeywords,
+  keywordRankHistory,
+  listHashtags,
+  listKnowledge,
+  listScrapedItems,
+  priorKeywordAverages,
+} from '../../db/repo'
 import { aliasGroupLabel, aliasKey, clamp, contentWords, countTopicMatches, credibilityBase, credibilityLabel, growthPercent, halfLifeScore, hoursSince, matchedTopics, mean, normalise, normaliseTag, rescaleGrowth, round } from '../corpus'
 import { registerSkill } from '../runtime'
 import type { BucketCounts, HashtagCandidate, KeywordTrend, PipelinePayload, RankedHashtagGroup, ReviewRequest, ScrapedPost } from '../skills/index'
@@ -30,10 +37,27 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
   const trendWindowRuns = ctx.num('trendWindowRuns', 4)
   const minPostsToRank = ctx.num('minPostsToRank', 3)
 
-  const weightTotal = volumeWeight + engagementWeight + velocityWeight + growthWeight
+  /*
+   * WHICH WEIGHT SET SCORES THIS RUN (ADR-009).
+   *
+   * One implementation, two declared weight sets. `long-form` is what every
+   * stored `keyword_signals` row was produced under and stays the default, so
+   * switching profiles cannot retroactively change what history meant.
+   */
+  const weightProfile = ctx.str('weightProfile', 'long-form')
+  const shortForm = weightProfile === 'short-form'
+  const viewsWeight = ctx.num('viewsWeight', 40)
+  const engagementRateWeight = ctx.num('engagementRateWeight', 35)
+  const commentVolumeWeight = ctx.num('commentVolumeWeight', 25)
+  const highSignalViewFloor = ctx.num('highSignalViewFloor', 100000)
+
+  const weightTotal = shortForm
+    ? viewsWeight + engagementRateWeight + commentVolumeWeight
+    : volumeWeight + engagementWeight + velocityWeight + growthWeight
+  const weightCount = shortForm ? 'three' : 'four'
   let weightWarning: string | undefined
   if (weightTotal !== 100) {
-    weightWarning = `The four trend weights sum to ${weightTotal}%, not 100%. Scores are normalised against that total, so the ranking still holds — but the numbers will not read as percentages.`
+    weightWarning = `The ${weightCount} ${weightProfile} trend weights sum to ${weightTotal}%, not 100%. Scores are normalised against that total, so the ranking still holds — but the numbers will not read as percentages.`
     ctx.emit('activity', weightWarning, { status: 'warn' })
   }
   const divisor = weightTotal === 0 ? 1 : weightTotal
@@ -66,6 +90,30 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
     const topPost =
       [...ranked].sort((a, b) => b.engagement - a.engagement || b.postedAt.localeCompare(a.postedAt))[0] ??
       null
+    /*
+     * THE SHORT-FORM AXES — the same rule again, on a third kind of absence.
+     *
+     * Plays are stated by video lanes and by nothing else, so they get their own
+     * subset: `viewsAvailable` rows, never `metricsAvailable` ones. A LinkedIn
+     * text post with 400 reactions and no play count is measured on engagement
+     * and unmeasurable on views, and both facts are true at once.
+     *
+     * Engagement rate needs BOTH figures, so it runs over the intersection.
+     * Comment volume needs only `metricsAvailable`, like engagement does.
+     */
+    const withViews = own.filter((p) => p.viewsAvailable)
+    const rateable = own.filter((p) => p.viewsAvailable && p.metricsAvailable && p.views > 0)
+    const totalViews = withViews.reduce((t, p) => t + p.views, 0)
+    const totalComments = measured.reduce((t, p) => t + p.comments, 0)
+    const engagementRate =
+      rateable.length === 0
+        ? 0
+        : round(
+            mean(rateable.map((p) => ((p.reactions + p.comments) / p.views) * 100)),
+            2,
+          )
+    const highSignalCount = withViews.filter((p) => p.views >= highSignalViewFloor).length
+
     return {
       keyword,
       topPost,
@@ -75,15 +123,28 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
       totalEngagement,
       avgEngagement: measured.length === 0 ? 0 : round(totalEngagement / measured.length, 2),
       velocity,
+      // Short-form aggregates, each with the count of rows it rests on so the
+      // reason line can say how thin the evidence is.
+      viewsCount: withViews.length,
+      totalViews,
+      rateableCount: rateable.length,
+      engagementRate,
+      totalComments,
+      highSignalCount,
     }
   })
 
   /** Whether ANY keyword this run carries engagement — see the scoring note below. */
   const anyKeywordMeasured = aggregates.some((a) => a.measuredCount > 0)
+  /** The same question for plays, which is a separate availability entirely. */
+  const anyKeywordHasViews = aggregates.some((a) => a.viewsCount > 0)
 
   const maxPosts = aggregates.reduce((m, a) => Math.max(m, a.postCount), 0)
   const maxEngagement = aggregates.reduce((m, a) => Math.max(m, a.totalEngagement), 0)
   const maxVelocity = aggregates.reduce((m, a) => Math.max(m, a.velocity), 0)
+  const maxViews = aggregates.reduce((m, a) => Math.max(m, a.totalViews), 0)
+  const maxRate = aggregates.reduce((m, a) => Math.max(m, a.engagementRate), 0)
+  const maxComments = aggregates.reduce((m, a) => Math.max(m, a.totalComments), 0)
 
   const trends: KeywordTrend[] = aggregates.map((agg) => {
     const prior = priors.get(agg.keyword.id)
@@ -119,13 +180,43 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
       ? Math.max(1, divisor - engagementWeight - velocityWeight - growthWeight)
       : divisor
 
-    const weighted = measurable
+    const longFormWeighted = measurable
       ? (volumeScore * volumeWeight +
           engagementScore * engagementWeight +
           velocityScore * velocityWeight +
           growthScore * growthWeight) /
         effectiveDivisor
       : (volumeScore * volumeWeight) / effectiveDivisor
+
+    /*
+     * THE SHORT-FORM SCORE — the same uniform/selective rule, on plays.
+     *
+     * Uniform absence: no lane this run stated a play count, so the views axis
+     * is dropped from the divisor for EVERY keyword. Each one is judged on
+     * engagement rate and comment volume on the same basis, and the ranking
+     * still means something.
+     *
+     * Selective absence: some keywords had plays and this one did not.
+     * Renormalising would let a keyword nobody could measure on views win
+     * against rivals that were. So the full divisor stands, the views component
+     * contributes nothing, and the keyword scores low because less is known
+     * about it — which is the true statement, and the reason says it.
+     */
+    const viewsScore = normalise(agg.totalViews, maxViews)
+    const rateScore = normalise(agg.engagementRate, maxRate)
+    const commentScore = normalise(agg.totalComments, maxComments)
+
+    const hasViews = agg.viewsCount > 0
+    const shortFormDivisor =
+      !hasViews && !anyKeywordHasViews ? Math.max(1, divisor - viewsWeight) : divisor
+
+    const shortFormWeighted =
+      ((hasViews ? viewsScore * viewsWeight : 0) +
+        (agg.rateableCount > 0 ? rateScore * engagementRateWeight : 0) +
+        (measurable ? commentScore * commentVolumeWeight : 0)) /
+      shortFormDivisor
+
+    const weighted = shortForm ? shortFormWeighted : longFormWeighted
 
     // Below the floor a keyword has not produced enough evidence to be ranked
     // at all — it keeps its components but cannot claim a trend.
@@ -136,6 +227,9 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
       term: agg.keyword.term,
       postCount: agg.postCount,
       totalEngagement: agg.totalEngagement,
+      // Travels with the total so a consumer can tell "no reactions" from
+      // "nothing stated a figure". Constraint 2.
+      measuredCount: agg.measuredCount,
       avgEngagement: agg.avgEngagement,
       velocity: agg.velocity,
       growthPct,
@@ -157,7 +251,19 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
   trends.sort((a, b) => b.trendScore - a.trendScore || b.totalEngagement - a.totalEngagement)
 
   const measurementByKeyword = new Map(
-    aggregates.map((a) => [a.keyword.id, { measured: a.measuredCount, unmeasured: a.unmeasuredCount }]),
+    aggregates.map((a) => [
+      a.keyword.id,
+      {
+        measured: a.measuredCount,
+        unmeasured: a.unmeasuredCount,
+        viewsCount: a.viewsCount,
+        totalViews: a.totalViews,
+        rateableCount: a.rateableCount,
+        engagementRate: a.engagementRate,
+        highSignalCount: a.highSignalCount,
+        postCount: a.postCount,
+      },
+    ]),
   )
 
   const take = clamp(topKeywords, 1, trends.length)
@@ -177,7 +283,41 @@ registerSkill<PipelinePayload>('validation.keyword.trend', async (payload, ctx) 
           : anyKeywordMeasured
             ? ` Scored on volume alone and therefore ranked below keywords that could be measured: none of its ${m.unmeasured} page(s) came from a source that states engagement, so the engagement, velocity and growth components are empty rather than zero.`
             : ` Scored on volume alone, as was every keyword this run: no lane returned a source that states engagement, so those three weights were set aside rather than counted as zero.`
-    trend.trendReason = describeTrend(trend, trends, minPostsToRank) + caveat
+    /*
+     * THE SHORT-FORM CAVEAT, and the high-signal flag.
+     *
+     * A flag, not a filter: nothing is dropped and nothing is scored
+     * differently because a post cleared the play floor. And a keyword with no
+     * stated plays is never flagged, because an unflagged keyword has to mean
+     * "did not reach the floor" rather than "we could not tell".
+     */
+    let shortFormNote = ''
+    if (shortForm && m !== undefined) {
+      const parts: string[] = []
+      parts.push(
+        m.viewsCount === 0
+          ? anyKeywordHasViews
+            ? `No page for this keyword stated a play count, so the views component is empty rather than zero and it ranks below keywords that could be measured on plays.`
+            : `No lane this run stated a play count, so the views weight was set aside for every keyword rather than counted as zero.`
+          : `${m.totalViews.toLocaleString()} play(s) across ${m.viewsCount} of ${m.postCount} page(s).`,
+      )
+      if (m.rateableCount > 0) {
+        parts.push(
+          `Engagement rate ${m.engagementRate}% over the ${m.rateableCount} page(s) stating both plays and reactions.`,
+        )
+      } else {
+        parts.push('Engagement rate was not computable: no page stated both plays and reactions.')
+      }
+      if (m.highSignalCount > 0) {
+        parts.push(
+          `${m.highSignalCount} page(s) at or above the ${highSignalViewFloor.toLocaleString()}-play high-signal floor.`,
+        )
+      }
+      shortFormNote = ` Scored on the short-form weight set. ${parts.join(' ')}`
+    }
+
+    trend.trendReason =
+      describeTrend(trend, trends, minPostsToRank) + (shortForm ? shortFormNote : caveat)
   })
 
   const trendingKeywords = trends.filter((t) => t.isTrending)
@@ -316,7 +456,160 @@ function keywordRelevance(tag: string, keyword: string): number {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   VALIDATION 3 · validation.credibility.score
+   VALIDATION 3 · validation.item.filter
+   ───────────────────────────────────────────────────────────────────────────
+   THE LAW THE SOURCE SPECIFICATION BREAKS HARDEST.
+
+   Its rule is "remove any post with under 10,000 views". In this corpus a post
+   captured through the open-web lane carries `viewsAvailable: false` and a zero
+   in `views` that means NOT APPLICABLE. Applied naively, that rule deletes
+   every open-web capture in the run as underperforming — a whole class of
+   evidence destroyed on the strength of a number nobody ever measured.
+
+   So every floor here tests only the candidates that STATE the figure it tests,
+   excludes the rest, and says so on the reason. And nothing is removed: a
+   candidate that fails a floor gets a verdict and a reason, exactly as the
+   "nothing is ever deleted" law requires everywhere else.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<PipelinePayload>('validation.item.filter', (payload, ctx) => {
+  const posts = payload.posts ?? []
+  if (posts.length === 0) return {}
+
+  const minViews = ctx.num('minViewsToConsider', 10000)
+  const minRate = ctx.num('minEngagementRate', 2)
+  const windowDays = ctx.num('recencyWindowDays', 30)
+  const failedVerdict = ctx.str('failedVerdict', 'rejected') as ValidationVerdict
+  const exemptUnmeasured = ctx.bool('exemptUnmeasured', true)
+
+  const now = new Date()
+  let failed = 0
+  let passed = 0
+  let untestedViews = 0
+  let untestedRate = 0
+  let viral = 0
+
+  for (const post of posts) {
+    // A verdict already reached by a stronger rule is not re-litigated. A prior
+    // rejection is a decision a human made; a duplicate is already linked.
+    if (post.priorRejection !== null || post.isDuplicate) continue
+
+    const failures: string[] = []
+    const caveats: string[] = []
+
+    /* ── Plays ─────────────────────────────────────────────────────────────
+     * Tested only where a play count was stated. `exemptUnmeasured` off is the
+     * naive reading, kept so the difference is demonstrable rather than
+     * theoretical — it reads an absent count as zero and fails the row.
+     */
+    if (minViews > 0) {
+      if (post.viewsAvailable) {
+        if (post.views < minViews) {
+          failures.push(
+            `${post.views.toLocaleString()} play(s), below the ${minViews.toLocaleString()} floor`,
+          )
+        }
+      } else if (exemptUnmeasured) {
+        untestedViews += 1
+        caveats.push('no play count was stated, so the plays floor was not applied')
+      } else {
+        failures.push(`no play count was stated and unstated figures are being read as zero`)
+      }
+    }
+
+    /* ── Engagement rate ───────────────────────────────────────────────────
+     * Needs BOTH figures. Either one missing makes the rate uncomputable, not
+     * low — dividing by an absent denominator is not a small number.
+     */
+    if (minRate > 0) {
+      const computable = post.viewsAvailable && post.metricsAvailable && post.views > 0
+      if (computable) {
+        const rate = ((post.reactions + post.comments) / post.views) * 100
+        if (rate < minRate) {
+          failures.push(`${rate.toFixed(2)}% engagement rate, below the ${minRate}% floor`)
+        }
+      } else if (exemptUnmeasured) {
+        untestedRate += 1
+        caveats.push(
+          'engagement rate was not computable — it needs both a play count and a reaction count, and this item states ' +
+            (post.viewsAvailable ? 'no reactions' : post.metricsAvailable ? 'no plays' : 'neither'),
+        )
+      } else {
+        failures.push('engagement rate was not computable and is being read as zero')
+      }
+    }
+
+    /* ── Recency ───────────────────────────────────────────────────────────
+     * The one floor almost every candidate can be tested against. A capture
+     * with no stated date took its capture time rather than being dropped, so
+     * the reason says which of the two it was judged on.
+     */
+    const ageDays = hoursSince(post.postedAt, now) / 24
+    if (ageDays > windowDays) {
+      failures.push(`posted ${Math.round(ageDays)} days ago, outside the ${windowDays}-day window`)
+    }
+
+    /* ── THE VIRAL TAG ─────────────────────────────────────────────────────
+     *
+     * The specification's rule: "flag any post with ER above 5% or views above
+     * 100K with a VIRAL tag". Both halves read their own knob, and both are
+     * applied ONLY where the figure was stated.
+     *
+     * A flag, never a verdict: nothing is dropped, promoted or scored
+     * differently because of it. And an unflagged post has to mean "did not
+     * reach the threshold" rather than "we could not tell", which is exactly
+     * why a post with no stated play count is never flagged and never
+     * un-flagged — it is simply not eligible, and the reason says so.
+     */
+    const flags: string[] = []
+    const viralRate = ctx.num('viralEngagementRate', 5)
+    const highSignalViews = ctx.num('highSignalViewFloor', 100000)
+
+    if (post.viewsAvailable && post.views >= highSignalViews) {
+      flags.push('high-signal-views')
+    }
+    if (post.engagementRate !== null && post.engagementRate >= viralRate) {
+      flags.push('viral-er')
+    }
+    if (flags.length > 0) {
+      flags.push('VIRAL')
+      viral += 1
+    }
+    post.signalFlags = flags
+
+    if (failures.length > 0) {
+      failed += 1
+      post.validation = failedVerdict
+      post.verdictReason =
+        `Failed the performance floors: ${failures.join('; ')}.` +
+        (caveats.length > 0 ? ` Not judged on the rest — ${caveats.join('; ')}.` : '')
+    } else {
+      passed += 1
+      if (caveats.length > 0) {
+        // The caveat travels even on a pass. "Survived the floors" and
+        // "survived the floors it could actually be tested against" are
+        // different claims, and the second is the true one.
+        post.verdictReason =
+          `Cleared every floor it could be tested against. Caveat: ${caveats.join('; ')}.`
+      }
+    }
+  }
+
+  ctx.log(
+    `${passed} cleared the floors, ${failed} failed and were marked ${failedVerdict}` +
+      (viral > 0
+        ? ` · ${viral} flagged VIRAL (at or above ${ctx.num('viralEngagementRate', 5)}% engagement rate, or ${ctx.num('highSignalViewFloor', 100000).toLocaleString()} plays)`
+        : '') +
+      (untestedViews > 0 || untestedRate > 0
+        ? ` · ${untestedViews} were not tested on plays and ${untestedRate} not on engagement rate, because they state no such figure — they were not failed for it`
+        : ''),
+  )
+
+  return { posts }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   VALIDATION 4 · validation.credibility.score
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<PipelinePayload>('validation.credibility.score', (payload, ctx) => {
@@ -427,7 +720,7 @@ registerSkill<PipelinePayload>('validation.freshness.score', (payload, ctx) => {
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   VALIDATION 6 · validation.duplicate.detect
+   VALIDATION 7 · validation.duplicate.detect
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<PipelinePayload>('validation.duplicate.detect', async (payload, ctx) => {
@@ -655,7 +948,271 @@ function daysAgo(iso: string): string {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   VALIDATION 7 · validation.verdict.route
+   VALIDATION 8 · validation.signal.repeat
+   ───────────────────────────────────────────────────────────────────────────
+   "This topic has come up three times." A claim about history, so it is read
+   from `keyword_signals` — the rows past runs actually wrote — and never
+   inferred from the current run alone.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<PipelinePayload>('validation.signal.repeat', async (payload, ctx) => {
+  const trends = payload.trends ?? []
+  if (trends.length === 0) return {}
+
+  const repeatSignalCount = ctx.num('repeatSignalCount', 3)
+  const lookbackRuns = ctx.num('lookbackRuns', 6)
+  const topRankThreshold = ctx.num('topRankThreshold', 5)
+
+  const history = await keywordRankHistory(ctx.workspaceId, lookbackRuns)
+  let flagged = 0
+
+  for (const trend of trends) {
+    const rows = history.get(trend.keywordId) ?? []
+    // This run counts too, when it ranked — the specification's "appearing in
+    // top results" includes the results being looked at.
+    const appearances = rows.filter((r) => r.rank !== null && r.rank <= topRankThreshold).length
+    const thisRun = trend.rank > 0 && trend.rank <= topRankThreshold ? 1 : 0
+    const total = appearances + thisRun
+
+    if (total >= repeatSignalCount) {
+      flagged += 1
+      trend.isRepeatSignal = true
+      trend.repeatCount = total
+      // Rule 6: the reason names the evidence, which here is the runs
+      // themselves — "three times" is only meaningful with a window attached.
+      trend.trendReason +=
+        ` Repeat signal: ranked in the top ${topRankThreshold} on ${total} of the last ${rows.length + 1} run(s), at or above the ${repeatSignalCount}-appearance threshold.`
+    } else {
+      trend.isRepeatSignal = false
+      trend.repeatCount = total
+    }
+  }
+
+  ctx.log(
+    flagged === 0
+      ? `No keyword reached ${repeatSignalCount} top-${topRankThreshold} appearances across the last ${lookbackRuns} runs`
+      : `${flagged} repeat signal(s) across the last ${lookbackRuns} runs`,
+  )
+
+  return { trends }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   VALIDATION 9 · validation.signal.sustained
+   ───────────────────────────────────────────────────────────────────────────
+   A DIFFERENT CLAIM FROM THE ONE ABOVE, which is why it is a second skill.
+
+   "Three times in six runs" and "in both of the last two runs" are different
+   findings: the first is recurrence, the second is that something is holding.
+   A topic that ranked in runs 1, 2 and 6 is a repeat signal and is not a
+   sustained one, and merging them would let the weaker evidence borrow the
+   stronger claim.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<PipelinePayload>('validation.signal.sustained', async (payload, ctx) => {
+  const trends = payload.trends ?? []
+  if (trends.length === 0) return {}
+
+  const windowCount = ctx.num('sustainedWindowCount', 2)
+  const topRankThreshold = ctx.num('topRankThreshold', 10)
+  const requireUnbroken = ctx.bool('requireUnbroken', true)
+
+  // One more than the window, because this run is the most recent member of it.
+  const history = await keywordRankHistory(ctx.workspaceId, windowCount + 2)
+  let flagged = 0
+
+  for (const trend of trends) {
+    const rows = history.get(trend.keywordId) ?? []
+    // Most recent first: this run, then the prior runs in descending order.
+    const sequence = [
+      trend.rank > 0 && trend.rank <= topRankThreshold,
+      ...rows.map((r) => r.rank !== null && r.rank <= topRankThreshold),
+    ]
+
+    let streak = 0
+    if (requireUnbroken) {
+      for (const held of sequence) {
+        if (!held) break
+        streak += 1
+      }
+    } else {
+      streak = sequence.slice(0, windowCount).filter(Boolean).length
+    }
+
+    if (streak >= windowCount) {
+      flagged += 1
+      trend.isSustainedSignal = true
+      trend.sustainedRuns = streak
+      trend.trendReason +=
+        ` Sustained trend: held a top-${topRankThreshold} rank in ${streak} ${requireUnbroken ? 'consecutive' : 'of the last ' + String(windowCount)} run(s).`
+    } else {
+      trend.isSustainedSignal = false
+      trend.sustainedRuns = streak
+      // Stated rather than left silent: "not sustained" with no window attached
+      // is unreadable, and a keyword with no history at all has not failed the
+      // test — it has not been able to take it.
+      if (rows.length === 0) {
+        trend.trendReason +=
+          ' No prior run to compare against, so a sustained trend could not be established either way.'
+      }
+    }
+  }
+
+  ctx.log(
+    flagged === 0
+      ? `No keyword held a top-${topRankThreshold} rank across ${windowCount} run(s)`
+      : `${flagged} sustained trend(s) across ${windowCount} run(s)`,
+  )
+
+  return { trends }
+})
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   VALIDATION 10 · validation.keyword.emerge
+   ───────────────────────────────────────────────────────────────────────────
+   Scores what `scraping.keyword.discover` found and decides what is worth
+   keeping. It PROPOSES: a stored candidate is inactive unless `autoActivate`
+   is on, because a keyword is not a label — it is an instruction to spend money
+   on every lane, every run (ADR-012).
+
+   Scoring reuses the existing axes exactly, including their absences. Volume
+   runs over every post carrying the term; engagement runs over the
+   metric-bearing subset; plays run over the view-bearing subset. A term
+   surfaced entirely by open-web captures scores on volume and says so, rather
+   than being penalised for a figure that was never stated.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<PipelinePayload>('validation.keyword.emerge', async (payload, ctx) => {
+  const candidates = payload.keywordCandidates ?? []
+  if (candidates.length === 0) return {}
+
+  const threshold = ctx.num('emergenceThreshold', 45)
+  const maxPromotions = ctx.num('maxPromotionsPerRun', 5)
+  const autoActivate = ctx.bool('autoActivate', false)
+  const newTermWeight = ctx.num('newTermWeight', 45)
+  const category = ctx.str('category', 'Adjacent')
+
+  // Normalised WITHIN this run's candidate set, like every other score in the
+  // Validation Agent. An absolute scale would make a quiet week's best
+  // discovery look like a failure and a loud week's worst look like a finding.
+  const maxPosts = candidates.reduce((m, c) => Math.max(m, c.posts), 0)
+  const maxAuthors = candidates.reduce((m, c) => Math.max(m, c.distinctAuthors), 0)
+  const maxEngagement = candidates.reduce(
+    (m, c) => Math.max(m, c.measuredPosts > 0 ? c.totalEngagement / c.measuredPosts : 0),
+    0,
+  )
+
+  const anyMeasured = candidates.some((c) => c.measuredPosts > 0)
+
+  const scored = candidates.map((candidate) => {
+    const volumeScore = normalise(candidate.posts, maxPosts)
+    const authorScore = normalise(candidate.distinctAuthors, maxAuthors)
+    const perPost = candidate.measuredPosts > 0 ? candidate.totalEngagement / candidate.measuredPosts : 0
+    const engagementScore = normalise(perPost, maxEngagement)
+    const relevanceScore = candidate.brandRelevance
+
+    /*
+     * THE SAME UNIFORM/SELECTIVE RULE the trend scorer applies, on a third set
+     * of axes. When NO candidate this run carries engagement, the axis is
+     * dropped from the divisor for everyone and the remaining three are scored
+     * on the same basis. When some were measured and this one was not, the full
+     * divisor stands and the missing component contributes nothing — so the
+     * candidate scores lower because less is known about it, which is the true
+     * statement rather than a penalty.
+     */
+    const measurable = candidate.measuredPosts > 0
+    const renormalise = !measurable && !anyMeasured
+    const weights = { volume: 35, authors: 20, engagement: 25, relevance: 20 }
+    const divisor = renormalise
+      ? weights.volume + weights.authors + weights.relevance
+      : weights.volume + weights.authors + weights.engagement + weights.relevance
+
+    const emergenceScore = clamp(
+      Math.round(
+        (volumeScore * weights.volume +
+          authorScore * weights.authors +
+          (measurable ? engagementScore * weights.engagement : 0) +
+          relevanceScore * weights.relevance) /
+          divisor,
+      ),
+      0,
+      100,
+    )
+
+    // Rule 6: the reason names the evidence, including the evidence it lacked.
+    const engagementClause = measurable
+      ? `averaging ${Math.round(perPost)} engagements across the ${candidate.measuredPosts} post(s) that stated any`
+      : anyMeasured
+        ? 'with no post stating engagement, so that component is empty rather than zero and it ranks below candidates that could be measured'
+        : 'with no post this run stating engagement, so that axis was set aside for every candidate'
+
+    const viewClause =
+      candidate.viewedPosts > 0
+        ? ` ${candidate.totalViews.toLocaleString()} play(s) across ${candidate.viewedPosts} post(s).`
+        : ''
+
+    const emergenceReason =
+      `Surfaced by the corpus, not seeded: appeared in ${candidate.posts} captured post(s) ` +
+      `from ${candidate.distinctAuthors} distinct author(s), ${engagementClause}, ` +
+      `at ${candidate.brandRelevance}% mean brand alignment.${viewClause}` +
+      (candidate.examples.length > 0 ? ` Example: ${candidate.examples[0]}` : '')
+
+    return { ...candidate, emergenceScore, emergenceReason }
+  })
+
+  scored.sort((a, b) => b.emergenceScore - a.emergenceScore)
+
+  const clearing = scored.filter((c) => c.emergenceScore >= threshold)
+  const promoted = clearing.slice(0, Math.max(1, maxPromotions))
+  const heldBack = clearing.length - promoted.length
+
+  const stored = await insertDiscoveredKeywords(
+    ctx.workspaceId,
+    promoted.map((c) => ({
+      term: c.term,
+      category,
+      weight: newTermWeight,
+      // ADR-012: inactive unless the operator has explicitly opted in. Discovery
+      // proposes; a human disposes.
+      active: autoActivate,
+      emergenceScore: c.emergenceScore,
+      reason: c.emergenceReason,
+      runId: payload.runId,
+    })),
+  )
+
+  for (const row of stored) {
+    ctx.emit(
+      'activity',
+      `New keyword “${row.term}” ${row.active ? 'discovered and switched on' : 'discovered — waiting for approval'} · score ${row.emergence_score ?? 0}`,
+      { status: 'ok', term: row.term, active: row.active, score: row.emergence_score },
+    )
+  }
+
+  ctx.log(
+    stored.length === 0
+      ? `No candidate reached the ${threshold}% emergence bar. Strongest was “${scored[0]?.term ?? 'none'}” at ${scored[0]?.emergenceScore ?? 0}%.`
+      : `${stored.length} keyword(s) discovered: ${stored.map((r) => `${r.term} (${r.emergence_score ?? 0})`).join(', ')}` +
+        (autoActivate
+          ? ' — switched on, so the next run captures them.'
+          : ' — stored inactive. Switch them on under Settings → Keywords to start capturing them.') +
+        (heldBack > 0 ? ` ${heldBack} more cleared the bar but sat outside the ${maxPromotions}-per-run ceiling.` : ''),
+  )
+
+  return {
+    keywordCandidates: scored,
+    discoveredKeywords: stored.map((r) => ({
+      id: r.id,
+      term: r.term,
+      score: r.emergence_score ?? 0,
+      active: r.active,
+    })),
+  }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   VALIDATION 11 · validation.verdict.route
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<PipelinePayload>('validation.verdict.route', (payload, ctx) => {

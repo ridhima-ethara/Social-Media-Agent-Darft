@@ -7,7 +7,7 @@
  * agents wrote.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ArrowRight, Check, ChevronLeft, ChevronRight, Clock, ExternalLink, FileText, Paperclip, RefreshCw, Send, Shuffle, Sparkles, X } from 'lucide-react'
 import { useStore } from '../store'
 
@@ -17,11 +17,12 @@ import { useStore } from '../store'
    The width outlives the dialog. */
 const ASIDE_MIN = 300
 const ASIDE_MAX = 720
-const ASIDE_DEFAULT = 392
+const ASIDE_DEFAULT = 620
 const ASIDE_KEY = 'ethara.review.asideWidth'
 import { ModelMenu } from '../components/model-menu'
 import { DEFAULT_CROP, PREVIEW_CROPS, PlatformPreview, type PreviewCrop } from '../components/previews'
 import { AssistantCore } from '../components/assistant/core'
+import { HookPanel } from '../components/short-form'
 import {
   Badge,
   Btn,
@@ -57,30 +58,9 @@ const POSTING_TIMES = [
 ]
 
 const CAPTION_ACTIONS = [
-  { label: 'Improve', instruction: 'Improve the clarity without changing the claim' },
   { label: 'Shorten', instruction: 'Make it shorter' },
   { label: 'Expand', instruction: 'Expand with more detail on the mechanism' },
-  { label: 'Change Tone', instruction: 'Make the tone more declarative' },
   { label: 'Add CTA', instruction: 'Add a call to action pointing at the published method' },
-]
-
-const IMAGE_ACTIONS = [
-  { label: 'Brighter', instruction: 'Brighter, more contrast in the background field' },
-  { label: 'Simpler', instruction: 'Simpler composition, fewer elements' },
-  { label: 'More accent', instruction: 'Lean harder on the accent family' },
-  { label: 'Add depth', instruction: 'Add depth with a layered gradient field' },
-]
-
-/*
- * The starter instructions, as a short chip and the sentence actually sent.
- * The chips used to BE the sentences, and four of them stacked one per line
- * filled the agent panel with more text than the post it was editing.
- */
-const CAPTION_PROMPTS = [
-  { label: 'Shorter, for CTOs', instruction: 'Make it shorter and more CTO-focused' },
-  { label: 'Lead with the number', instruction: 'Lead with the number instead of the framing' },
-  { label: 'Cut the second para', instruction: 'Remove the second paragraph' },
-  { label: 'Close on the blog', instruction: 'Rewrite the close so it points at the blog' },
 ]
 
 /* The design's tones: approved reads blue, published green, drafted amber. */
@@ -104,6 +84,14 @@ interface Revision {
   paraDelta: number
   body: string
   finding: string | null
+  /** Which agent was spoken to. An image turn changed no text, so it cannot be returned to. */
+  target: 'caption' | 'image'
+  /**
+   * The stored step's stamp, and the only thing that addresses it. Null for a
+   * step this session built but the server has not confirmed — which is exactly
+   * the step that must not offer a revert yet.
+   */
+  at: string | null
 }
 
 interface Bubble {
@@ -133,6 +121,76 @@ interface Reference {
 /** Blank-line separated blocks — the unit the Content Agent writes in. */
 function paragraphs(text: string): number {
   return text.split(/\n\s*\n/).filter((block) => block.trim().length > 0).length
+}
+
+/**
+ * A finding is raised, never resolved: the note says so when one applies.
+ * Shared by the stored thread and the one this session builds, so a step reads
+ * the same whether it was just taken or read back from the database.
+ */
+function findingIn(note: string): string | null {
+  return /brand|voice|rule|guideline|outrank/i.test(note) ? note : null
+}
+
+/**
+ * THE STORED THREAD, AS THE PANEL'S SPINE.
+ *
+ * Every instruction has always been appended to `content_ideas.feedback`; the
+ * panel simply never read it back, so closing the review panel lost the
+ * conversation even though the database still had it. This reads it.
+ *
+ * The deltas are still COUNTED here rather than taken from the model's own
+ * account of what it did — a described change and a counted one are not the
+ * same claim, and that holds for a step read from storage as much as for one
+ * taken a second ago. An image turn changed no text, so it carries the caption
+ * forward unchanged and reports no delta.
+ *
+ * Entries written before bodies were recorded have no `body`. They stay on the
+ * thread — nothing is ever deleted — and simply cannot be returned to, which
+ * `at: null` says by withholding the revert.
+ */
+function storedSpine(feedback: Array<Record<string, unknown>>, platform: Platform): Revision[] {
+  const out: Revision[] = []
+  let carried = ''
+
+  for (const entry of feedback) {
+    // Entries written before the thread was per-platform carry no platform;
+    // dropping them would hide history rather than filter it.
+    if (entry.platform !== undefined && entry.platform !== platform) continue
+
+    const note = typeof entry.note === 'string' ? entry.note : ''
+    const instruction = typeof entry.instruction === 'string' && entry.instruction.trim().length > 0
+      ? entry.instruction
+      : null
+    if (note === '' && instruction === null) continue
+
+    const target = entry.target === 'image' ? 'image' : 'caption'
+    const body = typeof entry.body === 'string' && entry.body.length > 0 ? entry.body : null
+    const at = typeof entry.at === 'string' ? entry.at : null
+
+    out.push({
+      id: at ?? `f-${out.length}`,
+      revision: typeof entry.revision === 'number' ? entry.revision : (out[out.length - 1]?.revision ?? 1),
+      instruction,
+      summary: note === '' ? (instruction ?? '') : note,
+      charDelta: body === null ? 0 : body.length - carried.length,
+      paraDelta: body === null ? 0 : paragraphs(body) - paragraphs(carried),
+      body: body ?? carried,
+      finding: findingIn(note),
+      target,
+      // Only a step that holds text can be returned to, and only once the
+      // server has stamped it.
+      at: body === null ? null : at,
+    })
+
+    if (body !== null) carried = body
+  }
+
+  // The first step opened the thread; it changed nothing, so it reports nothing.
+  if (out.length > 0) {
+    out[0] = { ...out[0], charDelta: 0, paraDelta: 0 }
+  }
+  return out
 }
 
 const MAX_REFERENCE_CHARS = 8_000
@@ -186,12 +244,17 @@ export function ReviewPanel() {
   const settings = useStore((s) => s.settings)
   const publishPhase = useStore((s) => s.publishPhase)
   const canPublish = useStore((s) => s.apiMode === 'connected' && s.mode.publishMode === 'live')
+  const hooks = useStore((s) => s.hooks)
+  const apiMode = useStore((s) => s.apiMode)
+  const generateHooks = useStore((s) => s.generateHooks)
+  const selectHook = useStore((s) => s.selectHook)
   const ensureDraft = useStore((s) => s.ensureDraft)
   const ensureImage = useStore((s) => s.ensureImage)
   const regenerateDraft = useStore((s) => s.regenerateDraft)
   const regenerateImage = useStore((s) => s.regenerateImage)
   const updateDraft = useStore((s) => s.updateDraft)
   const instructAI = useStore((s) => s.instructAI)
+  const revertDraft = useStore((s) => s.revertDraft)
   const instructImage = useStore((s) => s.instructImage)
   const setIdeaTime = useStore((s) => s.setIdeaTime)
   const setIdeaPlatform = useStore((s) => s.setIdeaPlatform)
@@ -212,6 +275,20 @@ export function ReviewPanel() {
   const [body, setBody] = useState('')
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [chatValue, setChatValue] = useState('')
+
+  /*
+   * The box is measured, not guessed. Height is reset to `auto` first so it can
+   * shrink when text is deleted — reading scrollHeight off the grown element
+   * would only ever ratchet upward. The CSS max-height caps it and takes over
+   * with a scrollbar past that.
+   */
+  const instructionBox = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    const box = instructionBox.current
+    if (!box) return
+    box.style.height = 'auto'
+    box.style.height = `${box.scrollHeight}px`
+  }, [chatValue])
   const [thinking, setThinking] = useState<string | null>(null)
   const [preference, setPreference] = useState<{ title: string; content: string } | null>(null)
   const [confirmPublish, setConfirmPublish] = useState(false)
@@ -221,17 +298,31 @@ export function ReviewPanel() {
   const [references, setReferences] = useState<Reference[]>([])
   const [attaching, setAttaching] = useState(false)
   /**
-   * The revision spine. Each entry is one instruction and what it measurably
-   * did to the draft — the character delta and the paragraph delta, both
-   * counted here rather than described by the model.
+   * The thread this SESSION built, used only when there is no stored one.
+   *
+   * Connected, the thread is server-truth and read back from the post's own
+   * history, so it survives closing the panel. Disconnected there is nothing to
+   * read back — the store never reached a database — so the session's own
+   * record is all there is, and it is honestly labelled as such below.
    */
-  const [spine, setSpine] = useState<Revision[]>([])
+  const [sessionSpine, setSessionSpine] = useState<Revision[]>([])
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [view, setView] = useState<'edit' | 'preview' | 'diff'>('edit')
   /** The feed crop the preview shows the creative in. Null means the platform's own. */
   const [cropChoice, setCropChoice] = useState<PreviewCrop | null>(null)
-  /** The left column, folded sideways. Open by default: it answers "why". */
-  const [whyOpen, setWhyOpen] = useState(true)
+  /**
+   * The left column, folded sideways. CLOSED by default.
+   *
+   * It answers "why does this post exist" — the scores, the captured page, why
+   * this slot, the other platforms. That is context worth having, but it is not
+   * what an operator opened the panel to do: they came to read and change the
+   * caption, and the column was taking 236px of the width the editor needed
+   * before anyone had asked for it.
+   *
+   * So it starts folded to its 52px rail, with its own label and glyphs still
+   * visible, and opens on a click. Nothing is hidden — the rail is the affordance.
+   */
+  const [whyOpen, setWhyOpen] = useState(false)
 
   /* ── the draggable right column ── */
   const [asideWidth, setAsideWidth] = useState(() => {
@@ -272,9 +363,48 @@ export function ReviewPanel() {
     setAsideWidth((width) => clampAside(width + (event.key === 'ArrowLeft' ? 24 : -24)))
   }
   const [restorePoint, setRestorePoint] = useState<string | null>(null)
+  /** The step currently being returned to, so its button can say so and the rest lock. */
+  const [reverting, setReverting] = useState<string | null>(null)
 
   const draft = idea ? drafts[`${idea.id}|${idea.platform}`] : undefined
   const asset = idea ? media[`${idea.id}|${idea.platform}`] : undefined
+
+  /*
+   * THE THREAD, READ BACK FROM THE POST.
+   *
+   * Every turn taken with the agent is appended to the post's own history
+   * server-side, so this survives closing the panel, reloading the page and
+   * coming back tomorrow. It is recomputed from `/state` rather than held in
+   * component state, which is what keeps it from drifting from the database.
+   *
+   * The session's own record is the fallback, not the source: it is what the
+   * panel has to show when the API is not running and nothing was ever stored.
+   */
+  const stored = useMemo(
+    () => (idea ? storedSpine(idea.feedback ?? [], idea.platform) : []),
+    [idea],
+  )
+  const spine = stored.length > 0 ? stored : sessionSpine
+  /** True when the thread on screen is this session's only and will not outlive it. */
+  const threadIsSessionOnly = stored.length === 0 && sessionSpine.length > 0
+
+  /*
+   * A STEP CAN ONLY BE RETURNED TO IF IT HOLDS TEXT.
+   *
+   * Entries written before bodies were recorded carry none, and the first
+   * version of this offered them a revert anyway: it wrote the empty string it
+   * had been carrying, and the caption went to nothing. An undo that destroys
+   * the draft is worse than no undo, so the button is withheld where there is
+   * demonstrably nothing to restore rather than guessed at.
+   *
+   * A stored step also needs its stamp — that is what addresses it on the
+   * server. Only a session-only thread reverts locally, because only then is
+   * there no stored thread to go through.
+   */
+  const canRevert = (rev: Revision): boolean =>
+    rev.target === 'caption' &&
+    rev.body.trim().length > 0 &&
+    (rev.at !== null || threadIsSessionOnly)
 
   /*
    * Ensure the composer is never empty when the panel opens.
@@ -296,7 +426,7 @@ export function ReviewPanel() {
     setBubbles([])
     setPreference(null)
     setConfirmPublish(false)
-    setSpine([])
+    setSessionSpine([])
     setSavedAt(null)
     setView('edit')
     setRestorePoint(null)
@@ -306,10 +436,12 @@ export function ReviewPanel() {
     setBody(draft?.body ?? '')
   }, [draft?.body])
 
-  // The first draft opens the spine, so R1 is always the agent's own writing.
+  // The first draft opens the session thread, so R1 is always the agent's own
+  // writing. Only needed where nothing was stored — connected, the server
+  // recorded that first draft itself and `stored` below reads it back.
   useEffect(() => {
     if (!draft?.body) return
-    setSpine((prev) => {
+    setSessionSpine((prev) => {
       if (prev.length > 0) return prev
       return [
         {
@@ -321,6 +453,8 @@ export function ReviewPanel() {
           paraDelta: 0,
           body: draft.body,
           finding: null,
+          target: 'caption',
+          at: null,
         },
       ]
     })
@@ -420,7 +554,7 @@ export function ReviewPanel() {
        * not the same claim.
        */
       const after = useStore.getState().drafts[`${idea.id}|${idea.platform}`]?.body ?? before
-      setSpine((prev) => [
+      setSessionSpine((prev) => [
         ...prev,
         {
           id: `r-${Date.now()}`,
@@ -430,8 +564,11 @@ export function ReviewPanel() {
           charDelta: after.length - before.length,
           paraDelta: paragraphs(after) - paragraphs(before),
           body: after,
-          // A finding is raised, never resolved: the note says so when one applies.
-          finding: /brand|voice|rule|guideline|outrank/i.test(note) ? note : null,
+          finding: findingIn(note),
+          target: 'caption',
+          // Unstamped: the server has not confirmed this step, so it offers no
+          // revert until the refetch brings back the stored one.
+          at: null,
         },
       ])
       // Offer to remember it, rather than silently learning.
@@ -441,6 +578,45 @@ export function ReviewPanel() {
           content: `The operator asked for this on "${idea.title}". Apply it by default on ${PLATFORM_LABEL[idea.platform]} drafts.`,
         })
       }
+    })
+  }
+
+  /**
+   * Returns the caption to an earlier step.
+   *
+   * A step the server stamped goes through the server, so the revert lands on
+   * the stored thread and outlives the panel. A step only this session knows
+   * about is written back locally — that is all there is to write back to — and
+   * the answer bubble says so rather than implying it was saved.
+   */
+  const revertTo = (rev: Revision): void => {
+    if (reverting !== null) return
+    // The button is already withheld for these; refusing here too means a
+    // restored empty caption cannot happen by any route.
+    if (rev.body.trim().length === 0) return
+
+    if (rev.at === null) {
+      setBody(rev.body)
+      updateDraft(idea.id, rev.body)
+      setRestorePoint(rev.id)
+      setSavedAt(Date.now())
+      setBubbles((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          speaker: 'assistant',
+          text: `Put the caption back to R${rev.revision}. This step is not on the stored history, so the change lives on this screen until you save it.`,
+        },
+      ])
+      return
+    }
+
+    setReverting(rev.id)
+    void revertDraft(idea.id, rev.at).then((note) => {
+      setReverting(null)
+      setRestorePoint(rev.id)
+      setSavedAt(Date.now())
+      setBubbles((prev) => [...prev, { id: `a-${Date.now()}`, speaker: 'assistant', text: note }])
     })
   }
 
@@ -774,7 +950,7 @@ export function ReviewPanel() {
             sits above the agent that changes it. The column scrolls as a
             whole; the resize grip stays put on its left edge. */}
         <aside
-          className="relative flex min-h-0 shrink-0 flex-col border-l border-line bg-surface-2 lg:w-[var(--aside-w)]"
+          className="@container relative flex min-h-0 shrink-0 flex-col border-l border-line bg-surface-2 lg:w-[var(--aside-w)]"
           style={{ ['--aside-w' as string]: `${asideWidth}px` }}
           aria-label="Preview and agent"
         >
@@ -805,10 +981,45 @@ export function ReviewPanel() {
             />
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3.5">
+          {/*
+            THE AGENT SITS BESIDE THE PREVIEW, NOT UNDER IT.
+
+            These two were stacked in a column, so reading the preview and talking
+            to SpongeBob meant scrolling between them — and the agent, which is the
+            thing you actually act with, sat below the fold.
+
+            The split is driven by a CONTAINER query rather than a viewport one,
+            because what decides whether two columns fit here is the width of THIS
+            resizable column, not the width of the window. The operator can drag
+            the column between 300 and 720px, so a viewport breakpoint would put
+            them side by side in 300px and stack them in 720px — exactly backwards.
+
+            Below the threshold they stack, which is the honest fallback rather
+            than two unreadably narrow columns.
+          */}
+          {/*
+            SIDE BY SIDE, EACH COLUMN SCROLLS ITSELF.
+
+            This row used to be the only scroller, so expanding a long caption in
+            the preview grew the row, stretched the agent card to match, and
+            pushed the composer off the bottom of the screen — you had to scroll
+            the preview back up to reach the thing you type into.
+
+            At @[560px] the row is `overflow-hidden` and each card carries its own
+            scroll region, so the preview can be as long as the post is without
+            moving the agent. Stacked, the row scrolls as one — that is the only
+            sensible behaviour when the cards are full width.
+          */}
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3.5 @[560px]:flex-row @[560px]:items-stretch @[560px]:overflow-hidden">
             {/* ── the live preview ── */}
-            <section className="flex flex-col gap-3.5 rounded-[16px] border border-line bg-surface p-4" aria-label="Live preview">
-              <div className="flex flex-wrap items-center gap-2.5">
+            {/* `flex-1 basis-0` rather than `w-1/2`: a literal half ignores the
+                16px gap, so the preview came out one gap WIDER than the agent
+                beside it and the two columns never lined up. Equal basis with
+                zero start width splits the remaining space evenly, gap included.
+                `p-[15px]` matches the agent's 1px gradient border plus its 14px
+                inner padding, so both cards' content starts on the same line. */}
+            <section className="flex min-w-0 flex-col gap-3.5 rounded-[16px] border border-line bg-surface p-[15px] @[560px]:min-h-0 @[560px]:flex-1 @[560px]:basis-0" aria-label="Live preview">
+              <div className="flex shrink-0 flex-wrap items-center gap-2.5">
                 <span className="h-[7px] w-[7px] rounded-full bg-good" aria-hidden="true" />
                 <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">LIVE PREVIEW · FEED</p>
                 {/* The crop the feed will show. The canvas is not changed, and
@@ -831,13 +1042,47 @@ export function ReviewPanel() {
                 </div>
               </div>
 
-              <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} crop={crop} />
+              {/* Only the post itself scrolls: the crop switch above and the
+                  regenerate row below stay reachable while a reviewer reads a
+                  caption long enough to need scrolling. `pr-1 -mr-1` keeps the
+                  scrollbar off the card's rounded corner. */}
+              <div className="@[560px]:-mr-1 @[560px]:min-h-0 @[560px]:flex-1 @[560px]:overflow-y-auto @[560px]:overscroll-contain @[560px]:pr-1">
+                {/*
+                  A SCRIPT HAS NO FEED PREVIEW, AND SHOWING ONE WOULD BE A LIE.
+                  `PlatformPreview` renders what the post will look like in the
+                  feed. A short-form script is never posted to a feed (ADR-010) —
+                  it is read off a page by a human who films it — so the column
+                  shows the script and its competing hooks instead, which is the
+                  artefact that actually exists.
+                */}
+                {idea.content_format === 'short_form_script' ? (
+                  <div className="flex flex-col gap-4">
+                    <pre className="whitespace-pre-wrap rounded-xl border border-line bg-surface-2 px-3 py-2.5 font-sans text-[12.5px] leading-relaxed text-ink">
+                      {body}
+                    </pre>
+                    <HookPanel
+                      hooks={idea.hooks ?? hooks[idea.id] ?? []}
+                      busy={false}
+                      apiConnected={apiMode === 'connected'}
+                      onGenerate={() => void generateHooks(idea.id)}
+                      onSelect={(hookId) => void selectHook(idea.id, hookId)}
+                    />
+                  </div>
+                ) : (
+                  <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} crop={crop} />
+                )}
+              </div>
 
               {/* The creative's canvas and model are not printed here: the
                   picture above already shows what was rendered, and the model
                   is chosen a few lines down. A creative that FELL BACK still
                   says so — that is a fact about the image, not a caption. */}
-              <div className="flex flex-wrap items-center gap-2">
+              <div
+                className="flex shrink-0 flex-wrap items-center gap-2"
+                /* Hidden rather than removed: a script has no creative, so
+                   "Regenerate" would render an asset nothing can publish. */
+                hidden={idea.content_format === 'short_form_script'}
+              >
                 {asset?.fallbackReason ? (
                   <span title={asset.fallbackReason} className="mono inline-flex shrink-0 items-center gap-1.5 text-[10.5px] tracking-[0.08em] text-serious">
                     <span className="h-1 w-1 rounded-full bg-serious" aria-hidden="true" />
@@ -856,21 +1101,39 @@ export function ReviewPanel() {
 
             {/* ── the agent ── */}
             <section
-              className="rounded-[17px] p-px"
+              /* `min-w-0` so a long revision note cannot push the column past its
+                 half. `flex-1 basis-0` mirrors the preview exactly, so the two
+                 are the same width. `flex flex-col` lets the body below fill the
+                 stretched height instead of leaving the card short. */
+              className="flex min-w-0 flex-col rounded-[17px] p-px @[560px]:min-h-0 @[560px]:flex-1 @[560px]:basis-0"
               style={{
                 background:
                   'linear-gradient(165deg, color-mix(in srgb, var(--color-magenta) 55%, transparent), color-mix(in srgb, var(--color-accent) 40%, transparent) 45%, var(--color-line))',
               }}
               aria-label={target === 'caption' ? 'SpongeBob, the content agent' : 'Minnie, the image agent'}
             >
-              <div className="relative flex flex-col gap-3 overflow-hidden rounded-[16px] bg-surface p-3.5">
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute -left-16 -top-16 h-[200px] w-[200px] rounded-full"
-                  style={{ background: 'radial-gradient(circle, var(--color-hud-glow), transparent 70%)' }}
-                />
+              {/*
+                NO `overflow-hidden` HERE, DELIBERATELY.
 
-                <div className="relative flex items-center gap-2.5">
+                The model picker in the composer below opens `absolute bottom-full`
+                — deliberately outside this box, so it can sit above the trigger.
+                Clipping this container cut that list off at the card edge, which
+                read as "the model menu will not scroll": the list WAS scrolling,
+                the rest of it was simply being painted away.
+
+                The clip existed only to keep the decorative corner glow inside the
+                rounded edge, so the glow now carries its own clipping layer and
+                the card itself stays open.
+              */}
+              <div className="relative flex min-h-0 flex-1 flex-col gap-3 rounded-[16px] bg-surface p-3.5">
+                <span aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-[16px]">
+                  <span
+                    className="absolute -left-16 -top-16 block h-[200px] w-[200px] rounded-full"
+                    style={{ background: 'radial-gradient(circle, var(--color-hud-glow), transparent 70%)' }}
+                  />
+                </span>
+
+                <div className="relative flex shrink-0 items-center gap-2.5">
                   <span className="relative shrink-0">
                     <AssistantCore state={thinking ? 'thinking' : 'dormant'} size={34} />
                     <span className="absolute bottom-0 right-0 h-[9px] w-[9px] rounded-full border-2 border-surface bg-good" aria-hidden="true" />
@@ -890,7 +1153,7 @@ export function ReviewPanel() {
                 {/* The latest step on the spine, in one line. The whole spine
                     is below, for anyone who wants to walk it. */}
                 {spine.length > 0 ? (
-                  <div className="relative flex items-center gap-2 text-[10.5px] text-ink-3">
+                  <div className="relative flex shrink-0 items-center gap-2 text-[10.5px] text-ink-3">
                     <span className="mono shrink-0 rounded-[6px] border border-magenta/35 px-1.5 py-px text-[9.5px] font-semibold text-magenta-ink">
                       R{spine[spine.length - 1].revision}
                     </span>
@@ -898,7 +1161,7 @@ export function ReviewPanel() {
                   </div>
                 ) : null}
 
-                <div className="relative flex overflow-hidden rounded-[10px] border border-line-strong" role="group" aria-label="What an instruction changes">
+                <div className="relative flex shrink-0 overflow-hidden rounded-[10px] border border-line-strong" role="group" aria-label="What an instruction changes">
                   {(['caption', 'image'] as const).map((t) => (
                     <button
                       key={t}
@@ -914,23 +1177,27 @@ export function ReviewPanel() {
                   ))}
                 </div>
 
-                <div className="relative flex flex-wrap gap-1.5">
-                  {(target === 'caption' ? CAPTION_PROMPTS : IMAGE_ACTIONS).map((action) => (
-                    <button
-                      key={action.label}
-                      type="button"
-                      onClick={() => send(action.instruction)}
-                      title={action.instruction}
-                      className="rounded-full border border-line-strong px-2.5 py-1 text-[10.5px] text-ink-2 transition-colors hover:border-magenta/50 hover:text-magenta-ink"
-                    >
-                      {action.label}
-                    </button>
-                  ))}
-                </div>
+                {/* NO STARTER CHIPS ON EITHER TAB.
+                    Both sets are gone — the caption's four and the image's four.
+                    A fixed chip is a worse instruction than the one the operator
+                    would type, and the field below takes any of them verbatim.
+                    The editor column keeps its own quick actions. */}
 
-                {/* ── the revision spine, and the conversation around it ── */}
+                {/* ── the revision spine, and the conversation around it ──
+                    Beside the preview this takes the whole middle of the card
+                    (`flex-1`), which is what pins the composer to the bottom
+                    edge; stacked, it keeps its own cap so it cannot swallow the
+                    page. `overscroll-contain` stops a wheel that reaches the end
+                    of the thread from scrolling the column behind it. */}
                 {spine.length > 1 || bubbles.length > 0 || thinking || preference ? (
-                  <div className="relative flex max-h-[300px] flex-col gap-3 overflow-y-auto border-t border-line pt-3.5">
+                  <div className="relative flex max-h-[320px] min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain border-t border-line pt-3.5 @[560px]:max-h-none @[560px]:flex-1">
+                    {/* Law 9 — degrade honestly. With no API there is no stored
+                        history, so the thread cannot claim to be one. */}
+                    {threadIsSessionOnly ? (
+                      <p className="mono shrink-0 text-[9.5px] uppercase tracking-[0.1em] text-warn">
+                        This session only · not stored
+                      </p>
+                    ) : null}
                     {spine.map((rev, i) => (
                       <div key={rev.id} className="flex flex-col gap-2.5" style={{ animation: `eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 60}ms both` }}>
                         {rev.instruction ? (
@@ -973,13 +1240,30 @@ export function ReviewPanel() {
                                 <p className="mt-0.5 text-[11px] leading-relaxed text-ink-2">{rev.finding}</p>
                               </div>
                             ) : null}
-                            {i < spine.length - 1 ? (
+                            {/*
+                              REVERT — offered on every earlier step that holds
+                              text. An image turn changed no caption, so there is
+                              nothing to return to and no button.
+
+                              Connected, this goes to the server: the revert is
+                              appended to the thread as its own step, so the
+                              steps after it survive and going forward again
+                              stays possible. Disconnected it writes the text
+                              back locally, and the store's answer says the
+                              history will not outlive the session.
+                            */}
+                            {i < spine.length - 1 && canRevert(rev) ? (
                               <button
                                 type="button"
-                                onClick={() => { setBody(rev.body); updateDraft(idea.id, rev.body); setRestorePoint(rev.id); setSavedAt(Date.now()) }}
-                                className="mono mt-1 text-[11px] text-ink-3 transition-colors hover:text-accent-bright"
+                                disabled={reverting !== null}
+                                onClick={() => revertTo(rev)}
+                                className="mono mt-1 text-[11px] text-ink-3 transition-colors hover:text-accent-bright disabled:opacity-40"
                               >
-                                {restorePoint === rev.id ? 'RESTORED' : 'RESTORE'}
+                                {reverting === rev.id
+                                  ? 'REVERTING…'
+                                  : restorePoint === rev.id
+                                    ? 'REVERTED'
+                                    : 'REVERT TO HERE'}
                               </button>
                             ) : null}
                           </div>
@@ -1014,10 +1298,24 @@ export function ReviewPanel() {
                       </div>
                     ) : null}
                   </div>
-                ) : null}
+                ) : (
+                  /* Nothing said yet. Beside the preview the card is as tall as
+                     the post, so this holds the middle open and says what to do
+                     with it rather than leaving a blank third of a column.
+                     Stacked, the card is its own height and needs no filler. */
+                  <div className="relative hidden min-h-0 flex-1 items-center justify-center border-t border-line pt-3.5 @[560px]:flex">
+                    {/* The image tab has no starter chips, so it must not point
+                        at any. */}
+                    <p className="max-w-[210px] text-center text-[11.5px] leading-relaxed text-ink-3">
+                      {target === 'caption'
+                        ? 'No revisions yet. Pick a starter above, or tell SpongeBob what to change.'
+                        : 'No revisions yet. Tell Minnie what to change about the image.'}
+                    </p>
+                  </div>
+                )}
 
                 {/* ── the instruction ── */}
-                <div className="relative border-t border-line pt-3">
+                <div className="relative shrink-0 border-t border-line pt-3">
                   {references.length > 0 ? (
                     <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Attached references">
                       {references.map((reference) => (
@@ -1046,61 +1344,89 @@ export function ReviewPanel() {
                     </ul>
                   ) : null}
 
-                  <form onSubmit={(event) => { event.preventDefault(); send(chatValue) }} className="flex items-center gap-2">
-                    <label
-                      title="Attach a reference file for the model"
-                      className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[10px] border border-line-strong text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-                    >
-                      <Paperclip size={13} aria-hidden="true" />
-                      <span className="sr-only">Attach a reference file</span>
-                      <input
-                        type="file"
-                        multiple
-                        accept="image/*,text/*,.md,.txt,.csv,.json,.yml,.yaml"
-                        className="hidden"
-                        onChange={(event) => { void attach(event.target.files); event.target.value = '' }}
-                      />
-                    </label>
-                    <input
+                  {/*
+                    TWO ROWS: WHAT TO ASK, THEN WHO ANSWERS AND GO.
+
+                    All four controls used to sit on one line, with the model
+                    picker at a fixed 176px. Beside the preview this column is
+                    roughly 290px wide, so 176 + two 36px buttons + the gaps left
+                    the instruction field about twenty pixels of it — an empty
+                    rounded box you could not tell was a text input — and pushed
+                    the send button past the card's edge.
+
+                    The instruction gets its own full-width row because it is the
+                    thing being written. The model still sits immediately beside
+                    send, so the decision still reads as one: what to ask, who
+                    answers, go — it just wraps to the line below instead of
+                    starving the field above it. The menu still opens upward from
+                    `bottom-full`, so it never covers what you typed.
+                  */}
+                  <form onSubmit={(event) => { event.preventDefault(); send(chatValue) }} className="flex flex-col gap-2">
+                    {/*
+                      A TEXTAREA, BECAUSE INSTRUCTIONS ARE NOT ONE LINE.
+
+                      This was a fixed `h-9` input. An instruction worth giving
+                      here — the topic, the comparison to draw, the thing to cut
+                      — runs past the width of a column this narrow, and an input
+                      scrolls horizontally: the beginning of your own sentence
+                      slides out of view while you are still writing the end of
+                      it, so you cannot re-read what you asked before sending it.
+
+                      It grows with the text instead, to a ceiling of roughly ten
+                      lines, and only then scrolls. Enter sends, so the control
+                      behaves as it always did; Shift+Enter takes a new line for
+                      instructions that want one.
+                    */}
+                    <textarea
+                      ref={instructionBox}
                       value={chatValue}
                       onChange={(event) => setChatValue(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault()
+                          send(chatValue)
+                        }
+                      }}
+                      rows={1}
                       placeholder={target === 'caption' ? 'Tell SpongeBob what to change…' : 'Tell Minnie what to change…'}
                       aria-label="Instruction"
-                      className="h-9 min-w-0 flex-1 rounded-[11px] border border-line-strong bg-surface-2 px-3 text-[12px] text-ink outline-none transition-colors focus:border-accent"
+                      className="max-h-[220px] w-full min-w-0 resize-none overflow-y-auto rounded-[11px] border border-line-strong bg-surface-2 px-3 py-2 text-[12px] leading-relaxed text-ink outline-none transition-colors focus:border-accent"
                     />
-                    {/*
-                      THE MODEL SITS BESIDE THE SEND BUTTON, NOT UNDER THE FORM.
-
-                      It used to be a full-width block below the composer, which
-                      put the choice of writer a whole row away from the action it
-                      governs — an operator typed an instruction, pressed send, and
-                      only then noticed which model would answer. Inline and
-                      immediately before the button, it reads as part of the same
-                      decision: what to ask, who answers, go.
-
-                      Fixed width and `shrink-0` so the instruction field keeps the
-                      remaining space, and the menu still opens upward from
-                      `bottom-full` so it never covers the composer.
-                    */}
-                    <div className="w-[176px] shrink-0">
-                      {target === 'caption' ? (
-                        <ModelMenu target="caption" selected={settings.captionModel} onSelect={(modelId) => updateSettings({ captionModel: modelId })} />
-                      ) : (
-                        <ModelMenu
-                          target="image"
-                          selected={settings.imageModel}
-                          onSelect={(modelId) => { updateSettings({ imageModel: modelId }); void regenerateImage(idea.id, idea.platform, modelId) }}
+                    <div className="flex items-center gap-2">
+                      <label
+                        title="Attach a reference file for the model"
+                        className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[10px] border border-line-strong text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+                      >
+                        <Paperclip size={13} aria-hidden="true" />
+                        <span className="sr-only">Attach a reference file</span>
+                        <input
+                          type="file"
+                          multiple
+                          accept="image/*,text/*,.md,.txt,.csv,.json,.yml,.yaml"
+                          className="hidden"
+                          onChange={(event) => { void attach(event.target.files); event.target.value = '' }}
                         />
-                      )}
+                      </label>
+                      <div className="min-w-0 flex-1">
+                        {target === 'caption' ? (
+                          <ModelMenu target="caption" selected={settings.captionModel} onSelect={(modelId) => updateSettings({ captionModel: modelId })} />
+                        ) : (
+                          <ModelMenu
+                            target="image"
+                            selected={settings.imageModel}
+                            onSelect={(modelId) => { updateSettings({ imageModel: modelId }); void regenerateImage(idea.id, idea.platform, modelId) }}
+                          />
+                        )}
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={chatValue.trim().length === 0}
+                        aria-label="Send the instruction"
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-transparent bg-[linear-gradient(135deg,var(--color-magenta),var(--color-accent))] text-on-accent transition-[filter,opacity] hover:brightness-110 disabled:opacity-40"
+                      >
+                        <ArrowRight size={14} aria-hidden="true" />
+                      </button>
                     </div>
-                    <button
-                      type="submit"
-                      disabled={chatValue.trim().length === 0}
-                      aria-label="Send the instruction"
-                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-transparent bg-[linear-gradient(135deg,var(--color-magenta),var(--color-accent))] text-on-accent transition-[filter,opacity] hover:brightness-110 disabled:opacity-40"
-                    >
-                      <ArrowRight size={14} aria-hidden="true" />
-                    </button>
                   </form>
 
                   {attaching ? <p className="mt-1 text-[10.5px] text-ink-3">Reading the attachment…</p> : null}

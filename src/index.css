@@ -168,11 +168,35 @@ body {
    */
   scrollbar-gutter: stable;
   /*
-   * Scroll chaining is the other jolt: reaching the end of the approvals list
-   * must not start scrolling whatever is behind it. `contain` stops the scroll
-   * at the pane's own boundary and suppresses the rubber-band overscroll that
-   * would otherwise flash the page background behind a dialog.
+   * ═══ SCROLL CHAINS BY DEFAULT; ONLY OVERLAYS CONTAIN ═══
+   *
+   * This was `contain` on every element, and it was the wrong default. Chaining
+   * is what a reader expects INSIDE a page: reach the bottom of the ranked
+   * queue, the keyword table or a platform column and the gesture should carry
+   * on scrolling the page. With `contain` everywhere, every one of those panes
+   * dead-ended — you had to move the pointer off the pane, or grab the
+   * scrollbar, to keep going.
+   *
+   * The rule was written for dialogs, where it IS right: a slide-over must not
+   * scroll the page behind it, and the rubber-band must not flash the
+   * background. So `contain` moves to the overlays that actually need it, and
+   * everything else chains.
+   *
+   * CalendarPage had already discovered this and patched one list back to
+   * `overscroll-auto` by hand; that local workaround is now the global rule and
+   * needs no per-pane opt-in.
    */
+  overscroll-behavior: auto;
+}
+
+/*
+ * The overlays that must NOT leak a gesture to the page behind them.
+ * Everything here floats above the document rather than sitting inside it.
+ */
+[role='dialog'],
+[role='dialog'] *,
+[data-overlay],
+[data-overlay] * {
   overscroll-behavior: contain;
 }
 
@@ -190,7 +214,11 @@ body {
  *
  * Clipping boxes therefore chain; real panes still contain.
  */
-[class*='overflow-hidden'] {
+/*
+ * Kept as a no-op guard: `auto` is the default now, but a future overlay rule
+ * that over-reaches would otherwise silently trap a clipping box.
+ */
+[class*='overflow-hidden']:not([role='dialog']):not([data-overlay]) {
   overscroll-behavior: auto;
 }
 
@@ -1134,6 +1162,20 @@ body.is-resizing * {
    The mark settles, the wordmark tracks in, the rule draws, the fields rise.
    Then the floor pans, the horizon breathes, and nothing on the form moves. */
 
+/*
+ * The scrim behind the run-completion report. Separate from `eth-rise`, which
+ * moves the panel itself — a backdrop that slides reads as a second object
+ * rather than as the room going dark behind the first.
+ */
+@keyframes eth-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 @keyframes eth-rise {
   from {
     opacity: 0;
@@ -1717,6 +1759,40 @@ body.is-resizing * {
   to   { transform: perspective(1600px) rotateX(6deg) scale(1); opacity: 1; }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE COMMAND-CENTRE PANELS SIT FLAT — NO 3D TILT
+   ───────────────────────────────────────────────────────────────────────────
+   These four classes are the hub's former 3D scene: two side panels rotated
+   into depth, the hero lifted toward the viewer, and the foot bar. They are all
+   `transform: none`, deliberately and at every size.
+
+   WHY THE EFFECT WAS REMOVED RATHER THAN TUNED.
+
+   Under `perspective`, a rotated plane's near corner projects OUTWARD and a
+   lifted plane is scaled UP — `translateZ(26px)` against a 1200px perspective
+   renders an element about 2% larger than its box. Neither is reflected in
+   layout, so neighbouring panels overlap while the grid still believes they fit.
+   That is what put "Everything else" across Published Posts and Create.
+
+   It was first tried as a wide-screen-only affordance, flattened below 1536px.
+   That failed on Windows, where a 1920px display at 100%, or a 2560px one at
+   125% scaling, both land ABOVE the threshold — the tilt stayed on and so did
+   the overlap. The projection distance depends on element height, perspective
+   depth and device pixel ratio together, so no single breakpoint is correct and
+   any value chosen is a guess that holds on one machine and fails on the next.
+
+   A decorative tilt is not worth a layout that breaks on a major platform. The
+   panels now sit in the plane, where the grid alone decides what is beside what
+   — and a grid cannot overlap. `stage-3d` keeps its perspective for the
+   genuinely 3D scenes elsewhere; the hub simply no longer uses it.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.hub-tilt-left,
+.hub-tilt-right,
+.hub-lift,
+.hub-foot {
+  transform: none;
+}
+
 .stage-3d {
   perspective: 1200px;
   transform-style: preserve-3d;
@@ -2098,6 +2174,25 @@ body.is-resizing * {
    REDUCED MOTION — REQUIRED, NOT OPTIONAL
    Content must appear instantly and completely. Narration renders whole.
    ═══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * SMOOTH SCROLLING, EVERYWHERE THAT SCROLLS.
+ *
+ * Set on the scroll containers rather than on `html`, because this app's page
+ * never scrolls — `<main>` and the panes inside it do, and `scroll-behavior`
+ * only applies to the element that actually scrolls.
+ *
+ * Overridden to `auto` under `prefers-reduced-motion` in the block below, with
+ * everything else.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  main,
+  aside,
+  [class*='overflow-y-auto'],
+  [class*='overflow-auto'] {
+    scroll-behavior: smooth;
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *,

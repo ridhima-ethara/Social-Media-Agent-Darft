@@ -10,7 +10,7 @@
 - **Id**: `scraping`
 - **Stage**: `discover`
 - **Hands off to**: `validation`
-- **Skills**: 8
+- **Skills**: 11
 - **Handlers**: `server/src/agents/scraping/handlers.ts`
 
 Resolves the active keyword set and captures each term on every platform lane in turn — LinkedIn, Instagram, X, Facebook — and once against the open web. The four platform lanes are read by Apify actors, which read the platform itself and state real reaction counts; the open web is read by crawl4ai, which reads what a search engine indexed and states none. Without an Apify token a platform lane degrades to the crawl4ai reading rather than disappearing, and every row records which of the two answered. Each captured page is scored against the brand topic set and the live Knowledge Base before it is admitted, so what reaches the pipeline is on-brand as well as on-keyword. Harvests the hashtags out of the bodies that carry them, then reads the strongest tags independently of the keyword query that surfaced them.
@@ -28,6 +28,7 @@ Loads the active keywords, sorts them by weight, slices to the per-run ceiling a
 | `scheduleFallback` | `weighted` | `weighted` falls back to the top-weighted active keywords, so a gap in the rota never costs a run. `skip` captures nothing and says so — honest, but a missing week then silently costs a week of capture. |
 | `maxKeywordsPerRun` | `12` | How many keywords a single run scrapes. Each one is a separate scrape call, so this is the main lever on run time and cost. |
 | `minWeight` | `40` | Keywords weighted below this are skipped, even when active. Lets you park a term without deleting it. |
+| `rotateAcrossRuns` | `true` | On, consecutive runs take DIFFERENT slices of the eligible set rather than the same top-weighted few every time. Without it a week’s rota resolves to one fixed list, so every run that week scrapes the same terms, finds the same posts, and the dedupe filter drops them — which reads as a platform that has stopped finding anything. The slice advances by the run count, so the whole set is covered over several runs instead of the same head being re-read. |
 | `expandSynonyms` | `true` | Also searches the declared synonyms for each keyword. Widens the catch and increases the duplicate rate, which the Validation Agent then absorbs. |
 
 ### `scraping.source.connect`
@@ -58,6 +59,17 @@ The capture call. Reads every enabled platform lane through its Apify actor and 
 | `minBrandRelevance` | `20` | A captured page must score at least this against the brand topic set and the Knowledge Base to be admitted. Zero keeps everything the search engine returned, on-topic or not. |
 | `retries` | `1` | How many times a failed capture is retried with exponential backoff before the lane is recorded as empty. |
 | `maxParallel` | `2` | How many keyword-and-lane pairs crawl at once. Each one drives a headless browser, so raising this competes for the same local CPU. |
+
+### `scraping.account.capture`
+
+Reads every account on the tracked-account list through its platform lane, so a named competitor is captured whether or not one of this week’s keywords happens to mention them.
+
+| Knob | Default | Description |
+|---|---|---|
+| `postsPerAccount` | `10` | How many of each tracked account’s recent posts to read. Platform lanes bill per result, so this multiplied by the number of active accounts is what a run of this lane costs. |
+| `maxAccountsPerRun` | `10` | A ceiling on how many tracked accounts a single run reads, so adding a twentieth handle does not quietly double every run. Accounts beyond it are skipped in order and the run says which. |
+| `minBrandRelevance` | `0` | An account post must score at least this against the brand topic set to be admitted. Zero by default, unlike the keyword lane: you tracked this account deliberately, so what they post is interesting even when it is off your own topics. |
+| `maxParallel` | `2` | How many accounts are read at once. Each one is a separate platform call. |
 
 ### `scraping.hashtag.harvest`
 
@@ -105,4 +117,27 @@ Drops posts already captured in a recent run, so the same item is not re-scored 
 | Knob | Default | Description |
 |---|---|---|
 | `historyDays` | `14` | How far back to check for an already-captured post. Longer windows suppress more repeats and cost a larger lookup. |
+
+### `scraping.keyword.discover`
+
+Extracts recurring terms out of the bodies this run captured, excluding everything already known, so a topic nobody thought to seed can still surface.
+
+| Knob | Default | Description |
+|---|---|---|
+| `candidatesPerRun` | `20` | How many of the strongest extracted terms are passed to scoring. Everything below the cut is dropped for this run — nothing is stored half-judged, and a genuinely recurring term surfaces again next run. |
+| `minPhraseWords` | `2` | Candidates shorter than this are never proposed. Two is the floor that makes discovery usable: a one-word candidate is almost always either a word the brand vocabulary already covers or something too generic to search — "model", "learning", "systems" all clear every other bar easily and are worthless as capture terms. Set it to 1 only if you want to review single words by hand. |
+| `phraseMaxWords` | `3` | Candidates are extracted as one-, two- and three-word phrases up to this length. Two and three words is where the real subjects live — "reward model" and "chain of thought" mean something that "reward" and "chain" do not. |
+| `minPostsCarrying` | `2` | How many DISTINCT captured posts must carry a term before it is a candidate. One post is that post’s own subject, not a trend, so the floor is two. Three was tried and returned nothing at all on a real 160-page corpus: candidates are taken from TITLES, and a specific topic is usually named in one title and merely discussed in the others, so demanding three separate namings rejects everything genuine along with the noise. |
+| `minDistinctAuthors` | `2` | How many distinct authors must be using it. One person posting six times about their own launch is not a movement, and without this bar that is exactly what ranks first. Posts with no stated author are counted as one shared unknown rather than as one author each, which is the conservative reading. |
+| `minBrandRelevance` | `25` | How well the posts carrying a term must align with the brand topic set, on average. Without a floor here the top discovery is reliably whatever recruiters and conference accounts were posting about, because that is what volume rewards. |
+
+### `scraping.transcript.fetch`
+
+Puts captured video through the local Whisper sidecar so a reel’s actual words become evidence. A failure leaves the transcript missing, never empty — the two are different facts and stay different.
+
+| Knob | Default | Description |
+|---|---|---|
+| `transcriptMaxMinutesPerRun` | `20` | The total minutes of audio one run may transcribe. Transcription runs locally, so the bill is wall-clock time on the machine serving the API — a run that transcribes two hundred reels blocks everything behind it. The WHISPER_MAX_MINUTES_PER_RUN deployment ceiling caps this regardless of what is set here, and the run says so when the clamp binds. |
+| `maxItems` | `12` | How many captured videos to attempt, highest engagement first. Reached before the minute budget on a corpus of short clips; the budget binds first on long ones. |
+| `skipTranscribed` | `true` | On, only items with no transcript are attempted. Off re-transcribes everything in range, which is what you want after changing the Whisper model and nothing else. |
 

@@ -17,18 +17,31 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { CornerDownLeft, Eraser, Sparkles } from 'lucide-react'
+import { CornerDownLeft, Eraser } from 'lucide-react'
 import { useStore } from '../../store'
 import { Select, Btn, PLATFORM_LABEL } from '../ui'
 import { AssistantCore } from './core'
 import { ConfirmCard } from './confirm-card'
 import { Exchange } from './exchange'
 
-/** Real examples, each mapping to a tool the plane already holds. */
-const EXAMPLES = ['Move it to Friday', 'Promote the top suggestion', 'Shorten the caption', 'How did last month perform?']
+/*
+ * NO CANNED PROMPTS.
+ *
+ * Four suggestion rows used to fill the panel before a single word had been
+ * exchanged, so the assistant looked busy while holding nothing — and they
+ * pushed the actual conversation below the fold once one started. The composer
+ * placeholder already says what the panel accepts, which is the same
+ * information in a line instead of a screenful.
+ */
 
-/** Older turns stay reachable in the rail; the panel leads with recent work. */
-const VISIBLE_EXCHANGES = 4
+/**
+ * How much history the panel shows.
+ *
+ * Raised from 4: the panel's job is the conversation, and four exchanges meant
+ * a normal back-and-forth scrolled its own beginning away. Anything older stays
+ * one click from here in the full transcript.
+ */
+const VISIBLE_EXCHANGES = 12
 
 export function CalendarAssistant() {
   const turns = useStore((s) => s.assistant.turns)
@@ -77,7 +90,23 @@ export function CalendarAssistant() {
   useEffect(() => {
     const element = scroller.current
     if (!element) return
-    element.scrollTop = element.scrollHeight
+    /*
+     * A PENDING CONFIRMATION MUST NOT ARRIVE BELOW THE FOLD.
+     *
+     * A bulk calendar instruction stops and waits for an answer. If the card
+     * asking for it renders off the bottom of the transcript, the operator sees
+     * their instruction accepted and the calendar unchanged, and concludes the
+     * assistant is broken — which is exactly what was reported.
+     *
+     * Scrolled on the next frame rather than immediately: the card is being
+     * laid out in this same commit, so measuring now would use the height the
+     * transcript had before it existed.
+     */
+    const toBottom = (): void => {
+      element.scrollTop = element.scrollHeight
+    }
+    toBottom()
+    if (pendingConfirm) requestAnimationFrame(toBottom)
   }, [turns, pendingConfirm])
 
   const send = (raw: string): void => {
@@ -106,7 +135,19 @@ export function CalendarAssistant() {
 
   return (
     <section
-      className="card flex flex-col overflow-hidden"
+      /*
+       * A BOUNDED HEIGHT, SO THE TRANSCRIPT CAN SCROLL.
+       *
+       * `flex-1 min-h-0 overflow-y-auto` on the transcript only scrolls when
+       * something above it constrains the height. This section used to take its
+       * height from its content, so the transcript grew forever and the popover
+       * around it did the scrolling instead.
+       *
+       * `max-h-[68vh]` bounds it against the viewport rather than a fixed pixel
+       * count, so it adapts to a laptop and a large monitor without a second
+       * breakpoint, and `min-h-0` lets the flex child actually shrink.
+       */
+      className="card flex max-h-[68vh] min-h-0 flex-col overflow-hidden"
       aria-label="Calendar assistant"
     >
       {/* ── Header ─────────────────────────────────────────────────────────── */}
@@ -173,7 +214,7 @@ export function CalendarAssistant() {
 
       {/* ── Transcript, or the opening prompts ─────────────────────────────── */}
       {hasTranscript ? (
-        <div ref={scroller} className="max-h-[26rem] min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {older > 0 ? (
             <button
               type="button"
@@ -197,50 +238,54 @@ export function CalendarAssistant() {
           ) : null}
         </div>
       ) : (
-        <div className="min-h-0 flex-1 px-3 py-3">
+        /*
+         * The empty state is one line, not a menu. An assistant that has done
+         * nothing yet should look like it has done nothing yet.
+         */
+        <div className="min-h-0 flex-1 px-3 py-6">
           <p className="text-[11.5px] leading-relaxed text-ink-3">
             {target
               ? `Working on “${target.title.slice(0, 32)}…”. I show the plan before I run it.`
-              : 'Pick a post above to act on one, or ask about the week. I show the plan before I run it.'}
+              : 'Ask about the week, or pick a post above to act on one. I show the plan before I run it.'}
           </p>
-
-          {/* Full-width rows rather than wrapped pills: at this column width a
-              pill row broke after every second chip and read as ragged. */}
-          <ul className="mt-2.5 space-y-1">
-            {EXAMPLES.map((example) => (
-              <li key={example}>
-                <button
-                  type="button"
-                  onClick={() => send(example)}
-                  className="group flex w-full items-center gap-2 rounded-lg border border-line px-2.5 py-1.5 text-left text-[11.5px] text-ink-2 transition-colors hover:border-accent hover:bg-surface-2 hover:text-ink"
-                >
-                  <Sparkles
-                    size={11}
-                    className="shrink-0 text-ink-3 transition-colors group-hover:text-accent-bright"
-                    aria-hidden="true"
-                  />
-                  <span className="truncate">{example}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
         </div>
       )}
 
       {/* ── Composer ───────────────────────────────────────────────────────── */}
-      <div className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-2.5">
-        <input
+      <div className="flex shrink-0 items-end gap-2 border-t border-line px-3 py-2.5">
+        {/*
+          A TEXTAREA THAT GROWS, NOT A ONE-LINE INPUT.
+
+          This was `<input>`, so anything longer than the box scrolled sideways
+          and the operator could see about eight words of what they had typed.
+          A caption instruction is routinely two sentences — "make it shorter
+          and open on the benchmark rather than the model" — and you cannot
+          check an instruction you cannot read.
+
+          It grows with the content up to a ceiling, then scrolls, so a long
+          paste is still reachable and the composer never eats the panel.
+          Enter still sends; Shift+Enter makes a new line, which is the pairing
+          people already expect from every other message box.
+        */}
+        <textarea
           value={value}
+          rows={1}
           onChange={(event) => setValue(event.target.value)}
+          onInput={(event) => {
+            const el = event.currentTarget
+            el.style.height = 'auto'
+            el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+          }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              send(value)
-            }
+            if (event.key !== 'Enter' || event.shiftKey) return
+            event.preventDefault()
+            send(value)
+            const el = event.currentTarget
+            el.style.height = 'auto'
           }}
           placeholder={target ? 'Change this post…' : 'Ask about the calendar…'}
           aria-label="Ask the calendar assistant"
-          className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none placeholder:text-ink-3"
+          className="min-w-0 flex-1 resize-none bg-transparent py-1 text-[12.5px] leading-relaxed text-ink outline-none placeholder:text-ink-3"
         />
         <Btn
           variant="primary"

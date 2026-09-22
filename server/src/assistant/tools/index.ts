@@ -11,6 +11,9 @@
  */
 
 import type { CalendarSlot, IdeaStatus, Platform } from '../../../../shared/agent-contract'
+import { HOOK_PATTERN_LABEL } from '../../../../shared/agent-contract'
+import { runSkill } from '../../agents/runtime'
+import type { CaptionPayload } from '../../agents/skills/index'
 import { TOOLS, TOOL_BY_ID, type ToolSpec } from '../../../../shared/tool-registry'
 import {
   checkBrandCompliance,
@@ -63,6 +66,13 @@ import {
   updateIdea,
   updateKeyword,
   upsertSkillOverride,
+  type IdeaRow,
+  activeVoiceProfile,
+  countVoiceSamples,
+  listHookVariants,
+  listTrackedAccounts,
+  listVoiceProfiles,
+  upsertTrackedAccount,
 } from '../../db/repo'
 import { assembleSnapshot } from '../context'
 
@@ -1726,3 +1736,576 @@ export function capabilities(): Array<{
     })),
   }))
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SHORT-FORM — scripts, hooks and the learned voice (ADR-007)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+tool('script.write', async (args, ctx) => {
+  const target = await resolveIdea(args, ctx)
+  const idea = await getIdea(ctx.workspaceId, target.id)
+  if (!idea) throw new Error('No such idea.')
+
+  /*
+   * REFUSES RATHER THAN SUBSTITUTING.
+   *
+   * A caption and a spoken script are different artefacts in different
+   * registers. Quietly writing a caption because the idea was not a script is
+   * how an operator ends up reviewing something nobody asked for — and the
+   * refusal names the one field that makes it possible.
+   */
+  if (idea.content_format !== 'short_form_script') {
+    return {
+      summary:
+        `“${idea.title}” is a written post, not a short-form script, so no script was written. ` +
+        'Change its content format to short_form_script first — writing a script for a post would ' +
+        'produce an artefact in a different register from the one that was planned.',
+      data: { ideaId: idea.id, contentFormat: idea.content_format },
+    }
+  }
+
+  const result = await generateDraft({
+    workspaceId: ctx.workspaceId,
+    trigger: ctx.trigger,
+    turnId: ctx.turnId,
+    ideaId: idea.id,
+    withImage: false,
+  })
+
+  const scored = result.hooks.filter((h) => h.confidence !== null).length
+
+  return {
+    summary:
+      `The script for “${idea.title}” is written — ${result.body.length} characters, grounded in ` +
+      `${result.grounding.length} Knowledge Base entr${result.grounding.length === 1 ? 'y' : 'ies'}, with ` +
+      `${result.hooks.length} hook variant(s), ${scored} of which could be scored against a stored post. ` +
+      'A script is exported for filming; it does not enter the publish path.',
+    data: {
+      ideaId: result.ideaId,
+      title: idea.title,
+      script: result.body,
+      hooks: result.hooks,
+      model: result.model,
+      source: result.source,
+    },
+    render: 'draft',
+    ...(result.fallbackReason === undefined ? {} : { warning: result.fallbackReason }),
+  }
+})
+
+tool('hook.generate', async (args, ctx) => {
+  const target = await resolveIdea(args, ctx)
+  const idea = await getIdea(ctx.workspaceId, target.id)
+  if (!idea) throw new Error('No such idea.')
+
+  if (idea.content_format !== 'short_form_script') {
+    return {
+      summary:
+        `“${idea.title}” is a written post. Hook variants are written for short-form scripts; a post's ` +
+        'first line is written by the caption agent as part of the post itself.',
+      data: { ideaId: idea.id, contentFormat: idea.content_format },
+    }
+  }
+
+  const result = await generateDraft({
+    workspaceId: ctx.workspaceId,
+    trigger: ctx.trigger,
+    turnId: ctx.turnId,
+    ideaId: idea.id,
+    withImage: false,
+  })
+
+  const unscored = result.hooks.filter((h) => h.confidence === null)
+
+  return {
+    summary:
+      `${result.hooks.length} hook(s) for “${idea.title}”: ` +
+      result.hooks.map((h) => `${HOOK_PATTERN_LABEL[h.pattern]} (${h.confidence === null ? 'no score' : `${h.confidence}/100`})`).join(', ') +
+      (unscored.length > 0
+        ? `. ${unscored.length} carry no confidence because no stored post resembled them closely enough to say anything — the reason is on each one.`
+        : '.'),
+    data: { ideaId: idea.id, title: idea.title, hooks: result.hooks },
+  }
+})
+
+tool('hook.list', async (args, ctx) => {
+  const target = await resolveIdea(args, ctx)
+  const hooks = await listHookVariants(ctx.workspaceId, target.id)
+
+  if (hooks.length === 0) {
+    return {
+      summary: `No hook variants are stored for “${target.title}”. Generate them to see the options.`,
+      data: { ideaId: target.id, hooks: [] },
+    }
+  }
+
+  const selected = hooks.find((h) => h.selected)
+  return {
+    summary:
+      `${hooks.length} hook(s) for “${target.title}”` +
+      (selected ? `, with the ${selected.pattern.replace('_', ' ')} one selected` : ', none selected yet') +
+      '.',
+    data: { ideaId: target.id, hooks },
+  }
+})
+
+tool('voice.profile.list', async (_args, ctx) => {
+  const profiles = await listVoiceProfiles(ctx.workspaceId)
+  const samples = await countVoiceSamples(ctx.workspaceId, 'short_form_script')
+  const active = profiles.find((p) => p.active)
+
+  return {
+    summary:
+      profiles.length === 0
+        ? `No voice profile has been derived. ${samples} short-form sample(s) are stored; a profile is derived from them, never hand-written.`
+        : `${profiles.length} profile(s), ${samples} stored sample(s). ` +
+          (active
+            ? `The active one rests on ${active.sample_count} sample(s), derived ${active.derived_at.slice(0, 10)}. It governs short-form scripts only — posts follow the brand rules.`
+            : 'None is active, so scripts are written in the brand register alone.'),
+    data: { profiles, sampleCount: samples },
+  }
+})
+
+tool('voice.profile.derive', async (_args, ctx) => {
+  const { payload, record } = await runSkill<CaptionPayload>(
+    'caption.voice.derive',
+    {
+      ideaId: '',
+      platform: 'linkedin',
+      title: '',
+      description: '',
+      sourceTopic: '',
+      hashtag: null,
+      angle: '',
+      audience: '',
+      format: '',
+      contentFormat: 'short_form_script',
+    },
+    { workspaceId: ctx.workspaceId, trigger: ctx.trigger, turnId: ctx.turnId ?? undefined },
+  )
+
+  if (!payload.voiceProfile) {
+    // A refusal with its count, not a failure. The skill already composed the
+    // sentence; repeating it here rather than rewording it keeps one answer.
+    return {
+      summary: payload.voiceProfileReason ?? 'No profile was derived, and no reason was given. That is a defect.',
+      data: { derived: false },
+    }
+  }
+
+  return {
+    summary:
+      `Voice profile derived from ${payload.voiceProfile.sample_count} stored sample(s). ` +
+      'Everything on it was counted from those samples — nothing about the voice was inferred. ' +
+      'It governs short-form scripts only and cannot relax a brand rule.',
+    data: { derived: true, profile: payload.voiceProfile, skill: record },
+    postcondition: {
+      description: 'An active short-form voice profile exists',
+      satisfied: (await activeVoiceProfile(ctx.workspaceId, 'short_form_script')) !== null,
+    },
+  }
+})
+
+tool('account.track', async (args, ctx) => {
+  const platform = args.platform as Platform
+  const handle = String(args.handle ?? '').trim()
+  const account = await upsertTrackedAccount(ctx.workspaceId, {
+    platform,
+    handle,
+    ...(typeof args.label === 'string' ? { label: args.label } : {}),
+  })
+  if (!account) throw new Error('That handle is empty once the @ is stripped.')
+
+  return {
+    summary:
+      `@${account.handle} is now tracked on ${PLATFORM_LABEL[platform]}. The tracked-account lane reads ` +
+      'it on every run, separately from the keyword queries.',
+    data: { account },
+    postcondition: { description: 'The account is active', satisfied: account.active },
+  }
+})
+
+tool('account.list', async (_args, ctx) => {
+  const accounts = await listTrackedAccounts(ctx.workspaceId)
+  const active = accounts.filter((a) => a.active)
+
+  return {
+    summary:
+      accounts.length === 0
+        ? 'No accounts are being tracked, so that capture lane reads nothing. Nothing is substituted for it.'
+        : `${active.length} active tracked account(s) of ${accounts.length}: ` +
+          active.map((a) => `@${a.handle} (${PLATFORM_LABEL[a.platform]})`).join(', ') +
+          '.',
+    data: { accounts },
+  }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE CALENDAR, IN BULK
+
+   Three tools that act on a SET. Everything above them acts on one idea, which
+   is not the shape most calendar instructions take: "move all LinkedIn posts to
+   mornings" is one sentence and six moves.
+
+   All three share one contract, and it is the point of them:
+
+     1 · SELECT   a set, by an explicit filter, and say how many matched.
+     2 · PLAN     every change as a before → after pair, with a reason.
+     3 * APPLY    them.
+     4 · VERIFY   by RE-READING the calendar from the database and comparing
+                  against what was asked — never by trusting the write.
+
+   Step 4 is why these exist rather than a loop of `idea.move`. A bulk edit that
+   half-applied and reported success is the failure that matters here, and the
+   only way to know is to look again afterwards.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** One intended change, kept as before/after so the diff is renderable. */
+interface SlotChange {
+  id: string
+  title: string
+  platform: Platform
+  from: { date: string; time: string }
+  to: { date: string; time: string }
+  /** Rule 6: every change names the evidence that produced it. */
+  reason: string
+}
+
+/** The bands `timeOfDay` resolves to. Named here so all three tools agree. */
+const TIME_BANDS: Record<string, string> = {
+  morning: '9:00 AM',
+  afternoon: '2:00 PM',
+  evening: '6:00 PM',
+}
+
+/**
+ * The scheduled ideas a bulk instruction applies to.
+ *
+ * Rejected ideas are never included: they carry a reason a human or an agent
+ * gave, and a bulk move must not quietly resurrect them onto the week.
+ */
+async function calendarSet(
+  ctx: ToolContext,
+  filter: { platform?: Platform; fromDate?: string; topic?: string },
+): Promise<IdeaRow[]> {
+  const all = await listIdeas(ctx.workspaceId, { limit: 300 })
+  const topic = filter.topic?.trim().toLowerCase()
+  return all.filter((idea) => {
+    if (idea.status === 'rejected') return false
+    if (filter.platform && idea.platform !== filter.platform) return false
+    if (filter.fromDate && idea.scheduled_date !== filter.fromDate) return false
+    if (topic !== undefined && topic !== '') {
+      const haystack = `${idea.title} ${idea.source_topic ?? ''} ${idea.hashtag_display ?? ''}`.toLowerCase()
+      if (!haystack.includes(topic)) return false
+    }
+    return true
+  })
+}
+
+/**
+ * Applies the planned changes and then RE-READS to prove they landed.
+ *
+ * The re-read is the whole of the verification requirement. `updateIdea`
+ * returning a row proves one statement executed; it does not prove the calendar
+ * now matches the instruction, and on a partial failure the two differ. So this
+ * fetches every touched idea back and compares its stored slot against the slot
+ * that was asked for.
+ *
+ * A mismatch is REPORTED, never swallowed and never described as success.
+ */
+async function applyAndVerify(
+  ctx: ToolContext,
+  changes: SlotChange[],
+): Promise<{ applied: SlotChange[]; mismatched: Array<SlotChange & { actual: string }> }> {
+  const applied: SlotChange[] = []
+
+  for (const change of changes) {
+    const updated = await updateIdea(ctx.workspaceId, change.id, {
+      scheduledDate: change.to.date,
+      scheduledTime: change.to.time,
+    })
+    if (updated) applied.push(change)
+  }
+
+  // Read back from the database, not from the update's return value.
+  const after = await listIdeas(ctx.workspaceId, { limit: 300 })
+  const byId = new Map(after.map((i) => [i.id, i]))
+  const mismatched: Array<SlotChange & { actual: string }> = []
+
+  for (const change of changes) {
+    const row = byId.get(change.id)
+    if (!row) {
+      mismatched.push({ ...change, actual: 'the idea is no longer on the calendar' })
+      continue
+    }
+    if (row.scheduled_date !== change.to.date || row.scheduled_time !== change.to.time) {
+      mismatched.push({ ...change, actual: `${row.scheduled_date} at ${row.scheduled_time}` })
+    }
+  }
+
+  return { applied, mismatched }
+}
+
+/** The sentence that reports a verified bulk change, or an unverified one. */
+function verdictLine(changes: SlotChange[], mismatched: Array<{ title: string; actual: string }>): string {
+  if (changes.length === 0) return 'Nothing matched, so nothing moved.'
+  if (mismatched.length === 0) {
+    return `${changes.length} post${changes.length === 1 ? '' : 's'} moved, and re-reading the calendar confirms every one is in the slot you asked for.`
+  }
+  return (
+    `${changes.length - mismatched.length} of ${changes.length} moved as asked. ` +
+    `${mismatched.length} did not, and re-reading the calendar is how I know: ` +
+    mismatched.map((m) => `“${m.title.slice(0, 40)}” is at ${m.actual}`).join('; ') +
+    '. Nothing here is reported as done that I could not see.'
+  )
+}
+
+/* ── calendar.swap ───────────────────────────────────────────────────────── */
+
+tool('calendar.swap', async (args, ctx) => {
+  const platform = typeof args.platform === 'string' ? (args.platform as Platform) : undefined
+
+  /*
+   * Two shapes, and the ids win. "Swap those two posts" names them exactly;
+   * "swap Tuesday and Thursday" names two days, and every post on each moves
+   * to the other — keeping its own time, because a swap changes which DAY a
+   * post runs on and was never asked to change when in the day it runs.
+   */
+  if (typeof args.firstId === 'string' && typeof args.secondId === 'string') {
+    const all = await listIdeas(ctx.workspaceId, { limit: 300 })
+    const a = all.find((i) => i.id === args.firstId)
+    const b = all.find((i) => i.id === args.secondId)
+    if (!a || !b) throw new Error('One of those two posts is not on the calendar.')
+
+    const changes: SlotChange[] = [
+      {
+        id: a.id, title: a.title, platform: a.platform,
+        from: { date: a.scheduled_date, time: a.scheduled_time },
+        to: { date: b.scheduled_date, time: b.scheduled_time },
+        reason: `Takes “${b.title.slice(0, 36)}”’s slot in the swap.`,
+      },
+      {
+        id: b.id, title: b.title, platform: b.platform,
+        from: { date: b.scheduled_date, time: b.scheduled_time },
+        to: { date: a.scheduled_date, time: a.scheduled_time },
+        reason: `Takes “${a.title.slice(0, 36)}”’s slot in the swap.`,
+      },
+    ]
+
+    const { mismatched } = await applyAndVerify(ctx, changes)
+    return {
+      summary: verdictLine(changes, mismatched),
+      data: { changes, mismatched, verified: mismatched.length === 0 },
+      render: 'table',
+      postcondition: {
+        description: 'Both posts hold each other’s former slot',
+        satisfied: mismatched.length === 0,
+      },
+    }
+  }
+
+  const first = resolveDay(args.firstDay)
+  const second = resolveDay(args.secondDay)
+  if (first.unreadable) throw unreadableDay(first.unreadable)
+  if (second.unreadable) throw unreadableDay(second.unreadable)
+  if (first.date === undefined || second.date === undefined) {
+    throw new Error('Name the two days to swap, or the two posts.')
+  }
+  if (first.date === second.date) throw new Error('Those are the same day — nothing to swap.')
+
+  const onFirst = await calendarSet(ctx, { ...(platform ? { platform } : {}), fromDate: first.date })
+  const onSecond = await calendarSet(ctx, { ...(platform ? { platform } : {}), fromDate: second.date })
+
+  if (onFirst.length === 0 && onSecond.length === 0) {
+    return {
+      summary: `Neither ${first.date} nor ${second.date} has a post on it${platform ? ` on ${PLATFORM_LABEL[platform]}` : ''}, so there is nothing to swap.`,
+      data: { changes: [], firstDay: first.date, secondDay: second.date },
+      render: 'text',
+    }
+  }
+
+  const changes: SlotChange[] = [
+    ...onFirst.map((i) => ({
+      id: i.id, title: i.title, platform: i.platform,
+      from: { date: i.scheduled_date, time: i.scheduled_time },
+      to: { date: second.date as string, time: i.scheduled_time },
+      reason: `Was on ${first.date}; the swap sends that day’s posts to ${second.date}. Keeps its ${i.scheduled_time} slot.`,
+    })),
+    ...onSecond.map((i) => ({
+      id: i.id, title: i.title, platform: i.platform,
+      from: { date: i.scheduled_date, time: i.scheduled_time },
+      to: { date: first.date as string, time: i.scheduled_time },
+      reason: `Was on ${second.date}; the swap sends that day’s posts to ${first.date}. Keeps its ${i.scheduled_time} slot.`,
+    })),
+  ]
+
+  const { mismatched } = await applyAndVerify(ctx, changes)
+  return {
+    summary:
+      `Swapped ${first.date} and ${second.date}${platform ? ` on ${PLATFORM_LABEL[platform]}` : ''} — ` +
+      `${onFirst.length} post${onFirst.length === 1 ? '' : 's'} one way, ${onSecond.length} the other. ` +
+      verdictLine(changes, mismatched),
+    data: { changes, mismatched, verified: mismatched.length === 0 },
+    render: 'table',
+    postcondition: {
+      description: `No post remains on its original day`,
+      satisfied: mismatched.length === 0,
+    },
+  }
+})
+
+/* ── calendar.bulk.move ──────────────────────────────────────────────────── */
+
+tool('calendar.bulk.move', async (args, ctx) => {
+  const platform = typeof args.platform === 'string' ? (args.platform as Platform) : undefined
+  const topic = typeof args.topic === 'string' ? args.topic : undefined
+  const from = resolveDay(args.fromDay)
+  if (from.unreadable) throw unreadableDay(from.unreadable)
+  const to = resolveDay(args.day)
+  if (to.unreadable) throw unreadableDay(to.unreadable)
+
+  const band = typeof args.timeOfDay === 'string' ? TIME_BANDS[args.timeOfDay] : undefined
+  const exact = resolveTime(args.time)
+  const newTime = exact ?? band
+
+  if (to.date === undefined && newTime === undefined) {
+    throw new Error('Tell me where to move them — a day, a time, or a time of day.')
+  }
+
+  const set = await calendarSet(ctx, {
+    ...(platform ? { platform } : {}),
+    ...(from.date ? { fromDate: from.date } : {}),
+    ...(topic ? { topic } : {}),
+  })
+
+  if (set.length === 0) {
+    const named = [
+      platform ? PLATFORM_LABEL[platform] : null,
+      from.date ? `on ${from.date}` : null,
+      topic ? `matching “${topic}”` : null,
+    ].filter(Boolean).join(' ')
+    return {
+      summary: `No scheduled post matches ${named || 'that'}, so nothing moved. Nothing was changed.`,
+      data: { changes: [], matched: 0 },
+      render: 'text',
+    }
+  }
+
+  const changes: SlotChange[] = set
+    .map((i) => ({
+      id: i.id, title: i.title, platform: i.platform,
+      from: { date: i.scheduled_date, time: i.scheduled_time },
+      to: { date: to.date ?? i.scheduled_date, time: newTime ?? i.scheduled_time },
+      reason: [
+        platform ? `${PLATFORM_LABEL[platform]} post` : 'Scheduled post',
+        from.date ? `on ${from.date}` : null,
+        topic ? `matching “${topic}”` : null,
+        to.date ? `moved to ${to.date}` : null,
+        newTime ? `set to ${newTime}` : null,
+      ].filter(Boolean).join(', ') + '.',
+    }))
+    // A post already in the target slot is not a change; counting it as one
+    // would inflate what this reports having done.
+    .filter((c) => c.from.date !== c.to.date || c.from.time !== c.to.time)
+
+  if (changes.length === 0) {
+    return {
+      summary: `All ${set.length} matching post${set.length === 1 ? ' is' : 's are'} already in that slot. Nothing moved.`,
+      data: { changes: [], matched: set.length },
+      render: 'text',
+    }
+  }
+
+  const { mismatched } = await applyAndVerify(ctx, changes)
+  return {
+    summary:
+      `${set.length} post${set.length === 1 ? '' : 's'} matched; ${changes.length} needed moving. ` +
+      verdictLine(changes, mismatched),
+    data: { changes, mismatched, matched: set.length, verified: mismatched.length === 0 },
+    render: 'table',
+    postcondition: {
+      description: to.date
+        ? `Every matching post is on ${to.date}`
+        : `Every matching post is at ${newTime}`,
+      satisfied: mismatched.length === 0,
+    },
+  }
+})
+
+/* ── calendar.spread ─────────────────────────────────────────────────────── */
+
+tool('calendar.spread', async (args, ctx) => {
+  const rawDays = Array.isArray(args.days) ? args.days : []
+  const dates: string[] = []
+  for (const raw of rawDays) {
+    const resolved = resolveDay(raw)
+    if (resolved.unreadable) throw unreadableDay(resolved.unreadable)
+    if (resolved.date !== undefined && !dates.includes(resolved.date)) dates.push(resolved.date)
+  }
+  if (dates.length === 0) throw new Error('Name the days to spread across.')
+
+  const platform = typeof args.platform === 'string' ? (args.platform as Platform) : undefined
+  const topic = typeof args.topic === 'string' ? args.topic : undefined
+  const limit = typeof args.limit === 'number' ? args.limit : undefined
+
+  const set = (await calendarSet(ctx, {
+    ...(platform ? { platform } : {}),
+    ...(topic ? { topic } : {}),
+  }))
+    // Strongest first, so if the set is larger than the days the best work
+    // lands on the earliest slots rather than wherever the sort happened to put it.
+    .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
+    .slice(0, limit ?? 20)
+
+  if (set.length === 0) {
+    return {
+      summary: `No scheduled post matches${platform ? ` on ${PLATFORM_LABEL[platform]}` : ''}${topic ? ` for “${topic}”` : ''}, so there is nothing to spread. Nothing was changed.`,
+      data: { changes: [], days: dates },
+      render: 'text',
+    }
+  }
+
+  /*
+   * ROUND ROBIN, NOT CHUNKS. One post per day before any day takes a second,
+   * which is what "spread" means — chunking would put three on Tuesday and
+   * none on Thursday and still claim to have spread them.
+   */
+  const changes: SlotChange[] = set
+    .map((idea, index) => {
+      const date = dates[index % dates.length] as string
+      const round = Math.floor(index / dates.length) + 1
+      return {
+        id: idea.id, title: idea.title, platform: idea.platform,
+        from: { date: idea.scheduled_date, time: idea.scheduled_time },
+        to: { date, time: idea.scheduled_time },
+        reason:
+          `Position ${index + 1} of ${set.length} by confidence, placed on ${date}` +
+          (round > 1 ? ` (round ${round}: more posts than days)` : '') + '.',
+      }
+    })
+    .filter((c) => c.from.date !== c.to.date)
+
+  if (changes.length === 0) {
+    return {
+      summary: `Those ${set.length} posts are already spread across ${dates.join(', ')}. Nothing moved.`,
+      data: { changes: [], days: dates },
+      render: 'text',
+    }
+  }
+
+  const { mismatched } = await applyAndVerify(ctx, changes)
+  const perDay = dates.map((d) => ({ date: d, count: changes.filter((c) => c.to.date === d).length }))
+
+  return {
+    summary:
+      `Spread ${set.length} post${set.length === 1 ? '' : 's'} across ${dates.length} day${dates.length === 1 ? '' : 's'} — ` +
+      perDay.map((d) => `${d.date}: ${d.count}`).join(', ') + '. ' +
+      verdictLine(changes, mismatched),
+    data: { changes, mismatched, perDay, days: dates, verified: mismatched.length === 0 },
+    render: 'table',
+    postcondition: {
+      description: `Spread across ${dates.length} day(s) with no day skipped`,
+      satisfied: mismatched.length === 0,
+    },
+  }
+})

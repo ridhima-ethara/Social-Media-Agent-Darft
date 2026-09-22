@@ -15,7 +15,12 @@ import { basename, join } from 'node:path'
 import express, { type Request, type Response, type Router } from 'express'
 import { z } from 'zod'
 
-import { PLATFORMS, type Platform } from '../../shared/agent-contract'
+import {
+  CONTENT_FORMATS,
+  PLATFORMS,
+  type ContentFormat,
+  type Platform,
+} from '../../shared/agent-contract'
 import {
   AGENTS,
   REGISTRY_SUMMARY,
@@ -53,6 +58,7 @@ import {
   insertActivity,
   insertKnowledgeEntry,
   latestKeywordSignals,
+  latestRunKeywordSignals,
   latestKnowledgeBuild,
   latestPipelineRun,
   listActivity,
@@ -90,6 +96,17 @@ import {
   upsertSkillOverride,
   withdrawIdea,
   mediaAssetById,
+  countVoiceSamples,
+  insertVoiceSamples,
+  listHookVariants,
+  listHookVariantsForIdeas,
+  listTrackedAccounts,
+  listVoiceProfiles,
+  listVoiceSamples,
+  selectHookVariant,
+  setTrackedAccountActive,
+  setVoiceProfileActive,
+  upsertTrackedAccount,
 } from './db/repo'
 import {
   conversationTranscript,
@@ -123,17 +140,38 @@ import {
   publishIdea,
   refreshAnalytics,
   renderIdeaImage,
+  revertDraft,
   runDiscoveryPipeline,
 } from './orchestrator'
 import { bus, publish, recentEvents, subscribe, toSseFrame, REPLAY_SIZE } from './events'
 import { PLATFORM_LABEL } from './agents/corpus'
 import { persistAgentRun } from './agents/persist-run'
+import { runSkill } from './agents/runtime'
+import type { CaptionPayload } from './agents/skills/index'
+import { describeWhisper, whisperTranscribe } from './integrations/whisper'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE WRAPPER
    ═══════════════════════════════════════════════════════════════════════════ */
 
 type Handler = (req: Request, res: Response, workspaceId: string) => Promise<unknown>
+
+/**
+ * A refusal with a status that says what KIND of refusal it is.
+ *
+ * Everything a route throws currently answers 500, which says "this broke".
+ * Some refusals are not breakages: "18 samples, 20 required" is a well-formed
+ * request whose answer is no, and a client cannot tell those apart from a crash
+ * without a status that distinguishes them. 422 is that status.
+ */
+export class HttpError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'HttpError'
+    this.status = status
+  }
+}
 
 function route(handler: Handler) {
   return async (req: Request, res: Response): Promise<void> => {
@@ -144,7 +182,8 @@ function route(handler: Handler) {
       res.json(result ?? { ok: true })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (!res.headersSent) res.status(500).json({ error: message })
+      const status = error instanceof HttpError ? error.status : 500
+      if (!res.headersSent) res.status(status).json({ error: message })
     }
   }
 }
@@ -182,20 +221,41 @@ const referenceSchema = z.object({
 type ReferenceInput = z.infer<typeof referenceSchema>
 
 /** Narrows a validated reference to what the skill payload carries. */
+/**
+ * Narrows a validated attachment to what the skill payload carries.
+ *
+ * ═══ THE BYTES NOW TRAVEL ═══
+ *
+ * This used to drop `dataUri` on the floor, so an attached image reached the
+ * writer as a NAME and a note saying it could not be read. That was honest —
+ * the model genuinely could not see it — but it was honest about a limitation
+ * this layer was imposing, not one the model had.
+ *
+ * `image` now carries the data URI through for image attachments. Whether a
+ * model actually receives it is decided further down, by whether that model can
+ * accept image parts; a text-only writer still gets the name and the note. The
+ * ceilings that matter — 6 MB per reference, 8 references — are enforced by
+ * `referenceSchema` before this runs, so nothing here can exceed them.
+ */
 function toReference(reference: ReferenceInput): {
   name: string
   mimeType: string
   text?: string
   note?: string
+  image?: string
 } {
+  const isImage =
+    reference.dataUri !== undefined &&
+    reference.text === undefined &&
+    reference.mimeType.startsWith('image/')
+
   return {
     name: reference.name,
     mimeType: reference.mimeType,
     ...(reference.text === undefined ? {} : { text: reference.text }),
+    ...(isImage ? { image: reference.dataUri } : {}),
     ...(reference.unreadableReason === undefined
-      ? reference.text === undefined && reference.dataUri !== undefined
-        ? { note: 'an image was attached; it is read by the vision model and described to the writer' }
-        : {}
+      ? {}
       : { note: reference.unreadableReason }),
   }
 }
@@ -444,6 +504,33 @@ export function createApiRouter(): Router {
           reason: statuses.mflux.reason,
           model: statuses.mflux.model,
         },
+        /*
+         * THE MODE IS ALWAYS VISIBLE (R7 · ADR-011).
+         *
+         * "Why does this reel have no transcript" must be answerable from here
+         * rather than inferred from a NULL column. Off is a supported state and
+         * says so; on names the resolved interpreter, the model and the minute
+         * ceiling that actually binds, because the operator's knob is capped by
+         * the deployment one and a slider that stopped mattering has to be
+         * visible.
+         */
+        whisper: {
+          configured: whisperTranscribe.isConfigured(),
+          reason: describeWhisper(),
+          model: config.whisper.model,
+          maxMinutesPerRun: config.whisper.maxMinutesPerRun,
+          maxSecondsPerItem: config.whisper.maxSecondsPerItem,
+        },
+        // The learned-voice surface, for the same reason the embedding coverage
+        // is reported: a feature that is configured but has nothing stored
+        // behaves identically to one that is switched off, and an operator
+        // asking "why does this not sound like us" needs to see which.
+        voice: database
+          ? {
+              profiles: (await listVoiceProfiles(await currentWorkspaceId())).length,
+              samples: await countVoiceSamples(await currentWorkspaceId(), 'short_form_script'),
+            }
+          : { profiles: 0, samples: 0 },
         // WHICH provider writes, not merely whether one can. An operator
         // reading this should not have to work out the precedence themselves.
         text: {
@@ -571,6 +658,263 @@ export function createApiRouter(): Router {
       const skillId = String(req.params.skillId)
       const removed = await deleteSkillOverride(workspaceId, skillId)
       return { ok: true, removed, values: defaultSkillConfig(skillId) }
+    }),
+  )
+
+  /* ── SHORT-FORM · VOICE PROFILES, HOOKS, TRACKED ACCOUNTS ────────────────── */
+  /*
+   * Every route below is guarded by `requireSession` (mounted above) and
+   * validated by zod. Reads are safe; the two generators mutate; nothing here
+   * is irreversible, because nothing here deletes and nothing here publishes.
+   */
+
+  api.get(
+    '/voice-profiles',
+    route(async (_req, _res, workspaceId) => ({
+      profiles: await listVoiceProfiles(workspaceId),
+      // The count the derive route will refuse below, returned beside the
+      // profiles so the screen can say "18 of 20" without a second request.
+      sampleCount: await countVoiceSamples(workspaceId, 'short_form_script'),
+    })),
+  )
+
+  api.get(
+    '/voice-samples',
+    route(async (req, _res, workspaceId) => ({
+      samples: await listVoiceSamples(workspaceId, {
+        contentFormat: (typeof req.query.contentFormat === 'string'
+          ? req.query.contentFormat
+          : 'short_form_script') as ContentFormat,
+        limit: Number(req.query.limit ?? 200),
+      }),
+    })),
+  )
+
+  /**
+   * Bulk paste of past scripts.
+   *
+   * De-duplicated on the body itself in the repository, because the realistic
+   * input is a paste an operator repeats after fixing one entry — and twenty
+   * samples counted as forty would inflate `sample_count`, which is a claim
+   * about how much evidence a profile rests on.
+   */
+  api.post(
+    '/voice-samples',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(
+        z.object({
+          samples: z
+            .array(
+              z.object({
+                body: z.string().min(20),
+                label: z.string().max(200).optional(),
+              }),
+            )
+            .min(1)
+            .max(200),
+          contentFormat: z.enum(CONTENT_FORMATS).default('short_form_script'),
+        }),
+        req.body,
+      )
+      const result = await insertVoiceSamples(
+        workspaceId,
+        body.samples.map((s) => ({
+          body: s.body,
+          contentFormat: body.contentFormat,
+          source: 'operator',
+          ...(s.label === undefined ? {} : { label: s.label }),
+        })),
+      )
+      return {
+        ...result,
+        total: await countVoiceSamples(workspaceId, body.contentFormat),
+      }
+    }),
+  )
+
+  /**
+   * Derives a profile from the stored samples.
+   *
+   * REFUSES below the floor and names the count it has. That refusal lives in
+   * the skill handler, not here — this route runs the skill and reports what it
+   * decided, so the REST caller and a pipeline run get the same answer for the
+   * same reason.
+   */
+  api.post(
+    '/voice-profiles/derive',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(
+        z.object({ contentFormat: z.enum(CONTENT_FORMATS).default('short_form_script') }),
+        req.body,
+      )
+      const { payload, record } = await runSkill<CaptionPayload>(
+        'caption.voice.derive',
+        {
+          ideaId: '',
+          platform: 'linkedin',
+          title: '',
+          description: '',
+          sourceTopic: '',
+          hashtag: null,
+          angle: '',
+          audience: '',
+          format: '',
+          contentFormat: body.contentFormat,
+        },
+        { workspaceId, trigger: 'api' },
+      )
+
+      if (payload.voiceProfile === null || payload.voiceProfile === undefined) {
+        // 422, not 500: the request was well formed and the answer is "not
+        // enough evidence". The reason already names the counts.
+        throw new HttpError(
+          422,
+          payload.voiceProfileReason ??
+            'No profile was derived, and the skill gave no reason. That is a defect — report it.',
+        )
+      }
+
+      return { profile: payload.voiceProfile, skill: record }
+    }),
+  )
+
+  api.patch(
+    '/voice-profiles/:id',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(z.object({ active: z.boolean() }), req.body)
+      const profile = await setVoiceProfileActive(workspaceId, String(req.params.id), body.active)
+      if (!profile) throw new Error('No such voice profile.')
+      // Deactivated, never deleted — the samples behind it stay readable and
+      // reactivating is one more call to this same route.
+      return { profile }
+    }),
+  )
+
+  api.get(
+    '/tracked-accounts',
+    route(async (_req, _res, workspaceId) => ({
+      accounts: await listTrackedAccounts(workspaceId),
+    })),
+  )
+
+  api.post(
+    '/tracked-accounts',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(
+        z.object({
+          platform: platformSchema,
+          handle: z.string().min(1).max(120),
+          label: z.string().max(200).optional(),
+          note: z.string().max(600).optional(),
+        }),
+        req.body,
+      )
+      const account = await upsertTrackedAccount(workspaceId, body)
+      if (!account) throw new Error('That handle is empty once the @ is stripped.')
+      return { account }
+    }),
+  )
+
+  api.patch(
+    '/tracked-accounts/:id',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(z.object({ active: z.boolean() }), req.body)
+      const account = await setTrackedAccountActive(
+        workspaceId,
+        String(req.params.id),
+        body.active,
+      )
+      if (!account) throw new Error('No such tracked account.')
+      return { account }
+    }),
+  )
+
+  api.get(
+    '/ideas/:id/hooks',
+    route(async (req, _res, workspaceId) => ({
+      hooks: await listHookVariants(workspaceId, String(req.params.id)),
+    })),
+  )
+
+  /**
+   * Generates the variant set for an idea.
+   *
+   * Runs the same four skills the pipeline runs, through the same runtime, so
+   * the `skill_runs` rows are indistinguishable from a scheduled run's — which
+   * is what makes "explain this run" work for an operator-triggered one.
+   */
+  api.post(
+    '/ideas/:id/hooks',
+    route(async (req, _res, workspaceId) => {
+      const idea = await getIdea(workspaceId, String(req.params.id))
+      if (!idea) throw new Error('No such idea.')
+
+      const result = await generateDraft({
+        workspaceId,
+        trigger: 'api',
+        ideaId: idea.id,
+        withImage: false,
+      })
+
+      return {
+        hooks: await listHookVariants(workspaceId, idea.id),
+        contentFormat: result.contentFormat,
+        ...(result.contentFormat === 'short_form_script'
+          ? {}
+          : {
+              note:
+                'This idea is a written post, not a short-form script, so no hook variants were ' +
+                'produced. Change its content format to generate hooks for it.',
+            }),
+      }
+    }),
+  )
+
+  api.patch(
+    '/hooks/:id/select',
+    route(async (req, _res, workspaceId) => {
+      // Marks the chosen variant and unmarks the rest. The others are kept:
+      // "the four we did not pick" is evidence about what this account decided.
+      const hooks = await selectHookVariant(workspaceId, String(req.params.id))
+      if (hooks.length === 0) throw new Error('No such hook variant.')
+      return { hooks }
+    }),
+  )
+
+  /**
+   * Writes the short-form script for an idea.
+   *
+   * Refuses on a `post` idea rather than quietly writing one: a caption and a
+   * script are different artefacts, and silently substituting one is how a
+   * review screen ends up showing something nobody asked for.
+   */
+  api.post(
+    '/ideas/:id/script',
+    route(async (req, _res, workspaceId) => {
+      const idea = await getIdea(workspaceId, String(req.params.id))
+      if (!idea) throw new Error('No such idea.')
+      if (idea.content_format !== 'short_form_script') {
+        throw new HttpError(
+          422,
+          `“${idea.title}” is a written post, not a short-form script. Set its content format to ` +
+            'short_form_script first; writing a script for a post would produce an artefact in a ' +
+            'different register from the one that was planned.',
+        )
+      }
+      const result = await generateDraft({
+        workspaceId,
+        trigger: 'api',
+        ideaId: idea.id,
+        withImage: false,
+      })
+      return {
+        script: result.body,
+        source: result.source,
+        model: result.model,
+        ...(result.fallbackReason === undefined ? {} : { fallbackReason: result.fallbackReason }),
+        hooks: result.hooks,
+        skills: result.skills,
+      }
     }),
   )
 
@@ -1349,6 +1693,33 @@ export function createApiRouter(): Router {
     }),
   )
 
+  /*
+   * REVERT — the operator's undo.
+   *
+   * The step is named by its `at` stamp rather than a revision number: an
+   * instruction that changed nothing leaves the number where it was, so a
+   * number can address two entries and a stamp addresses exactly one.
+   */
+  api.post(
+    '/ideas/:id/revert',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(
+        z.object({
+          platform: platformSchema,
+          at: z.string().min(1),
+        }),
+        req.body,
+      )
+      return revertDraft({
+        workspaceId,
+        trigger: 'api',
+        ideaId: String(req.params.id),
+        platform: body.platform,
+        at: body.at,
+      })
+    }),
+  )
+
   api.patch(
     '/ideas/:id',
     route(async (req, _res, workspaceId) => {
@@ -1915,6 +2286,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     workspace,
     keywords,
     keywordSignals,
+    trending,
     hashtags,
     topHashtags,
     scraped,
@@ -1932,10 +2304,18 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     brief,
     confirm,
     run,
+    voiceProfiles,
+    voiceSampleCount,
+    trackedAccounts,
   ] = await Promise.all([
     getWorkspace(workspaceId),
     listKeywords(workspaceId, false),
-    latestKeywordSignals(workspaceId),
+    latestRunKeywordSignals(workspaceId),
+    // Run-scoped, unlike `keywordSignals` above. The keyword table wants the
+    // last thing known about every term; "what is trending" is a verdict the
+    // LATEST run reached about the terms it actually scanned, and mixing the
+    // two put five rank-1 keywords from five different runs on one panel.
+    trendingKeywords(workspaceId, 5),
     listHashtags(workspaceId, { limit: 400 }),
     listHashtags(workspaceId, { top: true, limit: config.knowledge.hashtagCount }),
     listScrapedItems(workspaceId, { limit: 200 }),
@@ -1953,13 +2333,30 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     latestBrief(workspaceId),
     pendingConfirmation(workspaceId),
     latestPipelineRun(workspaceId),
+    listVoiceProfiles(workspaceId),
+    countVoiceSamples(workspaceId, 'short_form_script'),
+    listTrackedAccounts(workspaceId),
   ])
 
   const ideaIds = ideas.map((i) => i.id)
-  const [drafts, media] = await Promise.all([
+  const [drafts, media, hooks] = await Promise.all([
     listDraftsForIdeas(ideaIds),
     listMediaForIdeas(ideaIds),
+    listHookVariantsForIdeas(workspaceId, ideaIds),
   ])
+
+  /*
+   * Hooks grouped by idea, the same shape `draftMap` and `mediaMap` use, so the
+   * store reconciles all three identically. Rows rather than a blob all the way
+   * to the client: a variant's confidence and the basis behind it belong to the
+   * variant, and flattening them would lose which evidence went with which hook.
+   */
+  const hookMap: Record<string, unknown[]> = {}
+  for (const h of hooks) {
+    const list = hookMap[h.idea_id] ?? []
+    list.push(h)
+    hookMap[h.idea_id] = list
+  }
 
   const draftMap: Record<string, Record<string, unknown>> = {}
   for (const d of drafts) {
@@ -2023,6 +2420,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     },
     keywords,
     keywordSignals,
+    trending,
     hashtags,
     topHashtags,
     scraped,
@@ -2032,9 +2430,11 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
       platformRank: i.platform_rank,
       draft: draftMap[`${i.id}|${i.platform}`] ?? null,
       media: mediaMap[`${i.id}|${i.platform}`] ?? null,
+      hooks: hookMap[i.id] ?? [],
     })),
     drafts: draftMap,
     media: mediaMap,
+    hooks: hookMap,
     /*
      * Same reason as `mediaMap` above: `listPosts` joins `ma.data_uri`, so the
      * published feed carried another several megabytes of base64. The published
@@ -2053,6 +2453,9 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     analytics,
     reviewQueue,
     sources,
+    voiceProfiles,
+    voiceSampleCount,
+    trackedAccounts,
     pipeline: run,
     platformLabels: PLATFORM_LABEL,
     assistant: {
@@ -2075,6 +2478,12 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
       // password is accepted, and that is a fact an operator needs.
       auth: { enforced: authEnforced() },
       assistantProvider: config.assistant.provider,
+      // Off is a supported state, so it has to be stated rather than inferred
+      // from an absent transcript.
+      transcription: {
+        configured: whisperTranscribe.isConfigured(),
+        reason: describeWhisper(),
+      },
       integrations: integrationReport().adapters,
     },
   }

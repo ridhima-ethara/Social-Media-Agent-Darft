@@ -12,6 +12,8 @@ import type {
   AgentRunStatus,
   CalendarSlot,
   Confidence,
+  ContentFormat,
+  HookPattern,
   IdeaStatus,
   OperatorRole,
   Platform,
@@ -25,6 +27,8 @@ export type {
   AgentRunStatus,
   CalendarSlot,
   Confidence,
+  ContentFormat,
+  HookPattern,
   IdeaStatus,
   OperatorRole,
   Platform,
@@ -70,6 +74,19 @@ export interface Keyword {
   category: string
   weight: number
   active: boolean
+  /**
+   * Where this term came from (ADR-012). `'discovered'` means the platform
+   * extracted it from a captured corpus rather than a human typing it.
+   *
+   * Rendered, not hidden: once discovered terms flow into the trend ranking,
+   * "is this trending because we chose to watch it, or because the corpus
+   * surfaced it" is a question about every row on the screen.
+   */
+  origin?: 'seeded' | 'discovered'
+  discovered_at?: string | null
+  /** The sentence naming the posts and figures behind it. Always shown. */
+  discovery_reason?: string | null
+  emergence_score?: number | null
   created_at: string
 }
 
@@ -92,6 +109,14 @@ export interface KeywordSignal {
   /** The strongest captured post for it, by engagement. */
   top_post_url?: string | null
   top_post_title?: string | null
+  /**
+   * How many of this keyword's posts stated an engagement figure.
+   *
+   * Zero means `total_engagement` is N/A, not nil — a keyword captured from
+   * search-indexed pages has no reactions to report, which is not the same
+   * claim as a keyword whose posts were measured and drew none.
+   */
+  measured_count?: number
   captured_at: string
 }
 
@@ -143,6 +168,36 @@ export interface ScrapedItem {
    * performance reading of zero.
    */
   metrics_available: boolean
+  /**
+   * Plays, and whether the lane stated any. A SEPARATE flag from
+   * `metrics_available`, because a post can state reactions with no plays and a
+   * reel can state both. When `views_available` is false, `views` means *not
+   * applicable* and must never be rendered as a performance reading of zero.
+   */
+  views: number
+  views_available: boolean
+  /** The post's own opening line — what the specification calls the hook. */
+  hook: string | null
+  /**
+   * (reactions + comments) / views as a percentage.
+   *
+   * `null` means NOT COMPUTABLE — the post stated one figure and not the other.
+   * Render it as "n/a", never as 0%: a 0 asserts the post was seen and ignored,
+   * which is a much stronger claim than the evidence supports.
+   */
+  engagement_rate: number | null
+  /** reel | short | video | post | article. */
+  media_format: string | null
+  /** Flags raised by the filter. `'VIRAL'` is present when either threshold hit. */
+  signal_flags?: string[]
+  /**
+   * The spoken words of a captured video. `null` is NOT TRANSCRIBED and must
+   * render as "not transcribed", never as an empty transcript or a blank field
+   * — the two are different facts and the schema keeps them different.
+   */
+  transcript: string | null
+  transcript_source: string | null
+  transcript_confidence: number | null
   /** 0-100 alignment with the brand topics and the Knowledge Base, at capture. */
   brand_relevance: number
   posted_at: string | null
@@ -202,10 +257,81 @@ export interface IdeaAnalysis {
 
 export interface Draft {
   body: string
+  /**
+   * Which kind of artefact the body is. A beat-structured script rendered as
+   * though it were a caption is a silent category error rather than a visible
+   * one, so the format travels with the body.
+   */
+  content_format?: ContentFormat
   revision: number
   model: string
   source: 'live' | 'fixture'
   updatedAt?: string
+}
+
+/**
+ * One hook variant, exactly as the row stores it.
+ *
+ * `confidence: null` is a FIRST-CLASS OUTCOME, not a missing value: it means no
+ * stored post resembled this hook closely enough to say anything about it.
+ * Render it as "no score" with `confidence_basis` beside it — never as 0, never
+ * as a dash, and never hidden. `confidence_basis` is always present and always
+ * names either the evidence or its absence.
+ */
+export interface HookVariant {
+  id: string
+  idea_id: string
+  draft_id: string | null
+  body: string
+  pattern: HookPattern
+  rank: number
+  confidence: number | null
+  confidence_basis: string
+  matched_post_id: string | null
+  matched_item_id: string | null
+  source: 'live' | 'fixture'
+  model: string | null
+  fallback_reason: string | null
+  selected: boolean
+  created_at: string
+}
+
+/** A learned voice profile. Derived from samples, never hand-written (ADR-008). */
+export interface VoiceProfile {
+  id: string
+  name: string
+  content_format: ContentFormat
+  /** How much evidence it rests on. Always rendered beside it. */
+  sample_count: number
+  derived_at: string
+  vocabulary: { terms?: Array<{ term: string; occurrences: number }> }
+  sentence_stats: Record<string, number>
+  structure_pattern: Record<string, unknown>
+  cta_pattern: Record<string, unknown>
+  active: boolean
+  created_at: string
+}
+
+export interface VoiceSample {
+  id: string
+  profile_id: string | null
+  content_format: ContentFormat
+  body: string
+  source: string
+  label: string | null
+  captured_at: string
+}
+
+/** An account the tracked-account capture lane reads, by name. */
+export interface TrackedAccount {
+  id: string
+  platform: Platform
+  handle: string
+  label: string | null
+  note: string | null
+  active: boolean
+  last_captured_at: string | null
+  added_at: string
 }
 
 export interface MediaAsset {
@@ -249,6 +375,12 @@ export interface Idea {
   platform_rank: number | null
   calendar_slot: CalendarSlot
   status: IdeaStatus
+  /**
+   * Which kind of artefact this becomes (ADR-007). `short_form_script`
+   * terminates at export and is refused by the publish path, so the calendar
+   * must not offer to schedule one.
+   */
+  content_format: ContentFormat
   analysis: IdeaAnalysis
   feedback: Array<Record<string, unknown>>
   is_new_trend: boolean
@@ -263,6 +395,8 @@ export interface Idea {
   platformRank?: number | null
   draft?: Draft | null
   media?: MediaAsset | null
+  /** The hook variants, for a script. `[]` for a post — never undefined. */
+  hooks?: HookVariant[]
 }
 
 export interface PublishedPost {
@@ -666,7 +800,17 @@ export interface StatePayload {
     settings: Record<string, unknown>
   }
   keywords: Keyword[]
+  /** The last thing known about every keyword, across all runs. */
   keywordSignals: KeywordSignal[]
+  /**
+   * What the MOST RECENT run found trending, scoped to that run.
+   *
+   * Distinct from `keywordSignals` on purpose. A keyword the latest run did not
+   * scan is not currently trending — it is unmeasured — and carrying its last
+   * verdict forward put five rank-1 keywords from five different runs onto one
+   * panel while the run console showed the three it had actually scanned.
+   */
+  trending: KeywordSignal[]
   hashtags: Hashtag[]
   topHashtags: Hashtag[]
   scraped: ScrapedItem[]
@@ -686,6 +830,12 @@ export interface StatePayload {
   analytics: PlatformAnalytics[]
   reviewQueue: ReviewQueueItem[]
   sources: Source[]
+  /** Hook variants keyed by idea id, the same shape `drafts` and `media` use. */
+  hooks: Record<string, HookVariant[]>
+  voiceProfiles: VoiceProfile[]
+  /** How many short-form samples are stored — the count a derivation needs. */
+  voiceSampleCount: number
+  trackedAccounts: TrackedAccount[]
   pipeline: PipelineRun | null
   platformLabels: Record<string, string>
   assistant: {
@@ -697,6 +847,8 @@ export interface StatePayload {
   mode: {
     publishMode: string
     assistantProvider: string
+    /** Off is a supported state, so the UI states it rather than inferring it. */
+    transcription?: { configured: boolean; reason: string }
     integrations: IntegrationStatus[]
   }
 }
@@ -727,6 +879,8 @@ export interface LiveCapture {
   /** The lane it was captured on. `open-web` for the unscoped tier. */
   platform: string
   source: string
+  /** The page this row came from. Null when the source named none. */
+  url: string | null
   /** The alignment score the capture carried, or null if it stated none. */
   relevance: number | null
   /**

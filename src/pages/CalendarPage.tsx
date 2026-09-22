@@ -364,6 +364,34 @@ export function CalendarPage() {
   const dayUnder = (p: DragPoint): string | null =>
     document.elementFromPoint(p.x, p.y)?.closest<HTMLElement>('[data-day]')?.dataset.day ?? null
 
+  /*
+   * THE PAGE FOLLOWS THE CARD.
+   *
+   * The ranked queue sits BELOW the week grid, so dragging a suggestion onto a
+   * day means dragging upward — and on a full week the grid is already off the
+   * top of the viewport by the time you reach the queue. `dayUnder()` resolves
+   * by `elementFromPoint`, which only ever sees what is actually on screen, so
+   * the drop found no day and silently did nothing. The card picked up fine and
+   * then went nowhere, which is exactly what was reported.
+   *
+   * Nudging the scroller while the pointer is near an edge brings the grid back
+   * into view without the operator having to let go, scroll, and start again.
+   * The step is proportional to how deep into the margin the pointer is, so a
+   * small overshoot creeps and a decisive one moves.
+   */
+  const autoScroll = (p: DragPoint): void => {
+    const MARGIN = 110
+    const MAX_STEP = 22
+    const scroller = document.querySelector<HTMLElement>('main')
+    if (!scroller) return
+
+    const top = p.y - MARGIN
+    const bottom = window.innerHeight - MARGIN - p.y
+
+    if (top < 0) scroller.scrollBy({ top: Math.max(-MAX_STEP, top / 4) })
+    else if (bottom < 0) scroller.scrollBy({ top: Math.min(MAX_STEP, -bottom / 4) })
+  }
+
   const onCardDrag = (idea: Idea, phase: DragPhase, p: DragPoint, rect?: DOMRect): void => {
     if (phase === 'start') {
       dragRef.current = { idea, overIso: null }
@@ -374,6 +402,7 @@ export function CalendarPage() {
     }
     if (phase === 'move') {
       place(p)
+      autoScroll(p)
       const over = dayUnder(p)
       if (dragRef.current && over !== dragRef.current.overIso) {
         dragRef.current.overIso = over
@@ -600,10 +629,22 @@ export function CalendarPage() {
                 style={{ animation: `eth-pop 380ms ${EASE} both` }}
               >
                 <div className="flex items-center gap-2 border-b border-line px-3.5 py-2 text-[11px] tracking-[0.1em] text-ink-3">
-                  SCOPED TO {weekLabel} · PLANS BEFORE IT RUNS
                   <button type="button" onClick={() => setAskOpen(false)} aria-label="Close" className="ml-auto text-ink-3 transition-colors hover:text-ink">✕</button>
                 </div>
-                <div className="max-h-[520px] overflow-y-auto">
+                {/*
+                  NO OUTER SCROLLER.
+
+                  This was `max-h-[520px] overflow-y-auto`, which made the whole
+                  panel scroll — header, transcript and composer together — while
+                  the transcript's OWN scroller never bounded and so never
+                  scrolled at all. Two nested scrollers, and the wrong one was
+                  moving: reading back through a conversation dragged the
+                  composer off the bottom of the popover.
+
+                  The panel now owns its height and scrolls only its transcript,
+                  so the header and the input stay put.
+                */}
+                <div>
                   <CalendarAssistant />
                 </div>
               </div>
@@ -1190,13 +1231,28 @@ function Queue({
                  * rows and the remainder stays reachable by scrolling rather than
                  * being hidden or truncated away.
                  *
-                 * `overscroll-contain` keeps a wheel gesture that reaches the end
-                 * of one platform's list from scrolling the page behind it, and
+                 * TWO THINGS THIS DELIBERATELY DOES NOT DO.
+                 *
+                 * It sets `overscroll-auto` rather than relying on the default.
+                 * `index.css` applies `overscroll-behavior: contain` to `*`, so
+                 * every scroller in the product refuses to chain by default —
+                 * removing the local `overscroll-contain` class was not enough,
+                 * and reaching the end of one platform's list still dead-ended
+                 * instead of handing the gesture to the page. `overscroll-auto`
+                 * opts this one list back in, which is what a reader expects from
+                 * a list inside a scrolling document.
+                 *
+                 * And it does not omit `min-h-0`. A flex child will not shrink
+                 * below its content height without it, which is the standard way
+                 * an `overflow-y-auto` inside `flex-col` silently refuses to
+                 * scroll. `max-h` alone is not enough once the parent is a flex
+                 * container.
+                 *
                  * `pr-1` leaves room for the scrollbar so a row's buttons do not
                  * sit under it.
                  */
                 <div
-                  className="flex max-h-[34rem] flex-col gap-3 overflow-y-auto overscroll-contain pr-1"
+                  className="flex max-h-[34rem] min-h-0 flex-col gap-3 overflow-y-auto overscroll-auto pr-1"
                   aria-label={`${PLATFORM_LABEL[c.platform]} ranked suggestions, scrollable`}
                 >
                 {rows.map((idea, i) => {
@@ -1301,12 +1357,44 @@ function QueueRow({
         onOpen()
       }}
       aria-label={`Open “${idea.title}”. Drag it onto a day to schedule it.`}
-      className={`cursor-grab select-none border-t border-line pt-3 outline-none transition-opacity duration-200 active:cursor-grabbing ${
+      className={`group relative cursor-grab select-none border-t border-line pt-3 outline-none transition-opacity duration-200 active:cursor-grabbing ${
         dragging ? 'opacity-35' : 'hover:opacity-90'
       }`}
       style={{ animation: `eth-row-stream 200ms ${EASE} ${index * 40}ms both`, touchAction: 'manipulation' }}
     >
-      <div className="flex items-start gap-2">
+      {/*
+        WITHDRAW ON HOVER — the same action as the footer button, one gesture away.
+
+        The footer already carries Withdraw, but reaching it means reading the row
+        first. Clearing a queue of thirty suggestions is a scanning job, so the
+        cross sits where the eye already is and appears only on hover, keeping the
+        resting row uncluttered.
+
+        Hidden while the row is armed: in that state the footer pair reads
+        Confirm / Cancel, and a third control that withdrew outright would sit
+        beside a Cancel that does the opposite.
+
+        `stop` is essential — every other part of the row starts a drag, so
+        without it a click here would be read as the beginning of one.
+
+        Nothing is destroyed. This withdraws: the idea keeps its title, rank and
+        reasons and its status becomes rejected, so the lineage stays
+        reconstructable. The label says withdraw for that reason.
+      */}
+      {isArmed ? null : (
+        <button
+          type="button"
+          {...stop}
+          onClick={onWithdraw}
+          aria-label={`Withdraw “${idea.title}”`}
+          title="Withdraw this suggestion — it keeps its rank and reasons, and nothing is deleted"
+          className="absolute right-0 top-2.5 z-10 flex h-[22px] w-[22px] items-center justify-center rounded-[7px] border border-line-strong bg-surface-2 text-ink-3 opacity-0 transition-[opacity,color,border-color] duration-[160ms] hover:border-critical hover:text-critical focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <X size={12} aria-hidden="true" />
+        </button>
+      )}
+
+      <div className="flex items-start gap-2 pr-7">
         <span className="tabular mono shrink-0 pt-[2px] text-[10px] font-semibold text-ink-3" title="Rank on its platform">
           #{idea.platform_rank ?? '–'}
         </span>

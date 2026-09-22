@@ -397,3 +397,147 @@ export function describeBuffer(): string {
     ? 'Ready — channels resolved from the token at publish time'
     : `Ready — pinned channels: ${pinned}; others resolved from the token`
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   READING WHAT THE POST ACTUALLY DID
+
+   The counterpart to `dispatch`. Until this existed the product had no way to
+   learn a published post's performance at all, and `publishing.post.receipt`
+   filled the gap by GENERATING a first-hour reading from a seeded PRNG — so a
+   post genuinely delivered to LinkedIn showed "241 reach · 375 impressions ·
+   4.53% engagement" while the platform's own answer was six zeros. Those
+   figures then fed `postBaseline()`, and the baseline fed the next generated
+   figure.
+
+   Buffer already holds the real numbers: `Post.metrics` is a list of
+   `{ type, name, value, unit }` that Buffer refreshes from the platform, and
+   `Post.externalLink` is the permalink on the platform itself.
+
+   WHAT THIS DELIBERATELY DOES NOT DO. It does not substitute a zero for a
+   metric Buffer did not return. A platform that reports no impressions and a
+   platform that has not been asked yet are different facts, and the `N/A is
+   never 0` rule is exactly as binding here as at capture — arguably more so,
+   because this is our own published work and the number feeds every baseline
+   downstream.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const POST_METRICS = `
+  query PostMetrics($id: PostId!) {
+    post(input: { id: $id }) {
+      id
+      status
+      sentAt
+      externalLink
+      metricsUpdatedAt
+      metrics { type name value unit }
+    }
+  }
+`
+
+interface BufferMetricRow {
+  type?: string
+  name?: string
+  value?: number
+  unit?: string
+}
+
+interface PostMetricsData {
+  post?: {
+    id?: string
+    status?: string
+    sentAt?: string
+    externalLink?: string
+    metricsUpdatedAt?: string
+    metrics?: BufferMetricRow[]
+  }
+}
+
+/**
+ * One post's measured performance, as the platform reports it through Buffer.
+ *
+ * Every figure is `number | null`. `null` means Buffer returned no such metric
+ * for this post — never that the metric is zero. A real zero comes back as 0,
+ * and the two are distinguishable all the way to the column.
+ */
+export interface BufferPostMetrics {
+  externalId: string
+  status: string
+  /** The post's own URL on the platform. The thing an operator wants to open. */
+  externalLink: string | null
+  /** When Buffer last refreshed these figures from the platform. */
+  measuredAt: string | null
+  reach: number | null
+  impressions: number | null
+  likes: number | null
+  comments: number | null
+  shares: number | null
+  engagementRate: number | null
+}
+
+/**
+ * Buffer's metric `type` → our column. Keyed on `type` rather than the
+ * human `name`, because `name` is display copy Buffer can reword ("Eng. Rate")
+ * and `type` is the stable identifier.
+ *
+ * `reactions` maps to `likes`: LinkedIn counts Like, Celebrate and Support as
+ * one reaction total, and that total is the closest true thing to a like count.
+ * The column keeps its name because renaming a stored column to chase one
+ * platform's vocabulary would break every reader of it.
+ */
+const METRIC_KEY: Record<string, keyof Omit<BufferPostMetrics, 'externalId' | 'status' | 'externalLink' | 'measuredAt'>> = {
+  reach: 'reach',
+  impressions: 'impressions',
+  reactions: 'likes',
+  likes: 'likes',
+  comments: 'comments',
+  shares: 'shares',
+  engagementRate: 'engagementRate',
+}
+
+/**
+ * Reads one post's real metrics. Returns `null` when Buffer has no such post.
+ *
+ * Throws only on a transport or auth failure, so a caller can tell "Buffer
+ * cannot be reached" from "Buffer does not know this post" — the first is
+ * retryable and the second never will be.
+ */
+export async function fetchPostMetrics(
+  externalId: string,
+  timeoutMs?: number,
+): Promise<BufferPostMetrics | null> {
+  const reason = unavailableReason()
+  if (reason !== '') throw new AdapterError('buffer', reason)
+
+  const data = await graphql<PostMetricsData>(
+    POST_METRICS,
+    { id: externalId },
+    timeoutMs ?? config.buffer.timeoutMs,
+  )
+
+  const post = data.post
+  if (!post?.id) return null
+
+  const out: BufferPostMetrics = {
+    externalId: post.id,
+    status: post.status ?? 'unknown',
+    externalLink: post.externalLink ?? null,
+    measuredAt: post.metricsUpdatedAt ?? null,
+    // Absent until Buffer states otherwise. This is the line that keeps a
+    // metric nobody reported from becoming a zero.
+    reach: null,
+    impressions: null,
+    likes: null,
+    comments: null,
+    shares: null,
+    engagementRate: null,
+  }
+
+  for (const row of post.metrics ?? []) {
+    const key = row.type === undefined ? undefined : METRIC_KEY[row.type]
+    if (key === undefined) continue
+    if (typeof row.value !== 'number' || !Number.isFinite(row.value)) continue
+    out[key] = row.value
+  }
+
+  return out
+}

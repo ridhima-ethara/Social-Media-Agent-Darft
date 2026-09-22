@@ -34,6 +34,10 @@ Collects the recent assets for this topic so the new creative is recognisably pa
 |---|---|---|
 | `lookbackAssets` | `12` | How many recent creatives inform the new one. |
 | `maxSimilarity` | `85` | How close a new creative may be to an existing one before it is regenerated. This is the visual half of rule 17. |
+| `annotateStructure` | `true` | Draws the named parts of the mechanism beside the artwork — the stages, components or failure modes the caption and Knowledge Base actually state. Off renders the artwork unlabelled, which looks finished but tells a reader nothing the caption has not already said. |
+| `minLabels` | `3` | Below this the structure is not drawn at all. A spine with two of its five parts named misrepresents the mechanism, so an unlabelled image is the honest result when the evidence is thin. |
+| `maxLabels` | `6` | The ceiling on labels per creative. Past this the column stops being readable at feed scale and the extra labels are reported rather than drawn. |
+| `knowledgeLookback` | `24` | How many active Knowledge Base entries are read when looking for evidence that licenses a label. |
 
 ### `generation.image.template`
 
@@ -41,6 +45,7 @@ Positions the headline, kicker, accent bar, logomark and footer on the platform�
 
 | Knob | Default | Description |
 |---|---|---|
+| `showHeadline` | `false` | Sets the post’s opening line across the creative. Off by default: the caption already carries the hook, so repeating it spends the canvas on words the reader is about to read anyway, leaving the image decorative. Off, the labelled structure is the content of the image. |
 | `layout` | `Editorial` | Editorial puts the headline lower-left with a kicker above. Centred is for single statements. Split carries a figure alongside. |
 | `headlineMaxWords` | `12` | The ceiling on the drawn headline. Beyond this the type shrinks below legibility on a phone. |
 | `safeMargin` | `64` | The keep-clear border in canvas pixels, so nothing important is cropped by a platform preview. |

@@ -215,6 +215,24 @@ export async function updateTurn(
   await query(`UPDATE assistant_turns SET ${sets.join(', ')} WHERE id = $${i}`, params)
 }
 
+/**
+ * The conversation a turn belongs to.
+ *
+ * Exists for the confirmation path. Resuming starts from a stored turn id and
+ * has no conversation in hand, and the thing it needs the conversation FOR is
+ * writing the resumed turn back — a uuid column, which an empty string does not
+ * satisfy. Passing `''` there threw after the tools had already run, so the
+ * work landed and the operator was shown a Postgres error instead of the
+ * result, which reads exactly like nothing happened.
+ */
+export async function conversationOfTurn(turnId: string): Promise<string> {
+  const rows = await query<{ conversation_id: string }>(
+    'SELECT conversation_id FROM assistant_turns WHERE id = $1',
+    [turnId],
+  )
+  return rows[0]?.conversation_id ?? ''
+}
+
 export async function listTurns(conversationId: string, limit = 60): Promise<AssistantTurnRow[]> {
   return query<AssistantTurnRow>(
     `SELECT * FROM assistant_turns

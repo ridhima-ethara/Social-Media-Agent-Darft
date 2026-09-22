@@ -14,6 +14,8 @@ import { PageHeader } from '../components/layout'
 import { KeywordBoard } from '../components/keyword-board'
 import { listVoices, setVoiceEnabled, speak, voiceSupport } from '../lib/voice'
 import { Select, Badge, Btn, FacebookGlyph, InstagramGlyph, LinkedinGlyph, XGlyph } from '../components/ui'
+import { DiscoveredKeywordsPanel, TrackedAccountsPanel, VoicePanel } from '../components/short-form'
+import { defaultSkillConfig } from '@shared/agent-registry'
 
 /** The lanes the Scraping Agent captures, in the order it runs them. */
 /**
@@ -47,7 +49,28 @@ const SERVICES = [
   { id: 'ollama', label: 'Ollama · local Qwen3 and FLUX.2 Klein', env: 'OLLAMA_BASE_URL' },
 ]
 
+/**
+ * The sample floor, read from the registry rather than written here.
+ *
+ * Law 2 applies to the UI as much as to a handler: this number is declared as
+ * `voiceSampleMinimum` on `caption.voice.derive`, and a literal 20 in this file
+ * would drift the moment an operator changed the knob — leaving the screen
+ * saying "20 required" while the server refused at a different number.
+ */
+const VOICE_SAMPLE_MINIMUM = Number(defaultSkillConfig('caption.voice.derive').voiceSampleMinimum ?? 20)
+
 export function SettingsPage() {
+  const keywords = useStore((s) => s.keywords)
+  const updateKeyword = useStore((s) => s.updateKeyword)
+  const voiceProfiles = useStore((s) => s.voiceProfiles)
+  const voiceSampleCount = useStore((s) => s.voiceSampleCount)
+  const trackedAccounts = useStore((s) => s.trackedAccounts)
+  const addVoiceSamples = useStore((s) => s.addVoiceSamples)
+  const deriveVoiceProfile = useStore((s) => s.deriveVoiceProfile)
+  const setVoiceProfileActive = useStore((s) => s.setVoiceProfileActive)
+  const addTrackedAccount = useStore((s) => s.addTrackedAccount)
+  const setTrackedAccountActive = useStore((s) => s.setTrackedAccountActive)
+  const voiceSampleMinimum = VOICE_SAMPLE_MINIMUM
   const settings = useStore((s) => s.settings)
   const updateSettings = useStore((s) => s.updateSettings)
   const integrations = useStore((s) => s.integrations)
@@ -474,6 +497,52 @@ export function SettingsPage() {
               slightly blunter, fully working, every tool still reachable.
             </p>
           </div>
+        </section>
+
+        {/* ── Discovered keywords ──────────────────────────────────────── */}
+        {/*
+          A queue of proposals, not a list of settings — which is why it sits
+          above the keyword board rather than inside it. Approving one is what
+          starts it being captured.
+        */}
+        <section className="card p-4 xl:col-span-2">
+          <DiscoveredKeywordsPanel
+            keywords={keywords}
+            busy={false}
+            apiConnected={apiMode === 'connected'}
+            onApprove={(id) => void updateKeyword(id, { active: true })}
+            onDismiss={(id) => void updateKeyword(id, { weight: 0, active: false })}
+          />
+        </section>
+
+        {/* ── The learned voice ────────────────────────────────────────── */}
+        {/*
+          Here rather than on a screen of its own: a voice profile and a tracked
+          account are both CONFIGURATION — standing decisions about how the
+          platform behaves — and neither is something an operator visits daily.
+        */}
+        <section className="card p-4">
+          <VoicePanel
+            profiles={voiceProfiles}
+            sampleCount={voiceSampleCount}
+            minimum={voiceSampleMinimum}
+            busy={false}
+            apiConnected={apiMode === 'connected'}
+            onAddSamples={(bodies) => void addVoiceSamples(bodies)}
+            onDerive={() => void deriveVoiceProfile()}
+            onToggle={(id, active) => void setVoiceProfileActive(id, active)}
+          />
+        </section>
+
+        {/* ── Tracked accounts ─────────────────────────────────────────── */}
+        <section className="card p-4">
+          <TrackedAccountsPanel
+            accounts={trackedAccounts}
+            busy={false}
+            apiConnected={apiMode === 'connected'}
+            onAdd={(platform, handle, label) => void addTrackedAccount(platform, handle, label)}
+            onToggle={(id, active) => void setTrackedAccountActive(id, active)}
+          />
         </section>
 
         {/* ── Prototype mode ──────────────────────────────────────────── */}

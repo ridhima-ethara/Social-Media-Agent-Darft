@@ -23,6 +23,13 @@ import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 
+import { allIndexedActorIds } from '../server/src/services/scraping/actor-index'
+import {
+  actorInputSchema,
+  cliAuthenticated,
+  cliInstalled,
+} from '../server/src/services/scraping/apify-cli'
+
 const RESET = '\u001B[0m'
 const RED = '\u001B[31m'
 const YELLOW = '\u001B[33m'
@@ -322,6 +329,54 @@ async function main(): Promise<void> {
         'put APIFY_API_TOKEN in server/secrets.env (gitignored). Apify console → Settings → ' +
           'API & Integrations → Personal API tokens',
       )
+    }
+
+    /*
+     * ═══ THE APIFY SKILL / CLI PATH (§20) ═══
+     *
+     * Four states, reported distinctly, because the fixes are different and a
+     * single "unavailable" would send an operator to the wrong one. Nothing
+     * below reports success it has not actually observed: the CLI is asked for
+     * its version, asked who it is logged in as, and asked to resolve a real
+     * actor id. Execution is deliberately NOT attempted — it bills per result,
+     * and a doctor command must not be able to spend money.
+     */
+    if (!cliInstalled()) {
+      degraded(
+        'Apify CLI NOT CONFIGURED — the official skill workflow cannot run',
+        'apify-cli is not in node_modules. The HTTP client still serves the platform lanes, ' +
+          'so capture is unaffected; only the skill-driven actor selection and live schema ' +
+          'discovery are unavailable. Fix: npm i -D apify-cli',
+      )
+    } else {
+      const authed = await cliAuthenticated()
+      if (!authed) {
+        degraded(
+          'Apify CLI UNAVAILABLE — installed but holding no credentials',
+          'The CLI does not read APIFY_TOKEN from the environment; it authenticates from a ' +
+            'stored credential. Until it is logged in, capture falls back to the HTTP client. ' +
+            'Fix: npx apify login -t $APIFY_API_TOKEN, or set APIFY_API_TOKEN and the server ' +
+            'establishes the login itself at first use.',
+        )
+      } else {
+        // Resolve one indexed actor for real, so "AVAILABLE" means the chain
+        // actually answered rather than that a binary exists on disk.
+        const probe = allIndexedActorIds()[0] ?? 'apify/instagram-hashtag-scraper'
+        try {
+          const schema = await actorInputSchema(probe, 8_000)
+          const fields = Object.keys(schema.properties ?? {}).length
+          ok(
+            'Apify CLI AVAILABLE',
+            `logged in, and \`actors info --input\` resolved ${probe} with ${fields} input field(s)`,
+          )
+        } catch (error) {
+          degraded(
+            'Apify CLI FAILED — logged in, but actor discovery did not answer',
+            `Resolving ${probe} failed: ${error instanceof Error ? error.message.slice(0, 160) : String(error)}. ` +
+              'Fix: check network access to api.apify.com, then re-run doctor.',
+          )
+        }
+      }
     }
 
     if (config.parallel.configured) {

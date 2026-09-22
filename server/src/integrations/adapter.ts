@@ -236,18 +236,36 @@ export async function withRetry<T>(
   retries: number,
   baseDelayMs = 400,
 ): Promise<T> {
+  /*
+   * A NON-FINITE RETRY COUNT MUST STILL ATTEMPT THE CALL ONCE.
+   *
+   * `retries` reaches here from callers that compute it, and one of them passed
+   * `Math.max(0, undefined)` — NaN. Every comparison against NaN is false, so
+   * `attempt <= retries` failed on the first evaluation: the loop body never ran,
+   * the wrapped call was never made, and the function threw its still-unassigned
+   * `lastError`. The caller saw `undefined` as the failure reason and fell back.
+   *
+   * That is how the image agent came to render every creative with the local
+   * vector renderer while reporting a painter failure no log could explain — the
+   * painter was never called at all.
+   */
+  const attempts = Number.isFinite(retries) ? Math.max(0, Math.floor(retries)) : 0
+
   let lastError: unknown
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
+  for (let attempt = 0; attempt <= attempts; attempt += 1) {
     try {
       return await fn()
     } catch (error) {
       lastError = error
-      if (attempt === retries) break
+      if (attempt === attempts) break
       const delay = baseDelayMs * 2 ** attempt
       await new Promise((r) => setTimeout(r, delay))
     }
   }
-  throw lastError
+
+  // Only reachable if the loop ran and every attempt threw, so `lastError` is
+  // set. The guard is for the shape of the code, not an expected path.
+  throw lastError ?? new Error('The call failed with no error reported.')
 }
 
 /** Stamps a value with which implementation produced it. */

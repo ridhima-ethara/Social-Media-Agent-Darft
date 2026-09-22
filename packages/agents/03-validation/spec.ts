@@ -49,10 +49,14 @@ export const spec: AgentSpec = {
 export const SKILLS = [
   'validation.keyword.trend',
   'validation.hashtag.rank',
+  'validation.item.filter',
   'validation.credibility.score',
   'validation.relevance.score',
   'validation.freshness.score',
   'validation.duplicate.detect',
+  'validation.signal.repeat',
+  'validation.signal.sustained',
+  'validation.keyword.emerge',
   'validation.verdict.route',
   'validation.review.queue',
 ] as const

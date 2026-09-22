@@ -344,7 +344,37 @@ registerSkill<PublishPayload>('publishing.receipt.record', async (payload, ctx) 
 
   if (!inserted) throw new Error('The receipt could not be written.')
 
-  if (seedFirstHour) {
+  /*
+   * ═══ A LIVE POST NEVER GETS AN INVENTED READING ═══
+   *
+   * `seedFirstHourMetrics` writes a first metrics row from a seeded PRNG
+   * against a baseline (or a hardcoded 2400 when there is no baseline). In
+   * demo mode that is defensible: nothing was published, so nothing can be
+   * measured, and a shaped number makes the screens explorable.
+   *
+   * On a LIVE post it is fabricated evidence about a real publication. A post
+   * genuinely delivered to LinkedIn was showing "241 reach · 375 impressions ·
+   * 4.53% engagement" minutes after dispatch, with nobody having asked
+   * LinkedIn anything. Those figures then feed `postBaseline()`, which feeds
+   * the Analytics Agent's comparisons and the Learning Agent's lessons — so
+   * one invented row becomes the baseline that later invented rows are
+   * generated against, and the whole measurement layer drifts away from
+   * reality while looking more confident each week.
+   *
+   * Constraint 2 is the rule here as much as constraint 4: a metric nobody
+   * reported stays ABSENT. It does not become a plausible number, and it does
+   * not become zero. The post is published; its performance is simply not
+   * known yet, and the screens say so.
+   */
+  const liveDispatch = payload.publishMode === 'live'
+  if (seedFirstHour && liveDispatch) {
+    ctx.log(
+      'No first-hour reading was seeded: this went out for real, so its performance is ' +
+        'whatever the platform reports and nothing is invented in the meantime.',
+    )
+  }
+
+  if (seedFirstHour && !liveDispatch) {
     // The first reading, generated against this account's own baseline rather
     // than an invented number. A metric never reported stays absent; this one
     // is a genuine first-hour capture in demo mode.

@@ -53,7 +53,29 @@ export interface TextModelSpec {
   summary: string
   /** Licence pill in the model menu. */
   licence: string
-  /** The env key that switches it on. Empty for the local template writer. */
+  /**
+   * Whether the operator may CHOOSE this in the model menu.
+   *
+   * Separate from whether it exists. The catalogue has to keep every id: the
+   * zod enums on the API routes validate against it, stored rows carry these
+   * values, and the local renderer/template writer are the honest degradation
+   * when nothing hosted is reachable. Deleting them would turn "no model
+   * configured" from a labelled fallback into a hard failure, and would reject
+   * every draft already stamped with one.
+   *
+   * So this narrows the MENU and nothing else. A model that is not selectable
+   * can still run — it just cannot be picked on purpose.
+   */
+  selectable?: boolean
+  /**
+   * The env key that switches it on, for the operator-facing "not configured"
+   * line. Empty for the local template writer.
+   *
+   * Names EVERY credential that satisfies the adapter, not just the first one.
+   * Gemini accepts an API key or a service account; naming only the key sent an
+   * operator to create one when their service account already worked — and this
+   * deployment runs on the service account.
+   */
   envKey: string
   /**
    * The `ServiceAdapter` id whose reachability decides this model's. Empty for
@@ -95,7 +117,8 @@ export const TEXT_MODELS: TextModelSpec[] = [
     summary:
       'Hosted reasoning model. Fastest of the three on long rewrites, and the only one that sends the draft off the machine.',
     licence: 'Commercial · Google Cloud terms',
-    envKey: 'GCP_API_KEY',
+    envKey: 'GCP_API_KEY or GCP_SERVICE_ACCOUNT_JSON',
+    selectable: true,
     adapterId: 'gcp.text',
     typicalMs: 4200,
   },
@@ -121,3 +144,6 @@ export const IMAGE_MODEL_ADAPTER: Record<string, string | null> = {
   'flux2-klein': 'ollama.image',
   'z-image-turbo': null,
 }
+
+/** The models the menu offers. Everything else still runs as a fallback. */
+export const SELECTABLE_TEXT_MODELS = TEXT_MODELS.filter((m) => m.selectable === true)

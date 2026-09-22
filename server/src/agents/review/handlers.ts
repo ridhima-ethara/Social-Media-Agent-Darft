@@ -9,6 +9,7 @@ import { BRAND, checkBrandCompliance, platformVoiceInstruction } from '../../../
 import {
   rewriteTemplateCaption,
   textAdapterFor,
+  usableImageParts,
   textModelId,
   withFallback,
 } from '../../integrations'
@@ -27,12 +28,48 @@ import type { ReviewPayload } from '../skills/index'
  * a model told it has three references when it can see two will reason about a
  * corpus it does not have.
  */
-function describeReferences(references: ReviewPayload['references']): string {
+/**
+ * Whether the chosen model can actually look at a picture.
+ *
+ * Only the hosted Gemini path accepts image parts. The local template writer
+ * has no model at all, and the Ollama text adapter is text-only — handing
+ * either one a data URI would put a megabyte of base64 into a prompt and
+ * achieve nothing.
+ */
+function modelSeesImages(captionModel: string | undefined): boolean {
+  return captionModel === 'gcp-gemini'
+}
+
+/**
+ * The reference block, and — crucially — which references the model was
+ * actually given.
+ *
+ * An image reference now takes one of two forms depending on the model:
+ *
+ *   seen     the bytes go in as an image part, and the block says the picture
+ *            is attached so the model knows to look at it
+ *   not seen the existing `contents="unavailable"` form, naming the MODEL as
+ *            the reason rather than implying the file was broken
+ *
+ * That second case is the same discipline `metricsAvailable` enforces in the
+ * capture tier: the absence is stated, never implied away. "Attached by name
+ * only" is true when a text-only writer is chosen, and it should say why.
+ */
+function describeReferences(
+  references: ReviewPayload['references'],
+  seesImages: boolean,
+  modelLabel: string,
+): string {
   if (!references || references.length === 0) return ''
 
   const blocks = references.map((reference) => {
     if (reference.text && reference.text.trim().length > 0) {
       return `<reference name="${reference.name}" type="${reference.mimeType}">\n${reference.text}\n</reference>`
+    }
+    if (reference.image !== undefined) {
+      return seesImages
+        ? `<reference name="${reference.name}" type="${reference.mimeType}" contents="attached as an image below" />`
+        : `<reference name="${reference.name}" type="${reference.mimeType}" contents="unavailable" reason="${modelLabel} cannot read images; it was attached by name only" />`
     }
     const why = reference.note ?? 'its contents were not readable as text'
     return `<reference name="${reference.name}" type="${reference.mimeType}" contents="unavailable" reason="${why}" />`
@@ -57,6 +94,34 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
   const preserveHistory = ctx.bool('preserveRevisionHistory', true)
 
   const instruction = clampChars(payload.instruction ?? '', maxInstructionChars)
+
+  /*
+   * WHICH ATTACHMENTS THIS MODEL CAN ACTUALLY USE.
+   *
+   * Decided here rather than at the API boundary, because it depends on the
+   * model the operator picked in this panel — the same attachment is readable
+   * on Gemini and unreadable on the template writer, and the honest label
+   * differs accordingly.
+   */
+  const captionModel = payload.captionModel
+  const seesImages = modelSeesImages(captionModel)
+  const modelLabel = seesImages ? 'Gemini' : 'The selected writer'
+  const imageRefs = (payload.references ?? []).filter((r) => r.image !== undefined)
+  const attachedImages = imageRefs.map((r) => ({ dataUri: r.image as string, name: r.name }))
+  const { usable, rejected } = seesImages
+    ? usableImageParts(attachedImages)
+    : { usable: [] as string[], rejected: [] as Array<{ name: string; reason: string }> }
+
+  /** What the operator is told about their attachments, per reference. */
+  const referenceNotes: string[] = [
+    ...usable.map((name) => `${name} was read by ${modelLabel}.`),
+    ...rejected.map((r) => `${r.name} was not sent — ${r.reason}.`),
+    ...(seesImages
+      ? []
+      : imageRefs.map(
+          (r) => `${r.name} was attached by name only — the selected writer cannot read images.`,
+        )),
+  ]
   let fallbackReason: string | null = null
   if (instruction.trim().length === 0) {
     return { revisedBody: payload.body, appliedNote: 'No instruction given', conflictNotes: [] }
@@ -96,10 +161,13 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
         '· Keep any "Source:" attribution line, positioned above the footer.',
         'Return only the revised post, with its line breaks intact.',
       ].join('\n'),
-      prompt: `Instruction: ${instruction}${describeReferences(payload.references)}\n\nCurrent post:\n${payload.body}`,
+      prompt: `Instruction: ${instruction}${describeReferences(payload.references, seesImages, modelLabel)}\n\nCurrent post:\n${payload.body}`,
       temperature: 0.4,
       maxOutputTokens: 2048,
       fast: true,
+      // Present only when the chosen model can look at them. Absent otherwise,
+      // which makes the request byte-identical to what it has always been.
+      ...(seesImages && attachedImages.length > 0 ? { images: attachedImages } : {}),
     },
     () => rewriteTemplateCaption(payload.body, instruction).text,
     // Why the model was not used. Discarding this is what turned an
@@ -228,7 +296,27 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
     `${appliedNote}${conflictNotes.length > 0 ? ` · ${conflictNotes.length} brand finding(s) raised alongside it` : ''}${preserveHistory ? ' · previous revision preserved' : ''}`,
   )
 
+  /*
+   * Measured against the ORIGINAL body, not an intermediate. The footer is
+   * restored mechanically further up, and comparing against the post-restore
+   * string would credit that restoration to the model.
+   */
+  const honoured = checkHonoured(instruction, payload.body, revisedBody)
+
   return {
+    /*
+     * Per-reference outcome, so the chip can say which attachments were
+     * actually read and which were only named. Reported rather than inferred:
+     * an operator who attached a moodboard needs to know whether it influenced
+     * the result, and "it probably did" is not an answer.
+     */
+    referenceNotes,
+    /*
+     * Whether the ask was MET, which `revisionApplied` below does not answer —
+     * that one only says the bytes changed. A model asked to shorten a caption
+     * routinely rewrites it at the same length, and the panel reported success.
+     */
+    honoured,
     revisedBody,
     appliedNote,
     conflictNotes,
@@ -396,3 +484,129 @@ registerSkill<ReviewPayload>('review.diff.summarize', (payload, ctx) => {
   const summary = `${parts.join('; ')}.`
   return { diffSummary: summary.length > maxChars ? `${summary.slice(0, maxChars - 1)}…` : summary }
 })
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WAS THE INSTRUCTION ACTUALLY HONOURED?
+
+   `applied` answers "did the text change". It does not answer "did it change
+   the way I asked", and those come apart constantly: a model asked to shorten
+   a caption often rewrites it at the same length, and the panel reported
+   success because the bytes differed.
+
+   Two classes of ask, handled differently and never confused:
+
+     MECHANICAL  "shorter", "remove the hashtags", "add a CTA", a platform
+                 limit. Measurable from the two strings alone, so it is
+                 MEASURED — no model is asked whether it did what it was told,
+                 because a model marking its own work is not evidence.
+
+     SUBJECTIVE  "more CTO-focused", "warmer", "less salesy". Not measurable.
+                 Reported as unverifiable, with the reason, rather than guessed
+                 at — an unverifiable ask asserted as honoured is exactly the
+                 fabricated evidence this codebase forbids.
+
+   A mismatch is REPORTED. The revision still stands — a human asked for it, and
+   `humanOverridesBrand` means their edit wins — but the verdict says plainly
+   that the ask was not met.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export type HonouredVerdict = 'honoured' | 'not-honoured' | 'unverifiable'
+
+export interface HonouredCheck {
+  verdict: HonouredVerdict
+  /** Plain language, naming the figures it rests on. Rule 6. */
+  reason: string
+  /** What was measured, for the panel and for the record. */
+  measured: string | null
+}
+
+const WORDS = (text: string): number => text.trim().split(/\s+/).filter(Boolean).length
+const HASHTAGS = (text: string): number => (text.match(/#[\p{L}\p{N}_]+/gu) ?? []).length
+
+/**
+ * Checks a revision against the instruction that produced it.
+ *
+ * Deliberately conservative: it only claims `honoured` or `not-honoured` for
+ * asks it can actually measure. Everything else is `unverifiable`, which is a
+ * real answer and not a failure.
+ */
+export function checkHonoured(
+  instruction: string,
+  before: string,
+  after: string,
+): HonouredCheck {
+  const ask = instruction.toLowerCase()
+
+  if (before.trim() === after.trim()) {
+    return {
+      verdict: 'not-honoured',
+      reason: 'The post came back identical, so nothing was applied.',
+      measured: null,
+    }
+  }
+
+  /* ── Length ──────────────────────────────────────────────────────────── */
+  if (/\b(shorter|shorten|trim|tighten|cut it down|condense|brief)\b/.test(ask)) {
+    const from = WORDS(before)
+    const to = WORDS(after)
+    return {
+      verdict: to < from ? 'honoured' : 'not-honoured',
+      reason:
+        to < from
+          ? `Asked for shorter: ${from} words became ${to}, down ${from - to}.`
+          : `Asked for shorter, but ${from} words became ${to}. The revision is not shorter, so the instruction was not met.`,
+      measured: `${from} → ${to} words`,
+    }
+  }
+
+  if (/\b(longer|expand|more detail|flesh out|elaborate)\b/.test(ask)) {
+    const from = WORDS(before)
+    const to = WORDS(after)
+    return {
+      verdict: to > from ? 'honoured' : 'not-honoured',
+      reason:
+        to > from
+          ? `Asked for longer: ${from} words became ${to}, up ${to - from}.`
+          : `Asked for longer, but ${from} words became ${to}. The instruction was not met.`,
+      measured: `${from} → ${to} words`,
+    }
+  }
+
+  /* ── Hashtags ────────────────────────────────────────────────────────── */
+  if (/\b(remove|drop|delete|strip|no)\b[^.]*\bhashtags?\b/.test(ask)) {
+    const from = HASHTAGS(before)
+    const to = HASHTAGS(after)
+    return {
+      verdict: to === 0 ? 'honoured' : 'not-honoured',
+      reason:
+        to === 0
+          ? `Asked to remove hashtags: all ${from} are gone.`
+          : `Asked to remove hashtags, but ${to} of ${from} remain. Note that the footer is restored mechanically after a revision, so a hashtag block may be put back by design — remove it through the hashtag skill instead.`,
+      measured: `${from} → ${to} hashtags`,
+    }
+  }
+
+  /* ── Call to action ──────────────────────────────────────────────────── */
+  if (/\b(add|include|put in)\b[^.]*\b(cta|call to action|question)\b/.test(ask)) {
+    const gained = /\?/.test(after) && !/\?/.test(before)
+    const longer = WORDS(after) > WORDS(before)
+    return {
+      verdict: gained || longer ? 'honoured' : 'unverifiable',
+      reason: gained
+        ? 'Asked for a call to action: the revision ends on a question the original did not have.'
+        : longer
+          ? 'Asked for a call to action: the revision added text, though whether it reads as a CTA is a judgement I cannot measure.'
+          : 'Asked for a call to action, and nothing measurable was added. Read the revision before accepting it.',
+      measured: gained ? 'gained a closing question' : null,
+    }
+  }
+
+  /* ── Everything else ─────────────────────────────────────────────────── */
+  return {
+    verdict: 'unverifiable',
+    reason:
+      `“${instruction.slice(0, 60)}” is a judgement rather than a measurement, so I cannot assert it was met. ` +
+      `The post changed from ${WORDS(before)} to ${WORDS(after)} words — read it before accepting.`,
+    measured: `${WORDS(before)} → ${WORDS(after)} words`,
+  }
+}

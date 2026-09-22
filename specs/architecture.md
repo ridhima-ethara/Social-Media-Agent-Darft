@@ -7,7 +7,7 @@
 
 # Architecture
 
-**12 agents · 7 stages · 92 skills · 266 knobs · 37 tools**
+**12 agents · 7 stages · 103 skills · 330 knobs · 47 tools**
 
 Eleven specialist agents run a seven-stage pipeline; the twelfth is the command
 plane the operator talks to. Sequencing is derived from each agent's
@@ -37,11 +37,11 @@ plane the operator talks to. Sequencing is derived from each agent's
 | Name | Id | Role | Stage | Skills | Hands off to |
 |---|---|---|---|---|---|
 | Ethara Command | `assistant` | The command plane | `command` | 12 | scraping, validation, analysis, calendar, caption, image, review, knowledge, publishing, analytics, learning |
-| Sherlock | `scraping` | Scraping Agent · Keyword-driven capture across LinkedIn, Instagram, X, Facebook and the open web | `discover` | 8 | validation |
-| Dexter | `validation` | Validation Agent · Verdicts on every candidate | `assess` | 8 | analysis |
+| Sherlock | `scraping` | Scraping Agent · Keyword-driven capture across LinkedIn, Instagram, X, Facebook and the open web | `discover` | 11 | validation |
+| Dexter | `validation` | Validation Agent · Verdicts on every candidate | `assess` | 12 | analysis |
 | Analysis Agent | `analysis` | Opportunities and the consolidated hashtag set | `assess` | 8 | calendar |
 | Dora | `calendar` | Calendar Agent · The weekly plan | `plan` | 8 | caption |
-| SpongeBob | `caption` | Content Agent · Platform copy, grounded in the Knowledge Base | `create` | 10 | image |
+| SpongeBob | `caption` | Content Agent · Platform copy, grounded in the Knowledge Base | `create` | 14 | image |
 | Minnie | `image` | Image Agent · The shipping creative | `create` | 9 | review |
 | Reviewer | `review` | Human edits and compliance | `create` | 4 | knowledge, publishing |
 | Knowledge Agent | `knowledge` | The cited Knowledge Base | `learn` | 8 | caption, image, calendar, review |
@@ -77,6 +77,9 @@ plane the operator talks to. Sequencing is derived from each agent's
 | `idea.promote` | mutating | Gives a suggestion a calendar slot, demoting the lowest-ranked primary if the platform is full. |
 | `calendar.reshuffle` | mutating | Re-ranks the week and re-draws the top slots against a stated preference, and stores the preference so the next run honours it too. |
 | `idea.demote` | mutating | Takes an idea off the calendar and returns it to the ranked suggestions. |
+| `calendar.swap` | mutating | Exchanges the days and times of two scheduled posts, so each takes the other’s slot. |
+| `calendar.bulk.move` | mutating | Moves every post matching a filter to a new day, a new time of day, or both. |
+| `calendar.spread` | mutating | Distributes a set of posts evenly across the days given, one per day before any day takes a second. |
 | `draft.generate` | mutating | Writes the caption for an idea, grounded in the Knowledge Base, and renders its creative. |
 | `draft.instruct` | mutating | Applies an instruction to a draft. A human instruction outranks a brand guideline, and the finding is raised alongside the edit. |
 | `image.render` | mutating | Renders or re-renders the picture for a post on the right canvas for its platform. |
@@ -85,6 +88,13 @@ plane the operator talks to. Sequencing is derived from each agent's
 | `idea.approve.leadership` | irreversible | The final approval. Publishes immediately when auto-publish is on, which cannot be undone. |
 | `idea.reject.leadership` | mutating | Rejects a post with a reason. The reason is mandatory — it is what the agents learn from. |
 | `idea.publish` | irreversible | Publishes a post to its platform immediately. This is the one irreversible act in the system. |
+| `script.write` | mutating | Writes the beat-structured spoken script for an idea whose content format is a short-form script, and generates its hook variants. |
+| `hook.generate` | mutating | Writes one hook per declared pattern for an idea and scores each against the stored posts it resembles, leaving a hook with no comparable post unscored and saying why. |
+| `hook.list` | safe | The hook variants stored for an idea, with the evidence behind each confidence. |
+| `voice.profile.list` | safe | The learned voice profiles and how many stored samples each rests on. A profile governs short-form scripts only; posts follow the brand rules. |
+| `voice.profile.derive` | mutating | Derives a voice profile by counting what the stored samples actually do. Refuses below the sample floor and names the count it has. |
+| `account.track` | mutating | Adds a handle to the tracked-account capture lane, or reactivates one that was switched off. |
+| `account.list` | safe | The accounts the tracked-account lane reads, and when each was last captured. |
 | `analytics.query` | safe | Any figure for any platform and month, with the source it came from. |
 | `analytics.compare` | safe | Period over period against this account’s own baseline, never an industry benchmark. |
 | `post.explain` | safe | Why a published post performed the way it did, against our own baseline. |

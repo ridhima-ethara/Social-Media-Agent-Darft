@@ -47,11 +47,14 @@ export const SKILLS = [
   'scraping.keyword.resolve',
   'scraping.source.connect',
   'scraping.linkedin.fetch',
+  'scraping.account.capture',
   'scraping.hashtag.harvest',
   'scraping.hashtag.expand',
   'scraping.engagement.capture',
   'scraping.competitor.track',
   'scraping.dedupe.prefilter',
+  'scraping.keyword.discover',
+  'scraping.transcript.fetch',
 ] as const
 
 /** Where this agent's handlers live, relative to the repo root. */

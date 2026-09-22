@@ -39,6 +39,25 @@ export interface RenderRequest {
   retries: number
   /** Invariant 21. Off produces unusable creative and is never correct. */
   compositeBrandLayer: boolean
+
+  /**
+   * Labels drawn beside the composition, each already licensed by evidence in
+   * `agents/image/annotations.ts`. Empty means the evidence did not support a
+   * readable set, and the creative renders unannotated — never partially.
+   */
+  annotations?: ReadonlyArray<{ label: string }>
+
+  /**
+   * Whether the hook is repeated on the canvas.
+   *
+   * Off by default, and the default is the point. The caption already carries
+   * the hook; setting the same sentence in 64pt over some artwork adds no
+   * information to the post and spends the whole canvas doing it. The image is
+   * worth its space when it shows something the sentence cannot — the parts of
+   * the mechanism, named. On, the headline returns for the cases where a
+   * creative genuinely has to stand alone.
+   */
+  showHeadline?: boolean
 }
 
 export interface RenderResult {

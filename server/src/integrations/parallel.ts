@@ -144,6 +144,34 @@ function normaliseExcerpts(payload: unknown, maxChars: number): string {
   for (const item of raw as unknown[]) {
     if (item === null || typeof item !== 'object') continue
     const row = item as LooseRecord
+
+    /*
+     * PARALLEL RETURNS `excerpts`, AN ARRAY — AND THAT WAS THE WHOLE BUG.
+     *
+     * The reader below only knew the singular STRING spellings, so for every
+     * result `excerpt` resolved to '' , `parts` stayed empty, and the adapter
+     * threw `no citable results` — while Parallel had returned five perfectly
+     * good, cited pages. The open-web lane therefore captured nothing on every
+     * run, and with the Apify lanes limit-blocked that presented as "nothing
+     * captured" with no reason that pointed here.
+     *
+     * Exactly the failure `apify.ts` documents against its own snake_case
+     * discovery: a field name is not a contract we control, so it is read
+     * through a list of candidates and through both shapes. An array of strings
+     * joins; a single string is taken as-is.
+     */
+    const many = row.excerpts ?? row.excerpt ?? row.snippets
+    if (Array.isArray(many)) {
+      const joined = many
+        .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+        .join(' ')
+        .trim()
+      if (joined !== '') {
+        parts.push(joined)
+        continue
+      }
+    }
+
     const excerpt = readString(row, 'excerpt', 'snippet', 'content', 'text', 'summary')
     if (excerpt !== '') parts.push(excerpt)
   }

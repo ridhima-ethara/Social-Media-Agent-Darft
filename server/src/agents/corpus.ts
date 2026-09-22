@@ -527,24 +527,34 @@ export function monthLabelOf(monthKey: string): string {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   FORMATS AND PLATFORMS
+   EDITORIAL FORMATS AND PLATFORMS
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export const FORMATS = [
+/**
+ * The editorial SHAPE of a post — how it is built, not what kind of artefact it
+ * is. Read by the Analysis Agent when it recommends a format and by the
+ * Calendar Agent when it scores platform fit.
+ *
+ * Called `ContentFormat` until ADR-007, which needed that name for the closed
+ * union in `shared/agent-contract.ts` distinguishing a written post from a
+ * spoken script. The two meant genuinely different things, and one name for
+ * both was a defect waiting for a careless import.
+ */
+export const EDITORIAL_FORMATS = [
   'Thought Leadership',
   'Carousel',
   'Short Post',
   'Video',
   'Case Study',
 ] as const
-export type ContentFormat = (typeof FORMATS)[number]
+export type EditorialFormat = (typeof EDITORIAL_FORMATS)[number]
 
 /**
  * How well each format lands on each platform, 0–100.
  * The Calendar Agent's platform choice is a lookup in this matrix plus brand
  * fit — never a coin toss, and always explainable.
  */
-export const FORMAT_PLATFORM_FIT: Record<ContentFormat, Record<Platform, number>> = {
+export const FORMAT_PLATFORM_FIT: Record<EditorialFormat, Record<Platform, number>> = {
   'Thought Leadership': { linkedin: 96, instagram: 46, x: 72, facebook: 74 },
   Carousel: { linkedin: 82, instagram: 94, x: 38, facebook: 68 },
   'Short Post': { linkedin: 64, instagram: 58, x: 92, facebook: 70 },

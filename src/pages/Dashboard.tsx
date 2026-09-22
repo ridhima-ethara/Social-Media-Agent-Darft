@@ -7,13 +7,13 @@
  * measured is shown as not measured, never as a placeholder.
  */
 
-import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { ArrowUpRight, ExternalLink, Play, Sparkles } from 'lucide-react'
 import { AGENT_BY_ID } from '@shared/agent-registry'
+import { operationalAgents } from '../../shared/agent-contract'
 import { useStore } from '../store'
 import { DownloadMenu } from '../components/download-menu'
 import { navFor } from '../components/layout'
-import { AssistantCore } from '../components/assistant/core'
 import { AgentHologram } from '../components/agent-hologram'
 import { Btn, Dialog, EmptyState, PLATFORM_LABEL, PLATFORM_TOKEN, PlatformIcon, fmt, timeAgo } from '../components/ui'
 import { exportCombined, exportPerPost } from '../lib/export'
@@ -70,31 +70,12 @@ export function Dashboard() {
   const agents = useStore((s) => s.agents)
   const reviewQueue = useStore((s) => s.reviewQueue)
   const pendingConfirm = useStore((s) => s.assistant.pendingConfirm)
-  const coreState = useStore((s) => s.assistant.coreState)
   const scrapeRun = useStore((s) => s.scrapeRun)
   const setPage = useStore((s) => s.setPage)
   const openTheater = useStore((s) => s.openTheater)
   const runScraping = useStore((s) => s.runScraping)
-  const openBar = useStore((s) => s.openBar)
   const [queueOpen, setQueueOpen] = useState(false)
 
-  /*
-   * The scene leans a few degrees toward the pointer. Written straight to the
-   * node rather than through state: this fires on every mouse move, and a
-   * re-render per frame would cost more than the whole hologram.
-   */
-  const sceneRef = useRef<HTMLDivElement | null>(null)
-  const reducedRef = useRef(typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
-  const onScenePointer = (event: React.PointerEvent<HTMLElement>): void => {
-    if (reducedRef.current || !sceneRef.current) return
-    const box = event.currentTarget.getBoundingClientRect()
-    const x = (event.clientX - box.left) / box.width - 0.5
-    const y = (event.clientY - box.top) / box.height - 0.5
-    sceneRef.current.style.transform = `rotateX(${(-y * 3).toFixed(2)}deg) rotateY(${(x * 4.5).toFixed(2)}deg)`
-  }
-  const resetScene = (): void => {
-    if (sceneRef.current) sceneRef.current.style.transform = 'rotateX(0deg) rotateY(0deg)'
-  }
   const [statusOpen, setStatusOpen] = useState(false)
 
   /* ── Reach and engagement: the latest reported month, summed across platforms ── */
@@ -202,7 +183,7 @@ export function Dashboard() {
     if (ahead.length > 0) return { rows: ahead.slice(0, 3), ahead: true, total: all.length }
     return { rows: [...all].reverse().slice(0, 3), ahead: false, total: all.length }
   }, [week, today])
-  /** What the Analyze panel shows: lessons if any, else the most-cited entries. */
+  /** What the Content Intelligence panel shows: lessons if any, else the most-cited entries. */
   const insightRows = useMemo(() => {
     const lessons = knowledge.filter((e) => e.active && !BRAND_DEFINITION_CATEGORIES.includes(e.category)).slice(0, 3)
     if (lessons.length > 0) return lessons
@@ -250,7 +231,12 @@ export function Dashboard() {
   const busy = running.length > 0 || scrapeRun.running
   const statusLine = busy
     ? `${running[0] ? agentShort(running[0].agent_id) : 'Sherlock'} · ${running[0]?.current_task ?? 'capturing'}`
-    : lastRun ? `all ${agents.length} agents idle · last run ${timeAgo(lastRun)}` : `all ${agents.length} agents idle · no run yet`
+    /* `operationalAgents` and not `agents`: Ethara Command is the instruction
+       coming in, and the Knowledge Base is a store that is read and written, so
+       neither is an agent that sits idle waiting for work. The registry still
+       declares twelve because the graph is built from twelve; the roster an
+       operator watches is ten. See NON_OPERATIONAL_AGENT_IDS for each reason. */
+    : lastRun ? `all ${operationalAgents(agents).length} agents idle · last run ${timeAgo(lastRun)}` : `all ${operationalAgents(agents).length} agents idle · no run yet`
 
   return (
     <div className="relative flex min-h-0 w-full flex-1 flex-col">
@@ -302,32 +288,54 @@ export function Dashboard() {
       </div>
 
       {/* ── The command centre ────────────────────────────────────────
-          A 320 / 1fr / 340 grid under one perspective: the side columns turn
-          8° toward the middle, the agent sits 26px proud of them, and the
-          whole scene tilts a little with the pointer. */}
+          A 21% / 1fr / 21% grid, flat. The side columns used to turn 8° toward
+          the middle with the agent proud of them and the scene tracking the
+          pointer; all of that is gone. Depth that layout cannot see is depth
+          that overlaps, so position here is decided by the grid alone. */}
       <section
         aria-label="Command centre"
-        onPointerMove={onScenePointer}
-        onPointerLeave={resetScene}
         className="relative flex min-h-0 flex-1 flex-col"
-        style={{ perspective: 1600, perspectiveOrigin: '50% 40%' }}
       >
-        <div
-          ref={sceneRef}
-          className="flex min-h-0 flex-1 flex-col gap-3.5"
-          style={{ transformStyle: 'preserve-3d', transition: 'transform 220ms var(--ease-out-soft)' }}
-        >
+        {/* Flat, and deliberately so. This wrapper used to carry a pointer-driven
+            `rotateX/rotateY` written straight onto the node, inside a
+            `perspective: 1600` parent with `preserve-3d` children. Because the
+            rotation was an INLINE style it beat every stylesheet rule, and
+            because it tracked the cursor the overlap appeared only once the
+            pointer reached certain areas — which is why it looked fine on one
+            machine and broken on another. Rotating the scene tilted the grid
+            over the foot bar below it while layout still believed both fit. */}
+        <div className="flex min-h-0 flex-1 flex-col gap-3.5">
           <div
             className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(280px,21%)_minmax(0,1fr)_minmax(280px,21%)] xl:grid-rows-[minmax(0,1fr)]"
-            style={{ transformStyle: 'preserve-3d' }}
           >
 
             {/* ── left ─────────────────────────────────────────────── */}
             <div
-              className="flex min-w-0 flex-col justify-start gap-3.5"
-              style={{ transform: 'rotateY(8deg) translateZ(-14px)', transformOrigin: '100% 50%' }}
+              /*
+                `min-h-0` + `overflow-y-auto` is what stops this column spilling
+                onto the foot bar, and it is the real reason the overlap showed up
+                on Windows but not on macOS.
+
+                Every link in the chain above — `min-h-0 flex-1` on the section, the
+                same on the scene, `grid-rows-[minmax(0,1fr)]` on the grid — permits
+                the row to be SHORTER than its content. But a flex child will not
+                shrink below its own content unless it is given `min-h-0`, so
+                without it this column kept its full content height, overran the
+                row, and painted past the bottom of the grid. The foot bar carries
+                `z-10`, so it then covered whatever had spilled — which is exactly
+                what "Everything else is overlapping" looks like.
+
+                Nothing there is platform specific in itself; it triggers whenever
+                content is taller than the row, and Windows reaches that first
+                through different text metrics and 125% display scaling. The same
+                defect exists on both, and was only visible on one.
+
+                Contained here, content can never leave the grid box, so no font
+                size, zoom level or device pixel ratio can bring it back.
+              */
+              className="hub-tilt-left flex min-w-0 flex-col justify-start gap-3.5 min-h-0 overflow-y-auto overscroll-auto"
             >
-              <Panel title="Analyze" hint={`${kbCount} entries`} onOpen={() => setPage('intelligence')} delay={120}>
+              <Panel title="Content Intelligence" hint={`${kbCount} entries`} onOpen={() => setPage('intelligence')} delay={120}>
                 {insightRows.length === 0 ? (
                   <NotMeasured>The Knowledge Base is empty. Entries arrive once a research build has run.</NotMeasured>
                 ) : (
@@ -385,7 +393,7 @@ export function Dashboard() {
                   )}
                 </Panel>
               ) : (
-                <Panel title="Create" hint={`${drafts.length} draft${drafts.length === 1 ? '' : 's'}`} onOpen={() => setPage('calendar')} delay={200} grow>
+                <Panel title="Suggestions" hint={`${drafts.length} draft${drafts.length === 1 ? '' : 's'}`} onOpen={() => setPage('calendar')} delay={200} grow>
                 {topDrafts.length === 0 ? (
                   <NotMeasured>Nothing is written yet.</NotMeasured>
                 ) : (
@@ -410,7 +418,7 @@ export function Dashboard() {
             </div>
 
             {/* ── centre: the agent ────────────────────────────────── */}
-            <div className="relative flex min-w-0 flex-col items-center" style={{ transform: 'translateZ(26px)' }}>
+            <div className="hub-lift relative flex min-h-0 min-w-0 flex-col items-center">
               <div className="relative min-h-[200px] w-full flex-1">
                 <AgentHologram busy={busy} className="absolute inset-0" />
                 {/* The core is the click target, without a badge painted over
@@ -429,15 +437,12 @@ export function Dashboard() {
                 <p className="text-[19px] font-bold tracking-[0.2px] text-ink">AI Social Agent</p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => openBar()}
-                className="glass-panel mt-2.5 inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] text-ink transition-[border-color,box-shadow] hover:border-accent hover:shadow-[0_0_22px_-6px_var(--color-accent)]"
-              >
-                <AssistantCore state={coreState === 'thinking' || coreState === 'working' ? 'thinking' : 'dormant'} size={15} />
-                {coreState === 'thinking' || coreState === 'working' ? 'Thinking…' : 'Ask Ethara'}
-                <span className="mono rounded-[5px] border border-line-strong px-[5px] py-px text-[8.5px] text-ink-3">⌘K</span>
-              </button>
+              {/*
+                The "Ask Ethara · ⌘K" chip was removed on request. The command
+                plane itself is untouched: ⌘K still opens the bar from anywhere,
+                the narration rail still opens with ⌥J, and the Calendar
+                Assistant is unaffected. Only this launcher is gone.
+              */}
 
               {/* One line, always reserved, so nothing below it jumps. */}
               <p className="mono mt-2 h-[15px] text-[9.5px] tracking-[0.05em] text-accent-bright">{statusLine}</p>
@@ -462,8 +467,8 @@ export function Dashboard() {
 
             {/* ── right ────────────────────────────────────────────── */}
             <div
-              className="flex min-w-0 flex-col justify-start gap-3.5"
-              style={{ transform: 'rotateY(-8deg) translateZ(-14px)', transformOrigin: '0% 50%' }}
+              /* Contained for the same reason as the left column. */
+              className="hub-tilt-right flex min-w-0 flex-col justify-start gap-3.5 min-h-0 overflow-y-auto overscroll-auto"
             >
               <Panel title="Calendar" hint={`${placed} placed`} onOpen={() => setPage('calendar')} delay={160}>
                 <div className="grid grid-cols-7 gap-1">
@@ -606,23 +611,21 @@ export function Dashboard() {
 
           {/* ── the foot: every other screen ───────────────────────── */}
           {/*
-            CLEAR OF THE ROTATED PANELS ABOVE, AND IN FRONT OF THEM.
+            SEPARATED FROM THE PANELS ABOVE BY SPACE, NOT BY DEPTH.
 
-            The two side panels carry `rotateY(±8deg) translateZ(-14px)` inside a
-            `perspective: 1200px` stage. A rotated plane's near corner projects
-            outward, so their bottom edges swung down over this bar — the reported
-            posts caption and this bar's own "N screens" label rendered on top of
-            each other.
+            The side panels once sat at `rotateY(±8deg) translateZ(-14px)` in a
+            perspective stage, and a rotated plane's near corner projects outward,
+            so their bottom edges swung down across this bar.
 
-            Perspective overlap is not solved by z-index alone, because the
-            painting order follows the 3D positions. So this bar is moved clearly
-            in FRONT on the Z axis and given real vertical separation, which
-            removes the intersection rather than hiding it. `relative` plus a
-            stacking context keeps it above anything still reaching into its row.
+            Lifting this bar forward on the Z axis "fixed" that by inverting it —
+            pulled toward the viewer, its own edge then covered the panels above.
+            Depth is the wrong tool for two things that should simply not
+            intersect. So the bar stays in the plane, where it is already in front
+            of panels pushed to -14px and after them in document order, and real
+            vertical margin keeps the projection clear of it.
           */}
           <div
-            className="relative z-10 mt-2 flex flex-col gap-4 xl:flex-row"
-            style={{ transform: 'translateZ(34px)' }}
+            className="hub-foot relative z-10 mt-5 flex flex-col gap-4 xl:flex-row"
           >
             <div className="glass-panel flex-1 rounded-[14px] px-3.5 py-3">
               <div className="flex items-center justify-between">
@@ -1058,7 +1061,7 @@ function SystemPill({
           />
         </span>
         <span className="mono text-[10px] uppercase tracking-[0.08em]">
-          {busy ? `${working || 1} running` : `${agents.length} idle`}
+          {busy ? `${working || 1} running` : `${operationalAgents(agents).length} idle`}
         </span>
       </button>
 

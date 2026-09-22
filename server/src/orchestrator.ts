@@ -12,6 +12,7 @@
 import type {
   AgentId,
   CalendarSlot,
+  ContentFormat,
   IdeaStatus,
   Platform,
 } from '../../shared/agent-contract'
@@ -54,6 +55,7 @@ import {
   upsertDraft,
   upsertMediaAsset,
   type IdeaRow,
+  replaceHookVariants,
 } from './db/repo'
 import { resolveConfig, runAgent } from './agents/runtime'
 import type {
@@ -65,6 +67,7 @@ import type {
   PipelinePayload,
   PublishPayload,
   ReviewPayload,
+  ScoredHook,
 } from './agents/skills/index'
 import { PLATFORM_LABEL } from './agents/corpus'
 
@@ -526,6 +529,15 @@ async function persistCorpus(
       captureSource: p.captureSource,
       platform: p.platform,
       metricsAvailable: p.metricsAvailable,
+      views: p.views,
+      viewsAvailable: p.viewsAvailable,
+      hook: p.hook,
+      engagementRate: p.engagementRate,
+      mediaFormat: p.mediaFormat,
+      signalFlags: p.signalFlags,
+      transcript: p.transcript,
+      transcriptSource: p.transcriptSource,
+      transcriptConfidence: p.transcriptConfidence,
       brandRelevance: p.brandRelevance,
       postedAt: p.postedAt,
     })),
@@ -629,6 +641,7 @@ async function persistKeywordSignals(
       runId,
       postCount: trend.postCount,
       totalEngagement: trend.totalEngagement,
+      measuredCount: trend.measuredCount,
       avgEngagement: trend.avgEngagement,
       velocity: trend.velocity,
       growthPct: trend.growthPct,
@@ -880,6 +893,13 @@ export interface DraftResult {
   source: 'live' | 'fixture'
   model: string
   fallbackReason?: string
+  /** Which kind of artefact was written (ADR-007). A script never publishes. */
+  contentFormat: ContentFormat
+  /**
+   * The hook variants, for a script. Always `[]` for a post, so a caller never
+   * has to test the format before reading it.
+   */
+  hooks: ScoredHook[]
   grounding: Array<{ title: string; confidence: string }>
   media: MediaResult | null
   skills: Array<{ skillId: string; name: string; status: string; durationMs: number }>
@@ -912,6 +932,33 @@ export async function generateDraft(
   const platform = ctx.platform ?? idea.platform
   const analysis = idea.analysis as Record<string, unknown>
 
+  /*
+   * THE SHORT-FORM BRANCH (ADR-007), AND WHY IT LIVES HERE.
+   *
+   * Sequencing lives only in the orchestrator. The Caption Agent holds fourteen
+   * skills — ten that compose a written post and four that produce a spoken
+   * script with its hooks — and which set runs is a property of the ARTEFACT
+   * being made, not of the agent.
+   *
+   * Expressed as `onlySkills` rather than as fourteen `if` statements inside
+   * fourteen handlers: a skill that no-ops on the wrong format still records a
+   * `skill_runs` row claiming it ran, and a run console full of those is a run
+   * console nobody reads.
+   *
+   * `generation.caption.voice` is in BOTH lists deliberately. It is the
+   * grounding retrieval, and a script is held to the same evidence standard as
+   * a post — an ungrounded script is not a cheaper script, it is an unfounded
+   * one.
+   */
+  const shortForm = idea.content_format === 'short_form_script'
+  const scriptSkills = [
+    'generation.caption.voice',
+    'caption.voice.derive',
+    'caption.script.write',
+    'caption.hook.generate',
+    'caption.hook.score',
+  ]
+
   const caption = await runAgent<CaptionPayload>(
     'caption',
     {
@@ -924,8 +971,10 @@ export async function generateDraft(
       angle: typeof analysis.angle === 'string' ? analysis.angle : 'Explain the mechanism behind the result',
       audience: typeof analysis.audience === 'string' ? analysis.audience : 'ML engineers and research leads',
       format: typeof analysis.format === 'string' ? analysis.format : 'Thought Leadership',
+      contentFormat: idea.content_format,
     },
     {
+      ...(shortForm ? { onlySkills: scriptSkills } : {}),
       workspaceId,
       trigger: ctx.trigger,
       turnId,
@@ -941,7 +990,9 @@ export async function generateDraft(
   }
 
   const payload = caption.payload
-  const body = payload.caption ?? payload.captionBody ?? idea.description ?? idea.title
+  const body = shortForm
+    ? (payload.script ?? idea.description ?? idea.title)
+    : (payload.caption ?? payload.captionBody ?? idea.description ?? idea.title)
 
   /*
    * THE CARD TAKES OUR OWN LINE, NOT THE SOURCE'S.
@@ -959,7 +1010,9 @@ export async function generateDraft(
    * has read the title that was in front of them, and changing it underneath them
    * would misrepresent what they reviewed.
    */
-  const hook = (payload.hook ?? '').trim()
+  // A script has no single first line of its own — it has five competing hooks
+  // and no chosen one yet — so the card keeps the title it was planned under.
+  const hook = shortForm ? '' : (payload.hook ?? '').trim()
   const retitleable = idea.status === 'suggested' || idea.status === 'drafted'
   if (hook !== '' && retitleable && hook !== idea.title) {
     await updateIdea(workspaceId, idea.id, { title: hook })
@@ -976,8 +1029,71 @@ export async function generateDraft(
     platform,
     body,
     generatedBy: 'caption',
-    model: payload.captionModel ?? 'ethara-template-writer',
-    source: payload.captionSource ?? 'fixture',
+    model: (shortForm ? payload.scriptModel : payload.captionModel) ?? 'ethara-template-writer',
+    source: (shortForm ? payload.scriptSource : payload.captionSource) ?? 'fixture',
+    contentFormat: idea.content_format,
+  })
+
+  /*
+   * THE HOOKS, WRITTEN AS ROWS.
+   *
+   * One row per variant, never a blob on the draft: each carries its own
+   * pattern, its own matched evidence and its own outcome, and a JSON array
+   * could not be joined, counted or asked which pattern wins for this account.
+   *
+   * `replaceHookVariants` rewrites the set rather than appending a second one —
+   * a double-clicked Generate must not produce ten hooks — and it leaves a
+   * variant the operator has already selected alone, because that is a human
+   * decision about this idea.
+   */
+  if (shortForm) {
+    const scored = payload.scoredHooks ?? []
+    if (scored.length > 0) {
+      await replaceHookVariants(
+        workspaceId,
+        idea.id,
+        draft?.id ?? null,
+        scored.map((h) => ({
+          body: h.body,
+          pattern: h.pattern,
+          rank: h.rank,
+          confidence: h.confidence,
+          confidenceBasis: h.confidenceBasis,
+          matchedPostId: h.matchedPostId,
+          matchedItemId: h.matchedItemId,
+          source: payload.hookSource ?? 'fixture',
+          model: payload.hookModel ?? null,
+          fallbackReason: payload.hookFallbackReason ?? null,
+        })),
+      )
+    }
+    for (const note of payload.hookNotes ?? []) {
+      await insertActivity({ workspaceId, agentId: 'caption', message: note, status: 'warn' })
+    }
+  }
+
+  /*
+   * THE FIRST STEP ON THE THREAD.
+   *
+   * `drafts` keeps one row per post and platform, so the body it holds is only
+   * ever the CURRENT one — the revision number climbs while the text it
+   * replaced is gone. Every instruction was already recorded here; the writing
+   * they were applied to was not, so reopening the panel showed a thread whose
+   * first entry could not be returned to.
+   *
+   * `instruction` stays null: this is the agent's own writing, nobody asked for
+   * it, and the Learning Agent reads a non-empty `instruction` as an operator
+   * preference. A generated draft is not a preference.
+   */
+  await appendIdeaFeedback(workspaceId, idea.id, {
+    instruction: null,
+    // Revision 1 is the first writing; anything above it is a regeneration,
+    // which discards the previous text and so is worth saying plainly.
+    note: (draft?.revision ?? 1) > 1 ? 'Rewritten from scratch.' : 'First draft.',
+    platform,
+    revision: draft?.revision ?? 1,
+    target: 'caption',
+    body,
   })
 
   await insertLineage({
@@ -1001,8 +1117,16 @@ export async function generateDraft(
     data: { ideaId: idea.id, platform, revision: draft?.revision ?? 1, source: payload.captionSource },
   })
 
+  /*
+   * NO CREATIVE FOR A SCRIPT.
+   *
+   * A brand card is the artwork attached to a written post. A reel's visual is
+   * the footage a human has not shot yet, and rendering a card for it would put
+   * an asset on the idea that nothing will ever publish — and that the review
+   * screens would then show as though it were the post's image.
+   */
   const media =
-    ctx.withImage === false
+    ctx.withImage === false || shortForm
       ? null
       : await renderIdeaImage({ ...ctx, ideaId: idea.id, platform, captionBody: body })
 
@@ -1011,11 +1135,17 @@ export async function generateDraft(
     platform,
     body,
     revision: draft?.revision ?? 1,
-    source: payload.captionSource ?? 'fixture',
-    model: payload.captionModel ?? 'ethara-template-writer',
-    ...(payload.captionFallbackReason === undefined
-      ? {}
-      : { fallbackReason: payload.captionFallbackReason }),
+    source: (shortForm ? payload.scriptSource : payload.captionSource) ?? 'fixture',
+    model: (shortForm ? payload.scriptModel : payload.captionModel) ?? 'ethara-template-writer',
+    ...(shortForm
+      ? payload.scriptFallbackReason === undefined
+        ? {}
+        : { fallbackReason: payload.scriptFallbackReason }
+      : payload.captionFallbackReason === undefined
+        ? {}
+        : { fallbackReason: payload.captionFallbackReason }),
+    contentFormat: idea.content_format,
+    hooks: payload.scoredHooks ?? [],
     grounding: (payload.grounding ?? []).map((g) => ({ title: g.title, confidence: g.confidence })),
     media,
     skills: caption.skills.map((s) => ({
@@ -1129,6 +1259,29 @@ export async function renderIdeaImage(
     agentId: 'image',
   })
 
+  /*
+   * An image instruction joins the same thread as a caption instruction.
+   *
+   * Only when one was given: this function also runs as the last step of
+   * `generateDraft`, and recording "re-rendered" for a creative nobody asked
+   * about would put a turn in the thread that no operator took.
+   *
+   * No `body` — reverting means returning the CAPTION to a point, and a render
+   * is not a point in the caption's history. `target` says which agent was
+   * spoken to so the thread can label the turn.
+   */
+  if (ctx.instruction) {
+    await appendIdeaFeedback(workspaceId, idea.id, {
+      instruction: ctx.instruction,
+      note: payload.fallbackReason
+        ? `Re-rendered with ${payload.model ?? 'brand-svg'} — ${payload.fallbackReason}`
+        : `Re-rendered with ${payload.model ?? 'brand-svg'}.`,
+      platform: ctx.platform,
+      target: 'image',
+      model: payload.model ?? 'brand-svg',
+    })
+  }
+
   return {
     dataUri: payload.dataUri ?? '',
     model: payload.model ?? 'brand-svg',
@@ -1158,6 +1311,10 @@ export interface InstructionResult {
   conflicts: string[]
   compliance: ReviewPayload['compliance']
   preference: ReviewPayload['preference']
+  /** Whether the ask was met, as evidence rather than assumption. */
+  honoured: ReviewPayload['honoured']
+  /** Per-attachment: which the chosen model actually read. */
+  referenceNotes: string[]
   diffSummary: string
   skills: Array<{ skillId: string; name: string; status: string; durationMs: number }>
 }
@@ -1170,7 +1327,19 @@ export async function applyInstruction(
     /** The caption model the operator chose in the review panel. */
     captionModel?: string
     /** Files the operator attached for the model to work from. */
-    references?: Array<{ name: string; mimeType: string; text?: string; note?: string }>
+    /**
+     * `image` carries the attachment's bytes. It has to be declared here or the
+     * data URI is dropped in transit and the review skill sees a name — which
+     * is exactly how an attached moodboard used to reach the writer as a
+     * filename.
+     */
+    references?: Array<{
+      name: string
+      mimeType: string
+      text?: string
+      note?: string
+      image?: string
+    }>
   },
 ): Promise<InstructionResult> {
   const { workspaceId, turnId = null } = ctx
@@ -1231,11 +1400,19 @@ export async function applyInstruction(
 
   // The ask is recorded either way — law 4, nothing is ever deleted, and an
   // instruction that could not be carried out is part of the post's history.
+  //
+  // `body` is the text AS IT STOOD AFTER this step, which is what makes the
+  // thread revertable: returning to a step means writing its body back. An
+  // instruction that changed nothing still carries the body it left in place,
+  // so every entry is a point the draft can be returned to.
   await appendIdeaFeedback(workspaceId, idea.id, {
     instruction: ctx.instruction,
     note: payload.appliedNote ?? '',
     platform: ctx.platform,
     revision: saved?.revision ?? draft.revision,
+    target: 'caption',
+    applied: changed,
+    body,
   })
 
   if (changed && (idea.status === 'suggested' || idea.status === 'drafted')) {
@@ -1266,6 +1443,8 @@ export async function applyInstruction(
     conflicts: payload.conflictNotes ?? [],
     compliance: payload.compliance,
     preference: payload.preference ?? null,
+    honoured: payload.honoured,
+    referenceNotes: payload.referenceNotes ?? [],
     diffSummary: payload.diffSummary ?? '',
     skills: result.skills.map((s) => ({
       skillId: s.skillId,
@@ -1273,6 +1452,106 @@ export async function applyInstruction(
       status: s.status,
       durationMs: s.durationMs,
     })),
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVERT — GOING BACK IS ITSELF A STEP FORWARD
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface RevertResult {
+  ideaId: string
+  platform: Platform
+  draft: { body: string; revision: number; model: string; source: 'live' | 'fixture' }
+  /** Names the step returned to, so the panel can say so without guessing. */
+  note: string
+}
+
+/**
+ * Returns a caption to the text it held at an earlier step on the thread.
+ *
+ * REVERTING DOES NOT REWIND. Law 4 — nothing is ever deleted — applies to a
+ * revert as much as to a rejection: the steps taken after the one being
+ * returned to stay on the thread, and the revert is appended as a further step
+ * rather than truncating the history behind it. An operator who reverts and
+ * then changes their mind can go forward again, because the later text is still
+ * recorded. Dropping those entries would make the undo itself un-undoable.
+ *
+ * The step is addressed by its `at` stamp, which is what `appendIdeaFeedback`
+ * writes and the only identifier a feedback entry has. A revision NUMBER would
+ * be ambiguous: an instruction that changed nothing leaves the number where it
+ * was, so two entries can share one.
+ */
+export async function revertDraft(
+  ctx: OrchestratorContext & { ideaId: string; platform: Platform; at: string },
+): Promise<RevertResult> {
+  const { workspaceId } = ctx
+  const idea = await getIdea(workspaceId, ctx.ideaId)
+  if (!idea) throw new Error('No such idea.')
+
+  const step = idea.feedback.find(
+    (entry) =>
+      String(entry.at) === ctx.at &&
+      (entry.platform === undefined || entry.platform === ctx.platform),
+  )
+  if (!step) throw new Error('That step is no longer on this post’s history.')
+
+  const body = typeof step.body === 'string' ? step.body : ''
+  if (body.trim().length === 0) {
+    // Image turns and entries written before bodies were recorded carry no text
+    // to return to. Saying which is true beats writing an empty caption.
+    throw new Error('That step did not change the caption, so there is nothing to return to.')
+  }
+
+  const current = await getDraft(idea.id, ctx.platform)
+  if (current && current.body.trim() === body.trim()) {
+    throw new Error('The caption already reads exactly as it did at that step.')
+  }
+
+  const saved = await upsertDraft({
+    ideaId: idea.id,
+    platform: ctx.platform,
+    body,
+    generatedBy: 'review',
+    model: typeof step.model === 'string' ? step.model : (current?.model ?? 'ethara-template-writer'),
+    // A revert restores text this workspace already held; it calls no model, so
+    // it is never `live` on its own account.
+    source: 'fixture',
+  })
+
+  const revertedTo = typeof step.revision === 'number' ? `R${step.revision}` : 'an earlier step'
+  const note = `Reverted to ${revertedTo}. The steps after it are still on the thread.`
+
+  // `instruction` stays null deliberately: the Learning Agent reads a non-empty
+  // instruction as an operator preference, and "undo" is not a preference about
+  // how posts should read.
+  await appendIdeaFeedback(workspaceId, idea.id, {
+    instruction: null,
+    note,
+    platform: ctx.platform,
+    revision: saved?.revision ?? current?.revision ?? 1,
+    target: 'caption',
+    revertedFrom: ctx.at,
+    body,
+  })
+
+  await insertActivity({
+    workspaceId,
+    agentId: 'review',
+    message: `“${idea.title}” reverted to ${revertedTo}`,
+    status: 'warn',
+  })
+
+  return {
+    ideaId: idea.id,
+    platform: ctx.platform,
+    draft: {
+      body,
+      revision: saved?.revision ?? current?.revision ?? 1,
+      model: saved?.model ?? current?.model ?? 'ethara-template-writer',
+      source: saved?.source ?? current?.source ?? 'fixture',
+    },
+    note,
   }
 }
 
@@ -1392,6 +1671,29 @@ export async function publishIdea(
   if (!idea) throw new Error('No such idea.')
 
   const platform = ctx.platform ?? idea.platform
+
+  /*
+   * A SHORT-FORM SCRIPT DOES NOT PUBLISH (ADR-010).
+   *
+   * Publishing a reel means uploading a video file, and there is no video file
+   * — nothing in this product records, edits or uploads one. The closest the
+   * platform could do is post the SCRIPT TEXT as a caption, which is a
+   * different artefact in a different register, shipped under an approval that
+   * was given for something else.
+   *
+   * So a script terminates at `approved` and is exported for a human to film.
+   * The refusal is here, at the one function every caller reaches, rather than
+   * in the UI: the REST route, the command plane's `idea.publish` tool and the
+   * operator's button all arrive through this, so none can route around it.
+   */
+  if (idea.content_format === 'short_form_script') {
+    throw new Error(
+      `“${idea.title}” is a short-form script, and a script is not published by this platform — ` +
+        `it is exported for a human to film. There is no video artefact to dispatch, and posting ` +
+        `the script text as a caption would publish a different thing from the one that was approved. ` +
+        `The approvals on it remain valid; read the script and its hooks from the idea itself.`,
+    )
+  }
 
   /*
    * DEMO MODE DOES NOT PUBLISH.

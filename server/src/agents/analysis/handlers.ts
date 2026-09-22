@@ -7,7 +7,7 @@
 
 import { BRAND, similarity } from '../../../../shared/brand-voice'
 import { listPosts } from '../../db/repo'
-import { angleFor, audienceFor, clamp, countTopicMatches, engagementLevel, FORMATS, headlineFrom, mean, seededFor, type ContentFormat } from '../corpus'
+import { angleFor, audienceFor, clamp, countTopicMatches, engagementLevel, EDITORIAL_FORMATS, headlineFrom, mean, seededFor, type EditorialFormat } from '../corpus'
 import { registerSkill } from '../runtime'
 import type { HashtagCandidate, Opportunity, PipelinePayload, ScrapedPost } from '../skills/index'
 
@@ -305,7 +305,7 @@ registerSkill<PipelinePayload>('analysis.format.recommend', (payload, ctx) => {
 
   const opportunities = payload.opportunities ?? []
 
-  const biasBoost: Record<string, Partial<Record<ContentFormat, number>>> = {
+  const biasBoost: Record<string, Partial<Record<EditorialFormat, number>>> = {
     Balanced: {},
     'Favour long-form': { 'Thought Leadership': 18, 'Case Study': 12 },
     'Favour short-form': { 'Short Post': 20 },
@@ -315,9 +315,9 @@ registerSkill<PipelinePayload>('analysis.format.recommend', (payload, ctx) => {
 
   for (const opportunity of opportunities) {
     const words = opportunity.description.split(/\s+/).length
-    const scores = new Map<ContentFormat, number>()
+    const scores = new Map<EditorialFormat, number>()
 
-    for (const format of FORMATS) {
+    for (const format of EDITORIAL_FORMATS) {
       if (format === 'Video' && !allowVideo) continue
       let score = 50
       if (format === 'Thought Leadership') score += opportunity.brandRelevance / 4 + (words > 30 ? 12 : 0)
@@ -329,7 +329,7 @@ registerSkill<PipelinePayload>('analysis.format.recommend', (payload, ctx) => {
     }
 
     const best = [...scores.entries()].sort((a, b) => b[1] - a[1])[0]
-    opportunity.format = (best?.[0] ?? 'Thought Leadership') as ContentFormat
+    opportunity.format = (best?.[0] ?? 'Thought Leadership') as EditorialFormat
   }
 
   const tally = new Map<string, number>()

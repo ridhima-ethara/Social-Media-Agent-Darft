@@ -7,7 +7,19 @@
 
 import type { Platform } from '../../../../shared/agent-contract'
 import { PLATFORMS } from '../../../../shared/agent-contract'
-import { listPlatformAnalytics, listPosts, postBaseline, setPostAnalysis, type PostRow } from '../../db/repo'
+import {
+  insertPostMetrics,
+  listPlatformAnalytics,
+  listPosts,
+  postBaseline,
+  setPostAnalysis,
+  type PostRow,
+} from '../../db/repo'
+import {
+  fetchPostMetrics,
+  isConfigured as bufferConfigured,
+  unavailableReason as bufferUnavailable,
+} from '../../integrations/buffer'
 import { clamp, mean, median, monthKeyOf, monthLabelOf, PLATFORM_LABEL, round, stdev,
 } from '../corpus'
 import { registerSkill } from '../runtime'
@@ -23,14 +35,80 @@ registerSkill<AnalyticsPayload>('analytics.metrics.ingest', async (_payload, ctx
   const appendOnly = ctx.bool('appendOnly', true)
 
   const posts = await listPosts(ctx.workspaceId, { limit: maxPosts })
-  const withMetrics = posts.filter((p) => p.metrics_captured_at !== null)
+
+  /*
+   * ═══ THIS SKILL NOW ACTUALLY PULLS ═══
+   *
+   * Its summary has always said it "pulls the current figures for every
+   * published post". It did not. It read whatever was already in
+   * `post_metrics` and counted the rows — so the only thing ever written there
+   * for a live post was the seeded first-hour estimate from
+   * `publishing.post.receipt`, and nothing subsequently corrected it.
+   *
+   * The consequence was not a missing feature, it was a wrong number shown
+   * confidently: a post delivered to LinkedIn displayed 241 reach, 375
+   * impressions and 4.53% engagement while the platform's own answer, which
+   * Buffer had all along, was six zeros.
+   *
+   * Buffer exposes `Post.metrics` — the platform's figures, refreshed by
+   * Buffer — and `Post.externalLink`, the permalink. Only LIVE posts have a
+   * Buffer id to ask about; a demo post never went anywhere, so there is
+   * nothing to read and none is invented for it.
+   */
+  const live = posts.filter((p) => p.publish_mode === 'live' && (p.external_id ?? '') !== '')
+  let pulled = 0
+  let unreachable = 0
+  const reasons: string[] = []
+
+  if (live.length > 0 && bufferConfigured()) {
+    for (const post of live) {
+      try {
+        const measured = await fetchPostMetrics(post.external_id as string)
+        if (measured === null) {
+          reasons.push(`Buffer does not know post ${post.external_id}`)
+          continue
+        }
+        await insertPostMetrics({
+          postId: post.id,
+          // Straight through, nulls included. A metric Buffer did not report
+          // stays absent rather than becoming a zero.
+          reach: measured.reach,
+          impressions: measured.impressions,
+          likes: measured.likes,
+          comments: measured.comments,
+          shares: measured.shares,
+          engagementRate: measured.engagementRate,
+        })
+        pulled += 1
+      } catch (error) {
+        unreachable += 1
+        const why = error instanceof Error ? error.message : String(error)
+        if (!reasons.includes(why)) reasons.push(why)
+      }
+    }
+  } else if (live.length > 0) {
+    reasons.push(bufferUnavailable())
+  }
+
+  for (const reason of reasons.slice(0, 3)) {
+    ctx.emit('activity', `Metrics not pulled — ${reason}`, { status: 'warn' })
+  }
+
+  const refreshed = await listPosts(ctx.workspaceId, { limit: maxPosts })
+  const withMetrics = refreshed.filter((p) => p.metrics_captured_at !== null)
 
   ctx.log(
-    `${withMetrics.length} of ${posts.length} post(s) carry a metrics reading` +
+    (pulled > 0
+      ? `${pulled} live post(s) measured from the platform`
+      : live.length === 0
+        ? 'No live post to measure — nothing was published for real'
+        : `No live reading could be taken from ${live.length} post(s)`) +
+      (unreachable > 0 ? `, ${unreachable} unreachable` : '') +
+      ` · ${withMetrics.length} of ${refreshed.length} post(s) carry a reading` +
       (appendOnly ? ' · readings are appended, never overwritten' : ''),
   )
 
-  return { ingested: withMetrics.length, posts: withMetrics }
+  return { ingested: withMetrics.length, posts: withMetrics, measured: pulled }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -234,7 +312,11 @@ function humanMetric(key: string): string {
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
+  // An average is a division, so it arrives at full float precision: a baseline
+  // of three posts printed "63.333333333333336 reach" into a sentence an
+  // operator reads. One decimal is the same number said legibly, and a whole
+  // number keeps its own shape rather than growing a ".0".
+  return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(1)))
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

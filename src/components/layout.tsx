@@ -385,7 +385,23 @@ export function Shell({ children }: { children: ReactNode }) {
         {/* Bottom padding lives on the page, not the scroller, so a sticky
             strip along the bottom of a page can sit flush with the edge. */}
         <main className="stage-3d flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden px-4 pt-4">
-          <div key={page} className="anim-page-enter-3d flex min-h-0 flex-1 flex-col pb-2">{children}</div>
+          {/*
+            NO `min-h-0` ON THE PAGE WRAPPER.
+
+            `main` above is the scroller — `flex-1 min-h-0 overflow-y-auto` is
+            correct there. Repeating `min-h-0` here was not: on a flex item it
+            means "you may shrink below your content", so a page taller than the
+            viewport was squeezed to the viewport's height and its overflow was
+            clipped rather than growing the wrapper. `main` then had nothing to
+            scroll, and pages like Content Intelligence — five trend cards and a
+            120-row keyword table — simply ended at the fold.
+
+            Dropping it restores the flex default, `min-height: auto`: the
+            wrapper never shrinks below its content, so tall pages grow and
+            `main` scrolls them. `flex-1` stays, so a short page still fills the
+            column instead of collapsing to its text.
+          */}
+          <div key={page} className="anim-page-enter-3d flex flex-1 flex-col pb-2">{children}</div>
         </main>
       </div>
 

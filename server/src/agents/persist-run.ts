@@ -142,6 +142,9 @@ export async function persistAgentRun(output: Record<string, unknown>): Promise<
       runId: run.id,
       postCount: num(row, 'post_count'),
       totalEngagement: num(row, 'total_engagement'),
+      // The Python bridge does not report how many posts were measured, so this
+      // path records none rather than claiming the total is a measurement.
+      measuredCount: num(row, 'measured_count'),
       avgEngagement: num(row, 'velocity'),
       velocity: num(row, 'velocity'),
       // The Python validator scores growth at a neutral 50 because there is no

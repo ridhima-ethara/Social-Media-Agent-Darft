@@ -106,13 +106,24 @@ describe('a misconfigured agent tier', () => {
 })
 
 describe('a healthy environment', () => {
+  /*
+   * 30s, not the 5s default.
+   *
+   * Doctor now probes the Apify CLI for real — it asks who the CLI is logged in
+   * as and resolves one actor's live input schema, because §20 forbids
+   * reporting a scraper as working when it has not actually been asked. Those
+   * are two process spawns and a network round trip, which does not fit in the
+   * default budget. Mocking them would make the check worthless: a doctor that
+   * only reads config is exactly the "reports success without testing" failure
+   * the requirement names.
+   */
   it('exits zero and says nothing is blocking', () => {
     const run = doctor({})
     // Skipped rather than failed where the machine genuinely cannot run — this
     // suite must not depend on Postgres being up to be useful.
     if (run.status !== 0) return
     expect(run.output).toContain('nothing is blocking a run')
-  })
+  }, 30_000)
 })
 
 describe('the script is read-only', () => {

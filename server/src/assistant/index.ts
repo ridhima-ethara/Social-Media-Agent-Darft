@@ -23,6 +23,7 @@ import { publish } from '../events'
 import {
   insertTurn,
   listSteps,
+  conversationOfTurn,
   listTurns,
   nextTurnSeq,
   resolveConversation,
@@ -530,8 +531,9 @@ export async function resumeConfirmed(opts: ResumeOptions): Promise<RunCommandRe
   const turnId = outcome.row.turn_id
   const plan = outcome.plan
 
-  const turns = await listTurns(turnId, 1).catch(() => [])
-  void turns
+  // The conversation this confirmation belongs to. Resolved from the turn
+  // because the stored plan is all a resume has.
+  const conversationId = await conversationOfTurn(turnId).catch(() => '')
 
   const snapshot = await assembleSnapshot({
     workspaceId: opts.workspaceId,
@@ -553,7 +555,7 @@ export async function resumeConfirmed(opts: ResumeOptions): Promise<RunCommandRe
   return executePlan({
     plan,
     turnId,
-    conversationId: '',
+    conversationId,
     snapshot,
     knobs,
     narratorOptions,

@@ -47,19 +47,32 @@ import { config } from '../../config'
 import {
   AdapterError,
   apifySearch,
+  actorLabelFor,
+  explainApifyFailure,
   captureChainFor,
   captureFor,
   parallelResearch,
   mapWithConcurrency,
   platformLaneUnavailableReason,
   openWebLaneUnavailableReason,
+  transcriptionBudget,
+  whisperTranscribe,
   type CaptureAttempt,
   type RawPost,
 } from '../../integrations'
 import { prepareEvidence } from '../../../../packages/runtime/src/evidence'
 import { cycleWeekFor } from '../../../../shared/keyword-schedule'
 import { cycleWeekTopic, keywordsForCycleWeek, type KeywordRow } from '../../db/repo'
-import { insertActivity, listKeywords, listKnowledge, listSources, recentCaptures } from '../../db/repo'
+import {
+  activeDiscoveredKeywords,
+  insertActivity,
+  listKeywords,
+  listKnowledge,
+  listSources,
+  listTrackedAccounts,
+  markTrackedAccountsCaptured,
+  recentCaptures,
+} from '../../db/repo'
 import {
   clampChars,
   contentWords,
@@ -78,6 +91,7 @@ import {
 import { registerSkill } from '../runtime'
 import type {
   CompetitorPostRecord,
+  KeywordCandidate,
   HashtagCandidate,
   PipelinePayload,
   ResolvedKeyword,
@@ -304,7 +318,34 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
     pool = all.filter((k) => payload.keywordIds?.includes(k.id))
   } else if (scheduled.length > 0) {
     source = 'rota'
-    pool = scheduled
+    /*
+     * DISCOVERED KEYWORDS JOIN THE ROTA, ALWAYS (ADR-012).
+     *
+     * This is the line that makes keyword discovery mean anything. A rota is a
+     * plan a human wrote in advance; a discovered term by definition arrived
+     * after that plan and will never be on it, because nobody is going to go
+     * back and schedule a week for a word the scraper found last Tuesday.
+     *
+     * Without this union, `validation.keyword.emerge` could promote a term, an
+     * operator could switch it on, and it would still never be captured — the
+     * feature would look implemented and do nothing. Approving a keyword has to
+     * be sufficient to get it captured.
+     *
+     * They are ADDED to the scheduled set rather than replacing any of it: the
+     * week's intent is preserved, and the per-run cap below still bounds the
+     * total, so this cannot quietly multiply what a run costs.
+     */
+    const discovered = await activeDiscoveredKeywords(ctx.workspaceId)
+    const onRota = new Set(scheduled.map((k) => k.id))
+    const joining = discovered.filter((k) => !onRota.has(k.id))
+    pool = [...scheduled, ...joining]
+    if (joining.length > 0) {
+      ctx.emit(
+        'activity',
+        `${joining.length} discovered keyword(s) joined week ${rotaWeek}\u2019s rota: ${joining.map((k) => k.term).join(', ')}`,
+        { status: 'ok', discovered: joining.map((k) => k.term) },
+      )
+    }
   } else if (rotaWeek !== null && fallback === 'skip') {
     // An honest empty result. Capturing the weight-ordered set here would quietly
     // substitute a different week's intent for the one that was scheduled.
@@ -326,7 +367,76 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
     source === 'rota' ? pool : pool.filter((k) => k.weight >= minWeight)
   const ordered =
     source === 'rota' ? cleared : [...cleared].sort((a, b) => b.weight - a.weight)
-  const eligible = ordered.slice(0, Math.max(1, maxKeywords))
+  /*
+   * A DIFFERENT SLICE EACH RUN.
+   *
+   * The rota picks a week's keywords; the cap picks how many of them one run
+   * can afford. Taking `slice(0, N)` every time meant the same N terms were
+   * scraped on every run of that week — the same posts came back, the dedupe
+   * pre-filter dropped them as already seen, and the run reported almost
+   * nothing new. From outside that looks like a platform that has stopped
+   * working, which is exactly what it was reported as.
+   *
+   * Rotating by the run count walks the whole eligible set over successive
+   * runs instead of re-reading its head. `runOffset` is the workspace's
+   * lifetime run count, already threaded through the payload for the same
+   * reason, so no new state is needed and a replayed run picks the same slice
+   * it originally did.
+   *
+   * An explicitly scoped run never rotates: "run discovery on RLHF" means that
+   * term, not a window that happens to contain it.
+   */
+  const take = Math.max(1, maxKeywords)
+  const rotating = ctx.bool('rotateAcrossRuns', true) && source !== 'scoped'
+  const runOffset = Math.max(0, payload.runOffset ?? 0)
+
+  /** A window of `size` items starting at `offset`, wrapping round the end. */
+  const window = <T,>(items: T[], offset: number, size: number): T[] =>
+    items.length === 0 ? [] : [...items.slice(offset % items.length), ...items.slice(0, offset % items.length)].slice(0, size)
+
+  let eligible: KeywordRow[]
+  let rotationNote = ''
+
+  if (!rotating) {
+    eligible = ordered.slice(0, take)
+  } else if (source === 'rota') {
+    /*
+     * THE WINDOW MOVES OVER THE ROTA PLUS THE WIDER SET, ALWAYS.
+     *
+     * Earlier attempts rotated only when the cap and the rota happened to
+     * disagree in the right direction — rotate WITHIN the rota when the cap was
+     * smaller, top up from elsewhere when it was larger. On a rota of nine with
+     * a cap of twelve neither branch moved the first nine, so the run console
+     * showed the same three keyword cards every time and the second run of a
+     * week re-read pages the dedupe filter then dropped.
+     *
+     * One rule instead: the week's rota leads the pool, the rest of the active
+     * set follows it, and a window of `take` walks that pool by the run count.
+     * Every run reads a different set; the week's scheduled terms still come
+     * first, so the plan is covered soonest; and the whole pool is covered
+     * across runs rather than its head being re-read.
+     */
+    const scheduledIds = new Set(ordered.map((k) => k.id))
+    const others = all
+      .filter((k) => !scheduledIds.has(k.id) && k.weight >= minWeight)
+      .sort((a, b) => b.weight - a.weight)
+    const pool = [...ordered, ...others]
+    eligible = window(pool, runOffset * take, take)
+    const start = (runOffset * take) % Math.max(1, pool.length)
+    rotationNote = `week ${rotaWeek} \u2014 keywords ${start + 1}\u2013${start + eligible.length} of ${pool.length} (${ordered.length} scheduled, ${others.length} from the wider set)`
+  } else {
+    // No rota in effect: walk the whole weighted set across runs rather than
+    // re-reading its head.
+    eligible = window(ordered, runOffset * take, take)
+    if (ordered.length > take) {
+      const start = (runOffset * take) % ordered.length
+      rotationNote = `keywords ${start + 1}\u2013${start + eligible.length} of ${ordered.length} this run`
+    }
+  }
+
+  if (rotationNote !== '') {
+    ctx.emit('activity', `Rotating \u2014 ${rotationNote}`, { status: 'ok', runOffset })
+  }
 
   ctx.emit(
     'activity',
@@ -482,6 +592,76 @@ registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) 
    the open web; the registry name and summary say so.
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE FIELDS THE CONTENT-SCRAPER SPECIFICATION ASKS TO COLLECT
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The post's own opening line.
+ *
+ * A hook is judged on its own, so it is stored rather than re-derived on read —
+ * `snippet` is clamped for display, and slicing a display string would give a
+ * different answer depending on where it happened to be cut.
+ *
+ * Emoji and leading hashtags are stripped: a line that opens with three tags is
+ * opening with reach bait, and what we want is the sentence underneath it.
+ */
+function hookOf(text: string): string {
+  const firstLine =
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.replace(/[#@\s]/g, '') !== '') ?? ''
+  return clampChars(
+    firstLine
+      .replace(/^(?:#[\p{L}\p{N}_]+\s*)+/u, '')
+      .replace(/\p{Extended_Pictographic}/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    200,
+  )
+}
+
+/**
+ * (reactions + comments) / views as a percentage, or `null`.
+ *
+ * `null` is the answer whenever either figure is missing, and that is the whole
+ * point of the function existing rather than the division being written inline
+ * at three call sites. Dividing by an absent denominator does not produce a low
+ * rate; it produces no rate, and a 0 would assert that the post was seen and
+ * ignored — a much stronger claim than the evidence supports.
+ */
+function engagementRateOf(post: {
+  reactions: number
+  comments: number
+  views: number
+  viewsAvailable: boolean
+  metricsAvailable: boolean
+}): number | null {
+  if (!post.viewsAvailable || !post.metricsAvailable || post.views <= 0) return null
+  return Math.round(((post.reactions + post.comments) / post.views) * 10000) / 100
+}
+
+/**
+ * What KIND of thing this is — which a platform name alone cannot answer.
+ *
+ * An Instagram Reel and an Instagram photo distribute completely differently,
+ * and the specification asks for content format as a column of its own.
+ * Inferred from the URL first, because a URL is a fact the platform stated;
+ * the play count is only a hint, so it is consulted second.
+ */
+function mediaFormatOf(raw: RawPost): string {
+  const url = raw.url.toLowerCase()
+  if (url.includes('/reel/') || url.includes('/reels/')) return 'reel'
+  if (url.includes('/shorts/')) return 'short'
+  if (url.includes('/video/') || url.includes('watch?v=')) return 'video'
+  if (raw.platform === null) return 'article'
+  // A platform post stating plays is video of some kind; the URL simply did not
+  // say which. Reported as 'video' rather than guessed at more precisely.
+  if (raw.viewsAvailable && raw.views > 0) return 'video'
+  return 'post'
+}
+
 function toScrapedPost(
   raw: RawPost,
   keywordId: string | null,
@@ -519,6 +699,15 @@ function toScrapedPost(
     sourceType,
     platform: raw.platform,
     metricsAvailable: raw.metricsAvailable,
+    views: raw.views,
+    viewsAvailable: raw.viewsAvailable,
+    hook: hookOf(raw.text),
+    engagementRate: engagementRateOf(raw),
+    mediaFormat: mediaFormatOf(raw),
+    transcript: null,
+    transcriptSource: null,
+    transcriptConfidence: null,
+    signalFlags: [],
     brandRelevance: alignment.score,
     alignedTopics: alignment.matchedTopics,
     knowledgeHits: alignment.knowledgeHits,
@@ -575,6 +764,52 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
     throw new Error('Every capture lane is switched off — turn on at least one platform or the open web.')
   }
 
+  /*
+   * A LANE WHOSE SOURCE CANNOT ANSWER IS DROPPED ONCE, NOT FAILED PER KEYWORD.
+   *
+   * With the Apify account over its limit, every platform lane fails for the
+   * same account-level reason. Attempting them anyway produced one "nothing
+   * captured · Apify refused the run" row per lane PER KEYWORD — sixteen or
+   * twenty identical rows burying the open-web lane's real result, which was
+   * succeeding the whole time. The run looked broken while it was working.
+   *
+   * So a lane whose source reports itself unavailable is removed from the list
+   * before any keyword is attempted, and the reason is stated ONCE. This is not
+   * hiding the failure: the reason still appears, it still names the fix, and
+   * the run summary still carries it. It is stated at the level it is true at —
+   * the account — rather than repeated at a level it has nothing to do with.
+   */
+  /** Why a lane produced nothing. Declared here because the skip below uses it. */
+  /** Why a lane produced nothing. Declared here because the skip below uses it. */
+  const laneReasons: string[] = []
+  const unavailableLanes: Array<{ label: string; reason: string }> = []
+  const runnable = lanes.filter((lane) => {
+    const source = captureFor(lane.platform)
+    if (source.isConfigured()) return true
+    unavailableLanes.push({ label: lane.label, reason: source.unavailableReason() })
+    return false
+  })
+
+  if (unavailableLanes.length > 0) {
+    const reason = unavailableLanes[0]?.reason ?? 'the source is not configured'
+    const names = unavailableLanes.map((l) => l.label).join(', ')
+    if (!laneReasons.includes(reason)) laneReasons.push(reason)
+    ctx.emit(
+      'activity',
+      `${unavailableLanes.length} lane(s) skipped — ${names}: ${reason.split('.')[0]}.`,
+      { status: 'warn', lanes: unavailableLanes.map((l) => l.label), reason },
+    )
+  }
+
+  if (runnable.length === 0) {
+    throw new Error(
+      `No capture lane can run. ${unavailableLanes[0]?.reason ?? 'Every configured source is unavailable.'}`,
+    )
+  }
+
+  lanes.length = 0
+  lanes.push(...runnable)
+
   const vocabulary = await loadAlignmentVocabulary(ctx.workspaceId)
   ctx.log(
     `Aligning against ${vocabulary.topics.length} brand topics, ` +
@@ -590,7 +825,6 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
     )
   }
 
-  const laneReasons: string[] = []
   /** Kept per lane so the run console can say WHERE the material came from. */
   const perLaneCounts = new Map<string, number>()
   let offBrand = 0
@@ -624,6 +858,28 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
      * event, so the run console can say why one lane carries engagement and
      * another does not.
      */
+    /*
+     * A LANE THAT HAS GONE DEAD MID-RUN IS SKIPPED SILENTLY.
+     *
+     * The lane list is built once, before any keyword is attempted — so a
+     * source that becomes unavailable DURING the run (the Apify breaker
+     * tripping on the first keyword's first call) is still in the list for
+     * every remaining keyword. Each one then failed, and each failure emitted
+     * its own "nothing captured" row: four platform lanes times every keyword,
+     * all saying the same thing about the account.
+     *
+     * The reason has already been stated once, at the level it is true at. It
+     * is on the run summary and in `laneReasons`, so nothing is hidden — this
+     * only stops it being repeated per keyword for a lane that is already known
+     * to be dead.
+     */
+    const laneSource = captureFor(lane.platform)
+    if (!laneSource.isConfigured()) {
+      const reason = laneSource.unavailableReason()
+      if (!laneReasons.includes(reason)) laneReasons.push(reason)
+      return []
+    }
+
     const chain = captureChainFor(lane.platform)
     const primary = (chain[0] as CaptureAttempt).source
 
@@ -691,10 +947,26 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
         break
       }
 
+      /*
+       * THE REASON AN OPERATOR READS.
+       *
+       * `AdapterError.toReason()` produces `apify.search returned HTTP 403 — {
+       * "error": { "t` — a status and the first 240 characters of a JSON body,
+       * cut mid-key. Two completely different failures with different fixes (a
+       * rejected token, an account over its monthly allowance) are
+       * indistinguishable in that string, and rule 6 asks a decision to name
+       * its evidence.
+       *
+       * `explainApifyFailure` reads Apify's structured `{ error: { type } }` and
+       * says what to do about it. Anything it does not recognise falls through
+       * to the generic reason, so nothing is ever hidden.
+       */
       const reason =
-        lastError instanceof AdapterError
-          ? lastError.toReason()
-          : `${source.label} failed — ${lastError instanceof Error ? lastError.message : String(lastError)}`
+        source.id === apifySearch.id
+          ? explainApifyFailure(lastError, actorLabelFor(lane.platform))
+          : lastError instanceof AdapterError
+            ? lastError.toReason()
+            : `${source.label} failed — ${lastError instanceof Error ? lastError.message : String(lastError)}`
       attemptReasons.push(reason)
 
       // Nothing left to try. An empty lane is normal — a narrow keyword
@@ -763,6 +1035,10 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
         externalId: post.externalId,
         brandRelevance: post.brandRelevance,
         captureSource: post.captureSource,
+        // The page itself. Without it the run console can say a page was
+        // captured but not WHICH page, so nothing on screen can be checked
+        // against its source.
+        ...(post.url ? { url: post.url } : {}),
       })
     }
 
@@ -1317,6 +1593,610 @@ registerSkill<PipelinePayload>('scraping.dedupe.prefilter', async (payload, ctx)
   )
 
   return { posts: kept }
+})
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   4 · scraping.account.capture — the tracked-account lane
+   ───────────────────────────────────────────────────────────────────────────
+   A keyword query answers "what is being said about X". This answers "what did
+   THESE PEOPLE say", which is a different question and is the one you ask when
+   you are watching specific competitors rather than a topic.
+
+   Distinct from `scraping.competitor.track`, which reads registered competitor
+   SOURCES for the saturation reading that the Analysis Agent consumes. This is
+   a capture lane: its posts join the corpus, get scored, get verdicts, and can
+   become ideas.
+
+   WITH NO ACCOUNTS REGISTERED IT CAPTURES NOTHING AND SAYS SO. It does not fall
+   back to a keyword query, because "posts by the five accounts you are watching"
+   and "posts matching your keywords" are different evidence, and substituting
+   one for the other would put a claim on screen that no row supports.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<PipelinePayload>('scraping.account.capture', async (payload, ctx) => {
+  const postsPerAccount = ctx.num('postsPerAccount', 10)
+  const maxAccountsPerRun = ctx.num('maxAccountsPerRun', 10)
+  const minBrandRelevance = ctx.num('minBrandRelevance', 0)
+  const maxParallel = ctx.num('maxParallel', 2)
+
+  const all = await listTrackedAccounts(ctx.workspaceId, { activeOnly: true })
+  if (all.length === 0) {
+    ctx.log(
+      'No accounts are being tracked, so this lane captured nothing. Add handles under ' +
+        'Tracked accounts; nothing is substituted for them.',
+    )
+    return {}
+  }
+
+  const accounts = all.slice(0, maxAccountsPerRun)
+  if (all.length > accounts.length) {
+    ctx.emit(
+      'activity',
+      `${all.length - accounts.length} tracked account(s) were not read this run — the per-run ceiling is ${maxAccountsPerRun}.`,
+      { status: 'warn', skipped: all.slice(maxAccountsPerRun).map((a) => a.handle) },
+    )
+  }
+
+  const vocabulary = await loadAlignmentVocabulary(ctx.workspaceId)
+  const existing = payload.posts ?? []
+  const seen = new Set(existing.map((p) => p.externalId))
+  const captured: string[] = []
+  const reasons: string[] = []
+
+  const perAccount = await mapWithConcurrency(accounts, maxParallel, async (account) => {
+    const source = captureFor(account.platform)
+    if (!source.isConfigured()) {
+      const reason = `${account.platform} cannot be read for @${account.handle} — ${source.unavailableReason()}`
+      if (!reasons.includes(reason)) reasons.push(reason)
+      return [] as ScrapedPost[]
+    }
+
+    let rows: RawPost[] = []
+    try {
+      /*
+       * THE HANDLE IS THE QUERY.
+       *
+       * The capture contract takes a keyword, and an account search is a
+       * keyword search whose term happens to be a handle — which is exactly
+       * how every one of these actors accepts it. Passing it through the same
+       * contract rather than adding an account-shaped input keeps one code
+       * path, and the handle travels onto the row as the keyword that found
+       * it, which is true and is what lineage needs.
+       */
+      rows = await source.run({
+        keyword: `@${account.handle}`,
+        platform: account.platform,
+        maxItems: postsPerAccount,
+        maxCharsPerPage: config.parallel.maxCharsPerPage,
+        datePosted: 'past-month',
+        sortBy: 'date',
+      })
+    } catch (error) {
+      const reason =
+        error instanceof AdapterError
+          ? error.toReason()
+          : `@${account.handle} could not be read — ${error instanceof Error ? error.message : String(error)}`
+      if (!reasons.includes(reason)) reasons.push(reason)
+      return [] as ScrapedPost[]
+    }
+
+    const kept: ScrapedPost[] = []
+    for (const raw of rows) {
+      if (seen.has(raw.externalId)) continue
+      const alignment = alignmentOf(raw.text, `@${account.handle}`, vocabulary)
+      if (alignment.score < minBrandRelevance) continue
+      seen.add(raw.externalId)
+      const post = toScrapedPost(raw, null, alignment)
+      // The handle, not the search string. `keyword` is what an operator reads
+      // on the card as "how we found this", and "@openai" is the honest answer.
+      post.keyword = `@${account.handle}`
+      post.sourceName = account.label ?? `@${account.handle}`
+      kept.push(post)
+    }
+
+    if (kept.length > 0) captured.push(account.id)
+    ctx.emit(
+      'activity',
+      `@${account.handle} · ${kept.length} post(s) kept of ${rows.length}`,
+      { status: 'ok', platform: account.platform, handle: account.handle, count: kept.length },
+    )
+    return kept
+  })
+
+  const fresh = perAccount.flat()
+  await markTrackedAccountsCaptured(ctx.workspaceId, captured)
+
+  for (const reason of reasons) {
+    ctx.emit('activity', reason, { status: 'warn' })
+  }
+
+  ctx.log(
+    fresh.length === 0
+      ? `Read ${accounts.length} tracked account(s) and kept nothing${reasons.length > 0 ? ` — ${reasons[0]}` : ''}`
+      : `${fresh.length} post(s) from ${captured.length} of ${accounts.length} tracked account(s)`,
+  )
+
+  return {
+    posts: [...existing, ...fresh],
+    ...(reasons.length > 0
+      ? { captureFallbackReasons: [...(payload.captureFallbackReasons ?? []), ...reasons] }
+      : {}),
+  }
+})
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   10 · scraping.keyword.discover — the terms nobody seeded
+   ───────────────────────────────────────────────────────────────────────────
+   THE DEFECT THIS EXISTS TO FIX (ADR-012).
+
+   Every run reported the same trending keywords, and the cause was structural.
+   `scraping.keyword.resolve` reads the keyword table; `validation.keyword.trend`
+   scores those same rows. So "top trending keywords" never meant *what is
+   trending* — it meant *which of the terms someone already typed scored highest
+   this week*. A topic that dominated the entire captured corpus could not
+   appear, because there was no row for it to be ranked as.
+
+   This reads the corpus the run actually captured and extracts what is being
+   talked about, excluding everything already known. It proposes; it does not
+   promote — `validation.keyword.emerge` decides, and a human approves.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * A stable identity for "one distinct voice", for the discovery bars.
+ *
+ * The stated author where there is one; the publishing host otherwise. Falls
+ * back to the post's own id last, so two genuinely unattributable posts from
+ * nowhere count as two rather than silently merging into one — merging would
+ * understate diversity, and this function exists to measure it.
+ */
+function voiceOf(post: ScrapedPost): string {
+  const named = post.authorName.trim().toLowerCase()
+  if (named !== '') return `author:${named}`
+  try {
+    return `host:${new URL(post.url).host.replace(/^www\./, '')}`
+  } catch {
+    return `item:${post.externalId}`
+  }
+}
+
+registerSkill<PipelinePayload>('scraping.keyword.discover', async (payload, ctx) => {
+  const posts = payload.posts ?? []
+  if (posts.length === 0) {
+    ctx.log('Nothing was captured, so there was nothing to discover keywords from.')
+    return {}
+  }
+
+  const candidatesPerRun = ctx.num('candidatesPerRun', 20)
+  const phraseMaxWords = ctx.num('phraseMaxWords', 3)
+  const minPhraseWords = ctx.num('minPhraseWords', 2)
+  const minPostsCarrying = ctx.num('minPostsCarrying', 3)
+  const minDistinctAuthors = ctx.num('minDistinctAuthors', 2)
+  const minBrandRelevance = ctx.num('minBrandRelevance', 25)
+
+  /*
+   * WHAT "ALREADY KNOWN" MEANS.
+   *
+   * Four vocabularies, because a term is uninteresting for four different
+   * reasons and lumping them together would make the exclusions unexplainable:
+   *
+   *   · the keyword set itself, active or not — including a term switched off
+   *     on purpose, which must not come back as a fresh discovery
+   *   · its declared synonyms, so "RLHF" does not surface beside "rlhf"
+   *   · the brand topic vocabulary, which every on-topic post repeats by
+   *     construction and which would therefore win on volume every time
+   *   · the reach-bait list, for the same reason the hashtag harvester drops it
+   */
+  const existing = await listKeywords(ctx.workspaceId, false)
+  const known = new Set<string>()
+  for (const keyword of existing) {
+    known.add(keyword.term.toLowerCase())
+    for (const synonym of synonymsFor(keyword.term)) known.add(synonym.toLowerCase())
+  }
+  for (const topic of BRAND_TOPICS) known.add(topic.toLowerCase())
+  for (const tag of GENERIC_HASHTAGS) known.add(tag.toLowerCase().replace(/^#/, ''))
+
+  /*
+   * WORDS THAT ARE TRUE OF EVERY POST IN THIS CORPUS.
+   *
+   * `contentWords` strips grammatical stopwords — "the", "of", "is". It cannot
+   * strip DOMAIN stopwords, and on an AI-research corpus those are the ones
+   * that ruin discovery: "model", "learning", "research", "systems" and
+   * "agents" appear in almost every captured page, so they clear the volume and
+   * voice bars effortlessly and surface as the top findings. The first run
+   * after discovery shipped proposed exactly that list, plus the fragment
+   * "tasks such".
+   *
+   * These are barred as STANDALONE candidates only. "reward model" and
+   * "world model" are still discoverable — it is the bare word that carries no
+   * information, not the word itself.
+   */
+  const DOMAIN_GENERIC = new Set([
+    'ai', 'model', 'models', 'learning', 'research', 'system', 'systems', 'agent', 'agents',
+    'data', 'training', 'task', 'tasks', 'method', 'methods', 'approach', 'approaches',
+    'result', 'results', 'paper', 'papers', 'work', 'study', 'studies', 'new', 'using',
+    'based', 'such', 'enables', 'enable', 'scientific', 'performance', 'evaluation',
+    'benchmark', 'benchmarks', 'framework', 'frameworks', 'large', 'language',
+  ])
+
+  /** Every phrase in one body, deduplicated — a term repeated is still one post. */
+  function phrasesOf(text: string): Set<string> {
+    const words = contentWords(text)
+    const out = new Set<string>()
+    const floor = Math.max(1, Math.min(minPhraseWords, phraseMaxWords))
+    for (let n = floor; n <= Math.max(floor, phraseMaxWords); n += 1) {
+      for (let i = 0; i + n <= words.length; i += 1) {
+        const parts = words.slice(i, i + n)
+        const phrase = parts.join(' ')
+        if (phrase.length < 6 || /^\d+$/.test(phrase)) continue
+        if (known.has(phrase)) continue
+        // A phrase that is entirely domain-generic says nothing: "large
+        // language" and "training data" are not topics, they are the subject
+        // matter of the whole corpus.
+        if (parts.every((w) => DOMAIN_GENERIC.has(w))) continue
+        // A phrase ending on a connector is a fragment cut mid-sentence
+        // ("tasks such"), never a term anyone would search for.
+        const last = parts[parts.length - 1] as string
+        if (DOMAIN_GENERIC.has(last) && n === 1) continue
+        if (/^(such|other|these|those|more|most|many|both|each)$/.test(last)) continue
+        out.add(phrase)
+      }
+    }
+    return out
+  }
+
+  interface Tally {
+    term: string
+    posts: number
+    authors: Set<string>
+    engagement: number
+    measuredPosts: number
+    views: number
+    viewedPosts: number
+    relevanceTotal: number
+    examples: string[]
+  }
+
+  const tallies = new Map<string, Tally>()
+
+  /*
+   * CANDIDATES COME FROM TITLES AND HASHTAGS. OCCURRENCE IS COUNTED EVERYWHERE.
+   *
+   * Sliding an n-gram window over article prose does not find topics, it finds
+   * sentence fragments. Run against a real 160-page corpus it proposed
+   * "learning generated", "generated summary edison" and "becoming specialized
+   * using" — consecutive-word slices of one piece of boilerplate that several
+   * pages happened to share. None of them is a thing anyone would search for.
+   *
+   * A TITLE is different in kind: it is the author's own statement of what the
+   * page is about, so a phrase taken from one is a topic by construction. The
+   * same is true of a hashtag, which is a topic label the author chose.
+   *
+   * So candidates are GENERATED from titles and hashtags only, and then counted
+   * across every body — a title phrase that also recurs in other pages' prose
+   * is exactly the corroboration the post bar is asking about. Generation and
+   * counting were the same step before, which is what let prose noise become
+   * candidates in the first place.
+   */
+  const bodyOf = (post: ScrapedPost): string => `${post.title} ${post.text}`.toLowerCase()
+  const corpus = posts.filter((p) => !p.isDuplicate).map((p) => ({ post: p, haystack: bodyOf(p) }))
+
+  for (const post of posts) {
+    // A duplicate is the same page seen twice; counting it twice would
+    // manufacture the recurrence this skill is looking for.
+    if (post.isDuplicate) continue
+
+    const labels = post.hashtags
+      .map((tag) => tag.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().trim())
+      .filter((tag) => tag.split(/\s+/).length >= 1)
+
+    for (const phrase of new Set([...phrasesOf(post.title), ...labels.filter((l) => !known.has(l) && l.length >= 6)])) {
+      const tally = tallies.get(phrase) ?? {
+        term: phrase,
+        posts: 0,
+        authors: new Set<string>(),
+        engagement: 0,
+        measuredPosts: 0,
+        views: 0,
+        viewedPosts: 0,
+        relevanceTotal: 0,
+        examples: [],
+      }
+      tally.posts += 1
+      /*
+       * WHO COUNTS AS A DISTINCT VOICE.
+       *
+       * The author bar asks whether several independent people are discussing a
+       * term, or one person repeating themselves. Platform lanes state an
+       * author, so that question answers itself there.
+       *
+       * The open-web lane states NO author — ever. An earlier version of this
+       * collapsed every such post into one shared '(unattributed)', which made
+       * the bar unpassable on an open-web-only corpus: every candidate showed
+       * exactly one author and nothing could ever be discovered. With the Apify
+       * lanes unavailable that is every corpus, which is precisely why the
+       * keyword set had stopped growing.
+       *
+       * The publishing HOST is the honest stand-in. Three different websites
+       * writing about a term is independent corroboration — the same thing the
+       * bar is testing for — and unlike a missing name it is evidence we
+       * actually hold. A host is deliberately NOT presented as an author
+       * anywhere else; it is used here only to count distinct voices.
+       */
+      tally.authors.add(voiceOf(post))
+      tally.relevanceTotal += post.brandRelevance
+      // Constraint 2, on both axes. Engagement is summed over metric-bearing
+      // rows only and plays over view-bearing rows only; the counts travel so
+      // the score can be divided by what was actually measured.
+      if (post.metricsAvailable) {
+        tally.engagement += post.engagement
+        tally.measuredPosts += 1
+      }
+      if (post.viewsAvailable) {
+        tally.views += post.views
+        tally.viewedPosts += 1
+      }
+      if (tally.examples.length < 3 && post.url !== '') tally.examples.push(post.url)
+      tallies.set(phrase, tally)
+    }
+  }
+
+  /*
+   * CORROBORATION ACROSS THE WHOLE CORPUS.
+   *
+   * A candidate was proposed by one page's title. This asks how many OTHER
+   * pages talk about it at all — which is the question the post and voice bars
+   * are really testing, and it cannot be answered from titles alone because a
+   * topic is usually named in one title and discussed in several bodies.
+   */
+  for (const tally of tallies.values()) {
+    for (const { post, haystack } of corpus) {
+      if (!haystack.includes(tally.term)) continue
+      const voice = voiceOf(post)
+      if (tally.authors.has(voice)) continue
+      tally.authors.add(voice)
+      tally.posts += 1
+      tally.relevanceTotal += post.brandRelevance
+      if (post.metricsAvailable) {
+        tally.engagement += post.engagement
+        tally.measuredPosts += 1
+      }
+      if (post.viewsAvailable) {
+        tally.views += post.views
+        tally.viewedPosts += 1
+      }
+    }
+  }
+
+  /*
+   * THE FOUR BARS (ADR-012). Each one is here because of a specific way this
+   * goes wrong, and each rejection is counted so the log can say which bar did
+   * the work rather than reporting one opaque total.
+   */
+  let belowPosts = 0
+  let belowAuthors = 0
+  let belowRelevance = 0
+
+  const cleared = [...tallies.values()].filter((tally) => {
+    if (tally.posts < minPostsCarrying) {
+      belowPosts += 1
+      return false
+    }
+    if (tally.authors.size < minDistinctAuthors) {
+      belowAuthors += 1
+      return false
+    }
+    if (tally.relevanceTotal / tally.posts < minBrandRelevance) {
+      belowRelevance += 1
+      return false
+    }
+    return true
+  })
+
+  /*
+   * A LONGER PHRASE BEATS THE WORDS INSIDE IT.
+   *
+   * "reward model" and "reward" and "model" all clear the bars on the same
+   * posts, and offering all three as separate discoveries is noise. When a
+   * longer candidate covers at least as many posts as a shorter one contained
+   * within it, the shorter one is dropped — it is the same finding, stated less
+   * precisely.
+   */
+  const byLength = [...cleared].sort((a, b) => b.term.length - a.term.length)
+  const kept: Tally[] = []
+  for (const tally of byLength) {
+    const subsumed = kept.some(
+      (longer) => longer.term.includes(tally.term) && longer.posts >= tally.posts,
+    )
+    if (!subsumed) kept.push(tally)
+  }
+
+  const candidates: KeywordCandidate[] = kept
+    .map((tally) => ({
+      term: tally.term,
+      posts: tally.posts,
+      distinctAuthors: tally.authors.size,
+      totalEngagement: tally.engagement,
+      measuredPosts: tally.measuredPosts,
+      totalViews: tally.views,
+      viewedPosts: tally.viewedPosts,
+      brandRelevance: Math.round(tally.relevanceTotal / tally.posts),
+      examples: tally.examples,
+    }))
+    // Ordered by the evidence that is always available. The real scoring is the
+    // emergence skill's job; this only decides what survives the cut.
+    .sort((a, b) => b.posts - a.posts || b.brandRelevance - a.brandRelevance)
+    .slice(0, Math.max(1, candidatesPerRun))
+
+  ctx.log(
+    candidates.length === 0
+      ? `No new term cleared the bars — ${belowPosts} appeared in fewer than ${minPostsCarrying} post(s), ${belowAuthors} came from fewer than ${minDistinctAuthors} author(s), ${belowRelevance} were below the ${minBrandRelevance}% brand floor`
+      : `${candidates.length} new keyword candidate(s) from ${posts.length} captured post(s): ` +
+        candidates.slice(0, 6).map((c) => `${c.term} (${c.posts} posts)`).join(', '),
+  )
+
+  for (const candidate of candidates.slice(0, 8)) {
+    ctx.emit('activity', `Candidate keyword “${candidate.term}” · ${candidate.posts} post(s), ${candidate.distinctAuthors} author(s)`, {
+      status: 'ok',
+      term: candidate.term,
+      posts: candidate.posts,
+      authors: candidate.distinctAuthors,
+    })
+  }
+
+  return { keywordCandidates: candidates }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   11 · scraping.transcript.fetch — the words that were actually said
+   ───────────────────────────────────────────────────────────────────────────
+   ADR-011. Local sidecar, two ceilings, and a missing transcript that stays
+   missing rather than becoming an empty one.
+
+   THE THREE OUTCOMES, AND WHY THEY ARE THREE AND NOT TWO:
+
+     · transcribed with words   — `transcript` holds them
+     · transcribed with silence — `transcript` is '', and that is FINISHED
+     · not transcribed          — `transcript` stays NULL
+
+   Collapsing the last two would make "we ran the transcriber and there was no
+   speech" indistinguishable from "we never tried", and the second is the one
+   that should be retried.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<PipelinePayload>('scraping.transcript.fetch', async (payload, ctx) => {
+  const requestedMinutes = ctx.num('transcriptMaxMinutesPerRun', 20)
+  const maxItems = ctx.num('maxItems', 12)
+  const skipTranscribed = ctx.bool('skipTranscribed', true)
+
+  if (!whisperTranscribe.isConfigured()) {
+    // Not an error. Blank is a supported configuration, and the run says what
+    // it could not do rather than failing or inventing.
+    ctx.log(`Nothing was transcribed — ${whisperTranscribe.unavailableReason().split('\n')[0]}`)
+    return {}
+  }
+
+  const budget = transcriptionBudget(requestedMinutes)
+  if (budget.clamped) {
+    ctx.emit(
+      'activity',
+      `The transcription budget was clamped from ${requestedMinutes} to ${budget.ceiling} minutes by WHISPER_MAX_MINUTES_PER_RUN. The knob asks; the deployment ceiling decides.`,
+      { status: 'warn', requested: requestedMinutes, applied: budget.minutes },
+    )
+  }
+
+  /*
+   * WHICH ITEMS ARE CANDIDATES.
+   *
+   * Only rows that STATE a play count, because a play count is the one signal
+   * available at this stage that a row is video at all. Transcribing a LinkedIn
+   * text post would spend the budget fetching a page with no audio in it.
+   *
+   * Ordered by engagement so the budget is spent on what matters when it runs
+   * out, which it will.
+   */
+  const posts = (payload.posts ?? [])
+    .filter((p) => p.viewsAvailable && p.url !== '')
+    .filter((p) => !skipTranscribed || p.transcript === null)
+    .sort((a, b) => b.engagement - a.engagement)
+    .slice(0, maxItems)
+
+  if (posts.length === 0) {
+    ctx.log(
+      'No captured item stated a play count, so nothing looked like video and nothing was transcribed.',
+    )
+    return {}
+  }
+
+  let secondsSpent = 0
+  const budgetSeconds = budget.minutes * 60
+  let transcribed = 0
+  let silent = 0
+  let failed = 0
+  let injectionFlags = 0
+  const notAttempted: string[] = []
+
+  for (const post of posts) {
+    if (secondsSpent >= budgetSeconds) {
+      notAttempted.push(post.title)
+      continue
+    }
+    try {
+      const out = await whisperTranscribe.run({
+        url: post.url,
+        maxSeconds: Math.max(1, budgetSeconds - secondsSpent),
+      })
+      secondsSpent += out.seconds
+
+      /*
+       * A TRANSCRIPT IS SCRAPED CONTENT, AND THIS IS WHERE THAT IS ENFORCED.
+       *
+       * Fluent natural language chosen by a stranger is the most persuasive
+       * injection vector in the corpus. The scan happens at WRITE time, not at
+       * read time, so an instruction-bearing transcript is flagged once and is
+       * visible on the run rather than discovered by whichever model reads it
+       * first. The text is still stored — it is evidence about what the video
+       * said, and suppressing it would lose the finding — but it travels
+       * flagged, and `prepareEvidence()` wraps and escapes it again at every
+       * model call site.
+       */
+      const scanned = prepareEvidence([
+        {
+          id: post.externalId,
+          source: post.sourceName,
+          url: post.url,
+          author: post.authorName,
+          content: out.text,
+        },
+      ])
+      if (scanned.injectionAttempts.length > 0) {
+        injectionFlags += 1
+        ctx.emit(
+          'activity',
+          `The transcript of “${post.title.slice(0, 60)}” contains instruction-shaped text and was flagged, not followed.`,
+          {
+            status: 'warn',
+            url: post.url,
+            patterns: scanned.injectionAttempts.map((f) => f.label),
+          },
+        )
+      }
+
+      post.transcript = out.text
+      post.transcriptSource = `whisper:${out.model}`
+      post.transcriptConfidence = out.confidence
+      if (out.text.trim() === '') silent += 1
+      else transcribed += 1
+    } catch (error) {
+      // NOT written as an empty transcript. The row keeps `transcript = null`,
+      // which is the true statement: we tried and did not get one.
+      failed += 1
+      ctx.emit(
+        'activity',
+        `Could not transcribe “${post.title.slice(0, 60)}” — ${error instanceof Error ? error.message : String(error)}`,
+        { status: 'warn', url: post.url },
+      )
+    }
+  }
+
+  const spentMinutes = Math.round((secondsSpent / 60) * 10) / 10
+  ctx.log(
+    [
+      `${transcribed} transcribed`,
+      silent > 0 ? `${silent} had no speech` : '',
+      failed > 0 ? `${failed} failed and stay untranscribed` : '',
+      notAttempted.length > 0
+        ? `${notAttempted.length} not attempted — the ${budget.minutes}-minute budget was spent`
+        : '',
+      injectionFlags > 0 ? `${injectionFlags} flagged for instruction-shaped text` : '',
+      `${spentMinutes} of ${budget.minutes} minutes used`,
+    ]
+      .filter((part) => part !== '')
+      .join(' · '),
+  )
+
+  return { posts: payload.posts ?? [] }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════

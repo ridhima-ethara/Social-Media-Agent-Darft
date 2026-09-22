@@ -55,6 +55,20 @@ export interface ImageModelSpec {
   /** Licence pill in the model menu. */
   licence: string
   /** The env key that switches it on. Empty for the local renderer. */
+  /**
+   * Whether the operator may CHOOSE this in the model menu.
+   *
+   * Separate from whether it exists. The catalogue has to keep every id: the
+   * zod enums on the API routes validate against it, stored rows carry these
+   * values, and the local renderer/template writer are the honest degradation
+   * when nothing hosted is reachable. Deleting them would turn "no model
+   * configured" from a labelled fallback into a hard failure, and would reject
+   * every draft already stamped with one.
+   *
+   * So this narrows the MENU and nothing else. A model that is not selectable
+   * can still run — it just cannot be picked on purpose.
+   */
+  selectable?: boolean
   envKey: string
   /** True when the model paints a background; false for the pure vector renderer. */
   paintsBackground: boolean
@@ -84,7 +98,7 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     summary:
       'Paints an abstract technical background from the concept prompt. The brand layer is composited over it locally.',
     licence: 'Commercial · Google Cloud terms',
-    envKey: 'GCP_API_KEY',
+    envKey: 'GCP_API_KEY or GCP_SERVICE_ACCOUNT_JSON',
     paintsBackground: true,
     drawsBrandLayerLocally: true,
     typicalMs: 6500,
@@ -96,7 +110,8 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     summary:
       'Google’s Gemini image model paints the background from the concept prompt. Richer, more literal scenes than Imagen; the brand layer is composited over it locally.',
     licence: 'Commercial · Google Cloud terms',
-    envKey: 'GCP_API_KEY',
+    selectable: true,
+    envKey: 'GCP_API_KEY or GCP_SERVICE_ACCOUNT_JSON',
     paintsBackground: true,
     drawsBrandLayerLocally: true,
     typicalMs: 7000,
@@ -259,3 +274,6 @@ export function conceptFor(text: string): ImageConcept {
   }
   return best
 }
+
+/** The models the menu offers. The local renderer still answers as the floor. */
+export const SELECTABLE_IMAGE_MODELS = IMAGE_MODELS.filter((m) => m.selectable === true)

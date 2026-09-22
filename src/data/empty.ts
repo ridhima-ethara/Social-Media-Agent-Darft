@@ -25,6 +25,7 @@ export const EMPTY_STATE: StatePayload = {
   },
   keywords: [],
   keywordSignals: [],
+  trending: [],
   hashtags: [],
   topHashtags: [],
   scraped: [],
@@ -39,6 +40,13 @@ export const EMPTY_STATE: StatePayload = {
   analytics: [],
   reviewQueue: [],
   sources: [],
+  hooks: {},
+  voiceProfiles: [],
+  // Zero, and that is the truth about a client that has read nothing. The
+  // Voice screen says "0 of 20 stored" rather than pretending a profile could
+  // be derived.
+  voiceSampleCount: 0,
+  trackedAccounts: [],
   pipeline: null,
   platformLabels: {
     linkedin: 'LinkedIn',

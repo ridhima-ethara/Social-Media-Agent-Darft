@@ -10,7 +10,7 @@
 - **Id**: `validation`
 - **Stage**: `assess`
 - **Hands off to**: `analysis`
-- **Skills**: 8
+- **Skills**: 12
 - **Handlers**: `server/src/agents/validation/handlers.ts`
 
 Ranks the keywords on volume, engagement, velocity and growth against their own prior runs, and takes the top five. For each of those, ranks and validates its hashtags and takes the top five. Every candidate — item and hashtag — leaves with exactly one verdict and a plain-language reason naming the evidence.
@@ -30,6 +30,11 @@ Scores every keyword on volume, engagement, velocity and growth against its own 
 | `growthWeight` | `20` | How much the change against prior runs matters. This is what makes a small but accelerating topic surface. |
 | `trendWindowRuns` | `4` | How many previous runs form the baseline for the growth calculation. |
 | `minPostsToRank` | `3` | A keyword with fewer posts than this is not ranked at all, because the sample cannot support a verdict. |
+| `weightProfile` | `long-form` | Long-form scores volume, engagement, velocity and growth — the model every stored signal was produced under, and the right one for professional feed posts. Short-form scores plays, engagement rate and comment volume instead, which is how short video actually distributes. One implementation either way; only the weights change, and the set that ran is recorded on the run so two runs stay comparable. Switching profiles does not rewrite history. |
+| `viewsWeight` | `40` | How much play count matters under the short-form profile. Ignored entirely under long-form. Runs over posts that STATE a play count and excludes the rest from the divisor — a LinkedIn text post has no plays and is not a video nobody watched. |
+| `engagementRateWeight` | `35` | How much (reactions + comments) ÷ plays matters under the short-form profile. Ignored under long-form. Computable only where both figures are stated; where they are not, the axis is dropped and the reason says so. |
+| `commentVolumeWeight` | `25` | How much raw comment count matters under the short-form profile. Ignored under long-form. Comments cost more than a reaction does, so volume here reads as argument rather than approval. |
+| `highSignalViewFloor` | `100000` | A post whose STATED play count reaches this is flagged high-signal on its reason line. A flag, not a filter: nothing is dropped and nothing is scored differently because of it. Posts that state no play count are never flagged, because an unflagged post must mean "did not reach the floor" and not "we could not tell". |
 
 ### `validation.hashtag.rank`
 
@@ -39,6 +44,21 @@ For each trending keyword, scores its hashtags on relevance, engagement per post
 |---|---|---|
 | `topHashtagsPerKeyword` | `5` | How many hashtags each trending keyword contributes. Five per keyword across five keywords is what feeds the consolidated set. |
 | `freshnessHalfLifeHours` | `72` | How quickly a hashtag’s recency score decays. At the half-life, a tag scores half what it would have scored when brand new. |
+| `viralEngagementRate` | `5` | A hashtag whose carrying posts average at or above this engagement rate is marked viral on its reason line. Computed only over posts that state BOTH engagement and plays, and the reason names how many of the tag’s posts that was — a rate over two measurable posts is a different claim from one over forty. |
+
+### `validation.item.filter`
+
+Tests every candidate against the plays, engagement-rate and recency floors — but only against the floors it actually states a figure for, and records a verdict rather than deleting anything.
+
+| Knob | Default | Description |
+|---|---|---|
+| `minViewsToConsider` | `10000` | A post whose STATED play count is below this fails the plays floor. A post that states no play count — a LinkedIn text post, an open-web citation, a photo — is NOT tested against it and is not failed by it; the caveat travels on its reason. Testing an absent figure against a floor is how an entire open-web capture gets deleted as underperforming. |
+| `minEngagementRate` | `2` | The floor on (reactions + comments) ÷ plays. Computable only where both are stated. Where either is missing the candidate is not tested and says so, for the same reason the plays floor exempts unstated counts. |
+| `recencyWindowDays` | `30` | Posts older than this fail the recency floor. The one floor almost every candidate can be tested against, because a capture without a stated date takes its capture time rather than being dropped — so the reason says which of the two it was judged on. |
+| `failedVerdict` | `rejected` | Nothing is deleted either way — this chooses which verdict a candidate that fails a floor carries, and both keep the reason naming the figure and the threshold. Needs-review is the conservative setting while you are calibrating the floors; rejected is right once you trust them. |
+| `viralEngagementRate` | `5` | A post whose STATED engagement rate reaches this is tagged VIRAL. A flag, not a filter — nothing is dropped, promoted or scored differently by it. Posts that state no play count are never tagged, because an untagged post has to mean "did not reach it" rather than "we could not tell". |
+| `highSignalViewFloor` | `100000` | A post whose STATED play count reaches this is tagged VIRAL, independently of its engagement rate — the specification treats either one as sufficient. Same rule about unstated figures. |
+| `exemptUnmeasured` | `true` | On is the only setting consistent with how this product treats a missing number: an unstated figure is not a low one, so it cannot fail a floor. Off tests every candidate against every floor and reads an absent count as zero — which deletes every open-web capture as underperforming. It exists so the difference is demonstrable, not because it is a reasonable choice. |
 
 ### `validation.credibility.score`
 
@@ -79,6 +99,38 @@ Passes for exact match, near-duplicate by text similarity, and semantic alias �
 | `aliasMapEnabled` | `true` | Treats declared equivalents as the same tag — #RL and #ReinforcementLearning, #GenAI and #GenerativeAI. |
 | `checkKnowledgeBase` | `true` | Marks an item as already-known when its citation URL is already cited by an active Knowledge Base entry, or its text closely matches one. Linked to the entry, not dropped. |
 | `checkPriorRejections` | `true` | When an item matches something a human or the agent rejected before, it is rejected again with the original reason rather than re-queued for the same decision. |
+
+### `validation.signal.repeat`
+
+Marks a topic that has surfaced in the top results at least the configured number of times across the look-back window, naming the runs it appeared in.
+
+| Knob | Default | Description |
+|---|---|---|
+| `repeatSignalCount` | `3` | How many separate runs a keyword must have ranked in the top set for before it is flagged as a repeat signal. Three is the specification’s number: twice is a coincidence, three times is a pattern. |
+| `lookbackRuns` | `6` | How many prior runs the count is taken across. Wider windows find slower patterns and also find things that stopped being true. |
+| `topRankThreshold` | `5` | A run only counts towards the repeat total if the keyword ranked at least this highly in it. Without a rank bound, a keyword that placed last in six consecutive runs would flag as a sustained trend. |
+
+### `validation.signal.sustained`
+
+Marks a keyword that held a top rank in consecutive runs, which is a different claim from ranking highly several times with gaps in between.
+
+| Knob | Default | Description |
+|---|---|---|
+| `sustainedWindowCount` | `2` | How many runs in a row a keyword must hold a top rank to count as sustained. Two is the specification’s "last week AND this week". Raising it finds stronger trends and finds them later. |
+| `topRankThreshold` | `10` | The rank a keyword must hold in each of the consecutive runs. Looser than the repeat flag’s by default, because holding position over time is itself the evidence here — the specification’s own wording is "in the top 10 last week and this week". |
+| `requireUnbroken` | `true` | On, a single run where the keyword dropped out breaks the streak and the count restarts. Off counts the most recent N runs and asks only how many of them qualified, which finds noisier trends and calls a gap a continuation. |
+
+### `validation.keyword.emerge`
+
+Scores the discovered candidates on the same axes the trend scorer uses and writes the ones that clear the bar into the keyword set as candidates, each carrying the evidence that produced it.
+
+| Knob | Default | Description |
+|---|---|---|
+| `emergenceThreshold` | `45` | How strongly a candidate must score across volume, engagement and brand alignment before it is written at all. Candidates below it are reported in the run log and not stored, so the keyword set does not fill with terms nobody will ever act on. |
+| `maxPromotionsPerRun` | `5` | A ceiling on how many new terms one run may add. Discovery compounds — terms added this run are captured next run and surface more terms — so this is the brake on that loop. |
+| `autoActivate` | `false` | OFF by default, and that is the decision rather than an oversight. A keyword is not a label, it is an instruction to spend money: each one is a separate billed call on every enabled lane, every run. Off, a discovered term is stored inactive for a human to approve, exactly as an uncertain candidate goes to the review queue. On, it starts being captured on the next run, capped by the ceiling above. |
+| `newTermWeight` | `45` | The weight a newly discovered term is stored with. Deliberately below the default weight floor on the capture skill, so switching one on is a considered act rather than something that happens by drifting past a threshold. |
+| `category` | `Adjacent` | Which category a discovered term is filed under. Adjacent is right for almost everything discovery finds — a term the corpus surfaced that nobody seeded is by definition not yet core to how this account positions itself. |
 
 ### `validation.verdict.route`
 

@@ -30,6 +30,18 @@ export function KeywordBoard({
   const [newTerm, setNewTerm] = useState('')
   const [newCategory, setNewCategory] = useState<string>('Adjacent')
   const [newWeight, setNewWeight] = useState(60)
+  /*
+   * DEFAULT TO THE KEYWORDS IN PLAY, NOT THE WHOLE RECORDED SET.
+   *
+   * The board holds every recorded keyword (~150), but dumping all of them is
+   * noise on a management screen — the operator cares about what is active and
+   * being scanned. So the default view showcases the active set, with a toggle
+   * to reveal the full history when genuinely editing it. Nothing is hidden:
+   * the header still states the full count and the toggle exposes it.
+   */
+  const [showAll, setShowAll] = useState(false)
+
+  const visibleKeywords = showAll ? keywords : keywords.filter((k) => k.active)
 
   const signalFor = (keywordId: string): KeywordSignal | undefined =>
     signals.find((s) => s.keyword_id === keywordId)
@@ -40,17 +52,46 @@ export function KeywordBoard({
         <div>
           <h3 className="display text-sm">Keyword set</h3>
           <p className="mt-0.5 text-[11px] text-ink-3">
-            <span className="tabular">{keywords.filter((k) => k.active).length}</span> active of{' '}
-            <span className="tabular">{keywords.length}</span>. Weight decides which are scanned first
-            when the run is capped.
+            {showAll ? (
+              <>
+                Showing all <span className="tabular">{keywords.length}</span> recorded ·{' '}
+                <span className="tabular">{keywords.filter((k) => k.active).length}</span> active. Weight
+                decides which are scanned first when the run is capped.
+              </>
+            ) : (
+              <>
+                Showing <span className="tabular">{keywords.filter((k) => k.active).length}</span> active
+                keywords in play. Weight decides which are scanned first when the run is capped.
+              </>
+            )}
           </p>
         </div>
-        <Btn variant="ghost" onClick={() => setAdding(true)}>
-          <Plus size={13} /> Add keyword
-        </Btn>
+        <div className="flex items-center gap-2">
+          <Btn variant="ghost" onClick={() => setShowAll((v) => !v)}>
+            {showAll
+              ? 'Show active only'
+              : `Show all ${keywords.length}`}
+          </Btn>
+          <Btn variant="ghost" onClick={() => setAdding(true)}>
+            <Plus size={13} /> Add keyword
+          </Btn>
+        </div>
       </header>
 
-      <div className="max-h-[520px] overflow-auto">
+      {/*
+        THE PAGE SCROLLS, NOT THE TABLE.
+
+        This was `max-h-[520px] overflow-auto`, which put a second scrollbar
+        inside a page that already scrolls. With 150 keywords that meant the
+        list was a small scrolling window sitting in a scrolling page, and
+        reaching row 90 required scrolling the page to the table, then the table
+        to the row, then back out — which reads as a page that will not scroll.
+
+        `overflow-x-auto` stays: the table is genuinely wider than a narrow
+        viewport, and sideways scrolling on a wide table is expected. Only the
+        vertical clamp is gone.
+      */}
+      <div className="overflow-x-auto">
         <table className="w-full text-left text-[12px]">
           <thead className="sticky top-0 z-10 bg-surface">
             <tr className="border-b border-line text-[10px] uppercase tracking-[0.08em] text-ink-3">
@@ -72,7 +113,7 @@ export function KeywordBoard({
             </tr>
           </thead>
           <tbody>
-            {keywords.map((keyword) => {
+            {visibleKeywords.map((keyword) => {
               const signal = signalFor(keyword.id)
               const growth = Number(signal?.growth_pct ?? 0)
               const isEditing = editing === keyword.id

@@ -340,6 +340,46 @@ export function extractEntities(utterance: string, toolId: string): Record<strin
     if (day) entities.day = day
   }
 
+  /* ── Bulk calendar arguments ──────────────────────────────────────────── */
+  /*
+   * These exist only on the bulk tools. `wants()` is keyed on the tool's own
+   * schema, so a tool that does not declare them never receives them and no
+   * single-idea instruction is changed by anything below.
+   */
+  if (wants('firstDay') || wants('days') || wants('fromDay')) {
+    const named = detectDays(lower)
+
+    if (wants('firstDay') && named.length >= 2) {
+      entities.firstDay = named[0]
+      entities.secondDay = named[1]
+    }
+
+    if (wants('days')) {
+      // An explicit list wins; "across the week" fills in only when none was given.
+      const span = named.length > 0 ? named : detectWeekSpan(lower)
+      if (span.length > 0) entities.days = span
+    }
+
+    if (wants('fromDay') && wants('day') && named.length >= 2) {
+      // "move everything on tuesday to wednesday" — the first day is the
+      // source, the second the destination. With one day named it is the
+      // destination, which `detectDay` below already handles.
+      entities.fromDay = named[0]
+      entities.day = named[1]
+    }
+  }
+
+  if (wants('timeOfDay')) {
+    const band = /\bmornings?\b/.test(lower)
+      ? 'morning'
+      : /\bafternoons?\b/.test(lower)
+        ? 'afternoon'
+        : /\bevenings?\b/.test(lower)
+          ? 'evening'
+          : null
+    if (band) entities.timeOfDay = band
+  }
+
   /* ── Time ─────────────────────────────────────────────────────────────── */
   if (wants('time')) {
     const time = detectTime(lower)
@@ -539,6 +579,63 @@ export function detectDay(lower: string, now = new Date()): string | null {
     return isoDate(date)
   }
   return null
+}
+
+/**
+ * Every day named in an utterance, in the order they were said.
+ *
+ * `detectDay` answers "which day is this about" and stops at the first hit,
+ * which is right for "move it to Thursday" and useless for "swap Tuesday and
+ * Thursday" or "spread these across Tuesday, Thursday and Friday" — the whole
+ * point of those is the second and third name.
+ *
+ * Scans by POSITION rather than by iterating the weekday table, so the order
+ * returned is the order the operator said them. "Swap Thursday and Tuesday"
+ * has to mean something different from "swap Tuesday and Thursday" for the
+ * first/second arguments to carry any information at all.
+ */
+export function detectDays(lower: string, now = new Date()): string[] {
+  const hits: Array<{ at: number; token: string }> = []
+
+  for (const token of ['today', 'tomorrow', 'yesterday']) {
+    const at = lower.indexOf(token)
+    if (at >= 0) hits.push({ at, token })
+  }
+
+  const iso = /\b\d{4}-\d{2}-\d{2}\b/g
+  let m: RegExpExecArray | null
+  while ((m = iso.exec(lower)) !== null) hits.push({ at: m.index, token: m[0] })
+
+  for (const name of DAY_NAMES) {
+    const re = new RegExp(`\\b(${name}|${name.slice(0, 3)})\\b`, 'g')
+    let hit: RegExpExecArray | null
+    while ((hit = re.exec(lower)) !== null) hits.push({ at: hit.index, token: hit[0] })
+  }
+
+  hits.sort((a, b) => a.at - b.at)
+
+  const out: string[] = []
+  for (const hit of hits) {
+    // Each token is resolved through `detectDay` so "next"/"last" handling and
+    // the week-start arithmetic stay in exactly one place.
+    const date = detectDay(hit.token, now)
+    if (date !== null && !out.includes(date)) out.push(date)
+  }
+  return out
+}
+
+/**
+ * "Across the week" and its relatives, expanded to the working week.
+ *
+ * Returned only when no explicit days were named — an operator who lists days
+ * has already answered this question, and overriding them with Monday-to-Friday
+ * would ignore what they said.
+ */
+export function detectWeekSpan(lower: string, now = new Date()): string[] {
+  if (!/\b(the week|this week|across the week|next week|working week|weekdays)\b/.test(lower)) return []
+  const base = startOfWeek(now)
+  const start = /\bnext week\b/.test(lower) ? addDays(base, 7) : base
+  return [0, 1, 2, 3, 4].map((offset) => isoDate(addDays(start, offset)))
 }
 
 export function detectTime(lower: string): string | null {

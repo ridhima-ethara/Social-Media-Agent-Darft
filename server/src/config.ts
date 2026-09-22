@@ -9,7 +9,7 @@
 
 import { config as loadDotenv, parse as dotenvParse } from 'dotenv'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -251,11 +251,11 @@ export const config = {
     get maxCharsPerPage(): number {
       return int('OPEN_WEB_MAX_CHARS_PER_PAGE', 6000)
     },
-    get apiKey(): string {
-      return str('PARALLEL_API_KEY')
-    },
     get baseUrl(): string {
       return str('PARALLEL_BASE_URL', 'https://api.parallel.ai')
+    },
+    get apiKey(): string {
+      return str('PARALLEL_API_KEY')
     },
     get searchPath(): string {
       return str('PARALLEL_SEARCH_PATH', '/v1beta/search')
@@ -310,8 +310,31 @@ export const config = {
     get location(): string {
       return str('GCP_LOCATION', 'us-central1')
     },
+    /**
+     * The service-account file, resolved against the SERVER ROOT.
+     *
+     * `GCP_SERVICE_ACCOUNT_JSON=./secrets/gcp-sa.json` is a relative path, and
+     * it used to be handed onward as written — so it resolved against whatever
+     * directory the process happened to start in. Launched from `server/` it
+     * found the file; launched from the repo root, from a script, from a test
+     * or from a container with a different workdir, it did not.
+     *
+     * The failure was silent and expensive: `gcpText.isConfigured()` returned
+     * false, the caption fell through to the template writer, and the operator
+     * saw a worse revision stamped "the model was not reachable" while the
+     * credential sat exactly where they had put it. `/api/health` reported
+     * Gemini as configured at the same time, because the API does start from
+     * `server/` — two parts of one product disagreeing about the same file.
+     *
+     * Same defect `integrations/agent-tier.ts` documents for AGENT_PYTHON, and
+     * the same fix: resolve against a path derived from this module's own
+     * location, never from `process.cwd()`. An absolute path is returned
+     * untouched.
+     */
     get serviceAccountJson(): string {
-      return str('GCP_SERVICE_ACCOUNT_JSON')
+      const configured = str('GCP_SERVICE_ACCOUNT_JSON')
+      if (configured === '') return ''
+      return isAbsolute(configured) ? configured : join(SERVER_ROOT, configured)
     },
     get textModel(): string {
       return str('GCP_TEXT_MODEL', DEFAULT_GCP_TEXT_MODEL)
@@ -579,26 +602,38 @@ export const config = {
     get token(): string {
       return str('APIFY_API_TOKEN')
     },
-    get baseUrl(): string {
-      return str('APIFY_BASE_URL', 'https://api.apify.com/v2')
-    },
     /**
-     * One actor per lane, each env-overridable, because an actor is a
-     * third-party artefact that can be deprecated or repriced without notice.
-     * Swapping one must be a config change, never a code change — which is why
-     * the request bodies are built per actor family in `apify.ts`.
+     * AN OPTIONAL PIN, NOT THE DEFAULT.
+     *
+     * Actor SELECTION now comes from the skill's curated index in
+     * `services/scraping/actor-index.ts`, keyed by platform AND intent, with
+     * the skill's `actors search` as the documented fallback. These keys exist
+     * so an operator can override that per platform without a deploy — which
+     * matters because an actor is a third-party artefact that can be
+     * deprecated or repriced without notice.
+     *
+     * BLANK IS THE NORMAL STATE and means "use the index". There are no
+     * defaults here any more: a default would silently re-pin the four lanes to
+     * whatever was true when this file was written, which is exactly the
+     * hardcoding the skill workflow replaced.
+     *
+     * A pinned actor is still schema-checked. `apify actors info --input` runs
+     * against it like any other, so pinning changes WHICH actor runs and never
+     * lets an assumed input shape through.
      */
-    get postsActor(): string {
-      return str('APIFY_LINKEDIN_POSTS_ACTOR', 'harvestapi~linkedin-post-search')
+    actorFor(platform: string): string {
+      // `~` is Apify's own owner separator and `/` is the CLI's; both are
+      // accepted so a slug copied from either console or docs works.
+      return str(`APIFY_${platform.toUpperCase()}_ACTOR`).replace('~', '/')
     },
-    get instagramActor(): string {
-      return str('APIFY_INSTAGRAM_ACTOR', 'apify~instagram-hashtag-scraper')
-    },
-    get xActor(): string {
-      return str('APIFY_X_ACTOR', 'apidojo~tweet-scraper')
-    },
-    get facebookActor(): string {
-      return str('APIFY_FACEBOOK_ACTOR', 'scraper_one~facebook-posts-search')
+    /** Every pin an operator has set, for the doctor report. */
+    get pinnedActors(): Array<{ platform: string; actorId: string }> {
+      const out: Array<{ platform: string; actorId: string }> = []
+      for (const platform of ['linkedin', 'instagram', 'x', 'facebook', 'youtube', 'tiktok']) {
+        const pinned = str(`APIFY_${platform.toUpperCase()}_ACTOR`).replace('~', '/')
+        if (pinned !== '') out.push({ platform, actorId: pinned })
+      }
+      return out
     },
     get runTimeoutMs(): number {
       return int('APIFY_RUN_TIMEOUT_MS', 180000)
@@ -611,11 +646,62 @@ export const config = {
     get maxItemsPerKeyword(): number {
       return int('APIFY_MAX_ITEMS_PER_KEYWORD', 50)
     },
-    get memoryMbytes(): number {
-      return int('APIFY_MEMORY_MBYTES', 1024)
-    },
     get configured(): boolean {
       return has('APIFY_API_TOKEN')
+    },
+  },
+
+  /* ── Whisper · local transcription sidecar (ADR-011) ────────────────────── */
+  whisper: {
+    /**
+     * The Python interpreter of a venv that has `faster-whisper` (or `whisper`)
+     * installed. Blank is a supported, first-class state: nothing spawns,
+     * `scraped_items.transcript` stays NULL, and the run says what it could not
+     * transcribe.
+     *
+     * Present for the same reason `AGENT_PYTHON` and `MFLUX_PYTHON` are: a
+     * sidecar reached across a process boundary is deployment configuration,
+     * and it must be overridable and checkable rather than guessed from `cwd`.
+     */
+    get python(): string {
+      return str('WHISPER_PYTHON')
+    },
+    /**
+     * Which weights to load. `base` is the honest default — it is fast enough
+     * to run on the machine serving the API and accurate enough that a
+     * transcript is usable as evidence. Larger models are markedly slower, and
+     * the minute budget below is what stops that becoming a surprise.
+     */
+    get model(): string {
+      return str('WHISPER_MODEL', 'base')
+    },
+    /** `auto` detects per item. Pinning a language is faster and can be wrong. */
+    get language(): string {
+      return str('WHISPER_LANGUAGE', 'auto')
+    },
+    /**
+     * THE CEILING THE OPERATOR'S KNOB CANNOT EXCEED (ADR-011).
+     *
+     * Exactly the `APIFY_MAX_ITEMS_PER_KEYWORD` arrangement: the knob asks,
+     * this decides. Transcription bills wall-clock time on this machine rather
+     * than a vendor invoice, which makes it easier to spend carelessly, not
+     * harder.
+     */
+    get maxMinutesPerRun(): number {
+      return int('WHISPER_MAX_MINUTES_PER_RUN', 20)
+    },
+    /**
+     * A bound on ONE item, so a single mis-detected long stream cannot consume
+     * the whole run budget by itself.
+     */
+    get maxSecondsPerItem(): number {
+      return int('WHISPER_MAX_SECONDS_PER_ITEM', 600)
+    },
+    get timeoutMs(): number {
+      return int('WHISPER_TIMEOUT_MS', 180000)
+    },
+    get configured(): boolean {
+      return has('WHISPER_PYTHON')
     },
   },
 
@@ -783,7 +869,13 @@ export function integrationStatuses(): {
           : assistantConfigured
             ? 'Configured'
             : `ASSISTANT_MODEL_PROVIDER is ${assistantProvider} but ${
-                assistantProvider === 'ollama' ? 'OLLAMA_BASE_URL' : 'GCP_API_KEY'
+                assistantProvider === 'ollama'
+                  ? 'OLLAMA_BASE_URL'
+                  : // Either credential satisfies `gcpConfigured`, so naming only
+                    // GCP_API_KEY sent an operator to create a key they did not
+                    // need — a service account is the path this deployment
+                    // actually uses, and it was not mentioned.
+                    'neither GCP_API_KEY nor GCP_SERVICE_ACCOUNT_JSON'
               } is not set — falling back to the deterministic parser`,
     },
   }

@@ -110,7 +110,21 @@ export function Exchange({
       {turn.utterance.trim().length > 0 ? (
         <div className="flex justify-end">
           <div className="max-w-[88%] rounded-2xl rounded-br-md border border-accent/35 bg-accent/10 px-3 py-2">
-            <p className="text-[12px] leading-relaxed text-ink">{turn.utterance}</p>
+            {/*
+              THE WHOLE QUERY, AS IT WAS TYPED.
+
+              `whitespace-pre-wrap` keeps the line breaks a multi-line
+              instruction was written with — the composer takes Shift+Enter now,
+              and collapsing those breaks turned a structured brief into one run
+              of prose. `break-words` stops a long URL or hashtag from forcing
+              the bubble wider than the panel and clipping the rest.
+
+              Nothing truncates: the bubble grows to whatever was asked, because
+              the point of showing the question back is that it can be checked.
+            */}
+            <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink">
+              {turn.utterance}
+            </p>
             <p className="mono mt-0.5 text-right text-[10px] text-ink-3">
               {turn.channel === 'voice' ? 'voice · ' : ''}
               {timeAgo(turn.created_at)}

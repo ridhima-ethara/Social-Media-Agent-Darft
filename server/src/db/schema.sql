@@ -52,6 +52,22 @@ CREATE TABLE IF NOT EXISTS keywords (
   category     TEXT NOT NULL DEFAULT 'Core',
   weight       SMALLINT NOT NULL DEFAULT 50 CHECK (weight >= 0 AND weight <= 100),
   active       BOOLEAN NOT NULL DEFAULT true,
+  -- ── Where this term came from (ADR-012) ──────────────────────────────────
+  -- 'seeded'     — a human typed it, or the seed wrote it.
+  -- 'discovered' — the platform extracted it from a captured corpus.
+  --
+  -- Recorded permanently, and not cosmetically: once discovered terms flow into
+  -- the trend ranking, "is this trending because we chose to watch it, or
+  -- because the corpus surfaced it" is a question an operator will ask about
+  -- every row on the screen, and a column is the only honest way to answer it.
+  origin       TEXT NOT NULL DEFAULT 'seeded' CHECK (origin IN ('seeded','discovered')),
+  discovered_at     TIMESTAMPTZ,
+  -- The sentence naming the posts and figures that produced the candidate.
+  -- Rule 6: an automated decision carries a plain-language reason.
+  discovery_reason  TEXT,
+  discovery_run_id  UUID,
+  -- 0-100, from the same axes the trend scorer uses.
+  emergence_score   SMALLINT,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -178,6 +194,52 @@ CREATE TABLE IF NOT EXISTS scraped_items (
   -- count columns above readable as "not applicable" rather than as zero: a
   -- search-indexed page has no reaction count, and never had one.
   metrics_available BOOLEAN NOT NULL DEFAULT false,
+  -- ── Views · a THIRD state, not a fourth count ────────────────────────────
+  -- Views are stated by video actors (Instagram Reels, YouTube-shaped feeds)
+  -- and by nothing else. A LinkedIn text post has no view count and never had
+  -- one; an open-web citation has no view count and never had one. Neither is
+  -- a video nobody watched.
+  --
+  -- So views get their OWN availability flag rather than riding
+  -- `metrics_available`: a reel can state reactions and no plays, and a post
+  -- can state reactions with views being structurally inapplicable. Collapsing
+  -- the two would make `views = 0` mean three different things.
+  --
+  -- Every view-derived figure — the trend weight, the high-signal flag, the
+  -- minimum-views filter — runs over `views_available` rows only (ADR-009).
+  views            INTEGER NOT NULL DEFAULT 0,
+  views_available  BOOLEAN NOT NULL DEFAULT false,
+  -- ── The fields the content-scraper specification asks to collect ─────────
+  -- The opening line, as the post itself opened. Stored rather than re-derived
+  -- on read, because `snippet` is clamped for display and the hook is the one
+  -- part of a post that is judged on its own.
+  hook             TEXT,
+  -- (reactions + comments) / views, as a percentage.
+  --
+  -- NULLABLE, and that is load-bearing. The rate needs BOTH a play count and a
+  -- reaction count; a post stating one and not the other has no engagement
+  -- rate, which is different from having a rate of zero. A 0 here would mean a
+  -- post that was seen and ignored — a real and much worse finding.
+  engagement_rate  NUMERIC,
+  -- reel | short | video | post | article. What KIND of thing it is, which the
+  -- specification asks for and which a platform name alone cannot answer: an
+  -- Instagram Reel and an Instagram photo distribute differently.
+  media_format     TEXT,
+  -- Flags the Validation Agent raised — 'VIRAL', 'high-signal-views',
+  -- 'viral-er'. Stored rather than re-derived on read: the thresholds are
+  -- operator knobs, so a flag computed in a screen would drift the moment
+  -- someone changed one, and the run's own decision is the honest record.
+  signal_flags     TEXT[] NOT NULL DEFAULT '{}',
+  -- ── Transcript · NULL is "not transcribed", never "said nothing" ─────────
+  -- Produced by `scraping.transcript.fetch` through the local Whisper sidecar
+  -- (ADR-011). With WHISPER_PYTHON unset nothing spawns and this stays NULL,
+  -- and no consumer may read a NULL transcript as an empty one.
+  --
+  -- A transcript is SCRAPED CONTENT. It passes `prepareEvidence()` before it
+  -- reaches any model, exactly as a scraped body does.
+  transcript            TEXT,
+  transcript_source     TEXT,
+  transcript_confidence NUMERIC,
   -- How well the body aligned with the brand topics and the Knowledge Base,
   -- scored at capture. Anything below the run's floor never became a row.
   brand_relevance  SMALLINT NOT NULL DEFAULT 0,
@@ -231,6 +293,12 @@ CREATE TABLE IF NOT EXISTS content_ideas (
   status                TEXT NOT NULL DEFAULT 'suggested'
                         CHECK (status IN ('suggested','drafted','in_review','pending_leadership',
                                           'approved','scheduled','published','rejected')),
+  -- Which KIND of artefact this idea becomes (ADR-007). Defaults to 'post', so
+  -- every row written before the column existed is valid without a backfill.
+  -- A 'short_form_script' idea terminates at export and is refused by the
+  -- publish path (ADR-010).
+  content_format        TEXT NOT NULL DEFAULT 'post'
+                        CHECK (content_format IN ('post','short_form_script')),
   analysis              JSONB NOT NULL DEFAULT '{}'::jsonb,
   feedback              JSONB NOT NULL DEFAULT '[]'::jsonb,
   is_new_trend          BOOLEAN NOT NULL DEFAULT false,
@@ -254,6 +322,12 @@ CREATE TABLE IF NOT EXISTS drafts (
   idea_id      UUID NOT NULL REFERENCES content_ideas(id) ON DELETE CASCADE,
   platform     TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x','facebook')),
   body         TEXT NOT NULL,
+  -- Mirrors `content_ideas.content_format`. Carried on the draft as well as the
+  -- idea because the review screens read a draft without its idea, and a
+  -- beat-structured script rendered as though it were a caption is a silent
+  -- category error rather than a visible one.
+  content_format TEXT NOT NULL DEFAULT 'post'
+                 CHECK (content_format IN ('post','short_form_script')),
   revision     INTEGER NOT NULL DEFAULT 1,
   generated_by TEXT,
   model        TEXT,
@@ -673,6 +747,15 @@ ALTER TABLE keyword_signals ADD COLUMN IF NOT EXISTS search_url     TEXT;
 ALTER TABLE keyword_signals ADD COLUMN IF NOT EXISTS top_post_url   TEXT;
 ALTER TABLE keyword_signals ADD COLUMN IF NOT EXISTS top_post_title TEXT;
 
+-- How many of this keyword's posts actually carried engagement figures.
+--
+-- Without it `total_engagement = 0` is ambiguous, and the two readings are
+-- opposite: a keyword whose posts were measured and drew no reactions, versus
+-- a keyword captured entirely from search-indexed pages that state no figures
+-- at all. The UI was rendering both as a literal 0, which reports the second
+-- as though it had performed badly. Constraint 2: N/A is never 0.
+ALTER TABLE keyword_signals ADD COLUMN IF NOT EXISTS measured_count INTEGER NOT NULL DEFAULT 0;
+
 -- ── Facebook as a fourth platform (ADR-006) ────────────────────────────────
 -- CREATE TABLE IF NOT EXISTS leaves an existing table's CHECK untouched, so the
 -- constraint is re-created by name. Idempotent: safe to run on every migrate.
@@ -704,6 +787,25 @@ ALTER TABLE scraped_items     ADD COLUMN IF NOT EXISTS embedded_at     TIMESTAMP
 ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS embedding       vector(768);
 ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS embedding_model TEXT;
 ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS embedded_at     TIMESTAMPTZ;
+
+-- A PUBLISHED POST IS WITHDRAWN FROM THE VIEW, NEVER DELETED.
+--
+-- Removing a post from the published section is an editorial decision, and the
+-- row is the receipt for a real dispatch -- it still carries the external_id the
+-- platform issued. Deleting it would destroy the only local evidence that the
+-- dispatch happened, silently change every measured average computed from it,
+-- and leave a live platform URL with nothing behind it. So the row stays and a
+-- timestamp hides it, exactly as ideas are withdrawn and knowledge deactivates.
+--
+-- Withdrawing is NOT retraction. The post remains on the platform; only this
+-- product stops presenting it. Reversing it is one UPDATE setting these to NULL.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS withdrawn_at     TIMESTAMPTZ;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS withdrawn_reason TEXT;
+
+-- A withdrawal must carry its reason, the same rule a rejection follows.
+ALTER TABLE posts DROP CONSTRAINT IF EXISTS posts_withdrawn_reason_required;
+ALTER TABLE posts ADD  CONSTRAINT posts_withdrawn_reason_required
+  CHECK (withdrawn_at IS NULL OR withdrawn_reason IS NOT NULL);
 
 -- HNSW over cosine distance. HNSW rather than IVFFlat because it needs no
 -- training pass and stays correct as rows arrive one run at a time; cosine
@@ -772,3 +874,199 @@ CREATE UNIQUE INDEX IF NOT EXISTS keyword_schedule_constant_key
   WHERE cycle_week IS NULL;
 CREATE INDEX IF NOT EXISTS keyword_schedule_week_idx
   ON keyword_schedule (workspace_id, cycle_week, slot_rank);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SHORT-FORM: VOICE PROFILES, HOOK VARIANTS, TRACKED ACCOUNTS
+--
+-- Four tables serving the short-form path (ADR-007 · 008 · 010). They obey the
+-- same two structural laws as everything above: nothing is deleted, and a
+-- derived claim carries the evidence it was derived from.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── voice_profiles · DERIVED, never hand-written ───────────────────────────
+-- A profile is an OBSERVATION of stored samples, not an assertion about how
+-- someone writes. That is why `sample_count` and `derived_at` are NOT NULL and
+-- why the samples themselves are kept below: a profile that cannot be
+-- re-derived is a claim with no evidence behind it.
+--
+-- `content_format` is NOT NULL and is the whole of ADR-008: a profile governs
+-- exactly one kind of artefact. A profile derived from reel scripts is never
+-- read by a caption skill, and the filter is in the SQL rather than in a
+-- conditional that a later edit can drop.
+--
+-- Nothing here can raise the emoji budget. `enforceBrandVoice()` reads BRAND
+-- and only BRAND, and there is no column below that it consults.
+CREATE TABLE IF NOT EXISTS voice_profiles (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name              TEXT NOT NULL,
+  content_format    TEXT NOT NULL DEFAULT 'short_form_script'
+                    CHECK (content_format IN ('post','short_form_script')),
+  -- How many samples produced it. Rendered beside every profile, because "a
+  -- voice learned from 4 scripts" and "from 40" are different claims.
+  sample_count      INTEGER NOT NULL,
+  derived_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Observed, never asserted: term frequencies actually counted in the samples.
+  vocabulary        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  sentence_stats    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  structure_pattern JSONB NOT NULL DEFAULT '{}'::jsonb,
+  cta_pattern       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  -- Deactivated, never deleted — the same rule knowledge entries follow.
+  active            BOOLEAN NOT NULL DEFAULT true,
+  embedding         vector(768),
+  embedding_model   TEXT,
+  embedded_at       TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS voice_profiles_workspace_format_idx
+  ON voice_profiles (workspace_id, content_format, active);
+
+-- ── voice_samples · the raw material, kept ─────────────────────────────────
+-- Kept because a profile must be re-derivable and explainable. `profile_id` is
+-- nullable: samples are pasted BEFORE a profile exists, and a later derivation
+-- stamps them. A sample outlives the profile it produced.
+CREATE TABLE IF NOT EXISTS voice_samples (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id   UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  profile_id     UUID REFERENCES voice_profiles(id) ON DELETE SET NULL,
+  content_format TEXT NOT NULL DEFAULT 'short_form_script'
+                 CHECK (content_format IN ('post','short_form_script')),
+  body           TEXT NOT NULL,
+  -- Where it came from: 'operator' for a paste, 'published' for our own post.
+  source         TEXT NOT NULL DEFAULT 'operator',
+  label          TEXT,
+  captured_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS voice_samples_workspace_format_idx
+  ON voice_samples (workspace_id, content_format, captured_at DESC);
+CREATE INDEX IF NOT EXISTS voice_samples_profile_idx
+  ON voice_samples (profile_id);
+
+-- ── hook_variants · one ROW per variant, never a blob on the draft ─────────
+-- One row each, because each variant carries its own pattern, its own matched
+-- evidence and its own outcome. A JSON array on the draft could not be joined,
+-- counted, or asked "which pattern wins for us".
+--
+-- `confidence` is NULLABLE and that is the load-bearing part. A confidence
+-- score is a FACTUAL CLAIM. Where no comparable stored post exists, the correct
+-- output is no score and a stated reason — not a default, not 5/10, not zero.
+-- `confidence_basis` is NOT NULL either way: it names the evidence when there
+-- is a score, and names the absence when there is not.
+CREATE TABLE IF NOT EXISTS hook_variants (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id     UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  idea_id          UUID NOT NULL REFERENCES content_ideas(id) ON DELETE CASCADE,
+  draft_id         UUID REFERENCES drafts(id) ON DELETE SET NULL,
+  body             TEXT NOT NULL,
+  pattern          TEXT NOT NULL CHECK (pattern IN
+                     ('aspirational','pain_point','insider','specific_claim','curiosity_gap')),
+  rank             SMALLINT NOT NULL DEFAULT 1,
+  -- 0-100, or NULL for "not derivable from anything stored".
+  confidence       NUMERIC CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 100)),
+  confidence_basis TEXT NOT NULL,
+  -- The stored post this hook resembles, when one was found. NULL is a real
+  -- value: it is exactly the case where `confidence` must also be NULL.
+  matched_post_id  UUID REFERENCES posts(id) ON DELETE SET NULL,
+  matched_item_id  UUID REFERENCES scraped_items(id) ON DELETE SET NULL,
+  -- Which model or writer produced it, and whether that was a live call.
+  source           TEXT NOT NULL DEFAULT 'fixture' CHECK (source IN ('live','fixture')),
+  model            TEXT,
+  fallback_reason  TEXT,
+  selected         BOOLEAN NOT NULL DEFAULT false,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- A score with no basis is fabricated evidence. Forbidden at the column level
+  -- rather than in a handler, so no future writer can get it wrong quietly.
+  CONSTRAINT hook_variants_basis_required
+    CHECK (length(btrim(confidence_basis)) > 0),
+  -- A score requires the evidence it was derived from. Symmetrically, matching
+  -- nothing means scoring nothing.
+  CONSTRAINT hook_variants_score_needs_match
+    CHECK (confidence IS NULL OR matched_post_id IS NOT NULL OR matched_item_id IS NOT NULL)
+);
+
+-- One variant per pattern per generation. A retried generation REPLACES its
+-- variant set rather than appending a second one (R4 · idempotency).
+CREATE UNIQUE INDEX IF NOT EXISTS hook_variants_idea_pattern_key
+  ON hook_variants (idea_id, pattern);
+CREATE INDEX IF NOT EXISTS hook_variants_workspace_idx
+  ON hook_variants (workspace_id, created_at DESC);
+-- At most one selected variant per idea. Enforced here rather than in the
+-- handler, because "the chosen hook" must be singular by construction.
+CREATE UNIQUE INDEX IF NOT EXISTS hook_variants_one_selected_key
+  ON hook_variants (idea_id) WHERE selected;
+
+-- ── tracked_accounts · capture specific handles, not only keywords ─────────
+-- Distinct from `sources`, which registers a competitor for the saturation
+-- reading. This is a CAPTURE LANE: named accounts read on their own schedule,
+-- with the same per-lane ceiling and the same honest empty result.
+--
+-- Deactivated, never deleted, so a captured item keeps a valid parent.
+CREATE TABLE IF NOT EXISTS tracked_accounts (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  platform     TEXT NOT NULL CHECK (platform IN ('linkedin','instagram','x','facebook')),
+  handle       TEXT NOT NULL,
+  label        TEXT,
+  note         TEXT,
+  active       BOOLEAN NOT NULL DEFAULT true,
+  last_captured_at TIMESTAMPTZ,
+  added_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS tracked_accounts_workspace_handle_key
+  ON tracked_accounts (workspace_id, platform, lower(handle));
+CREATE INDEX IF NOT EXISTS tracked_accounts_workspace_active_idx
+  ON tracked_accounts (workspace_id, active);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FORWARD-COMPATIBILITY GUARDS · SHORT-FORM
+--
+-- Same reason as the block further up: `CREATE TABLE IF NOT EXISTS` leaves an
+-- existing table exactly as it was, so a column added to a CREATE body never
+-- reaches a database that already exists. Without these, `findSchemaDrift()`
+-- would report every new column and demand a destructive rebuild.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS views                 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS views_available       BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS hook                  TEXT;
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS signal_flags          TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS engagement_rate       NUMERIC;
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS media_format          TEXT;
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS transcript            TEXT;
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS transcript_source     TEXT;
+ALTER TABLE scraped_items ADD COLUMN IF NOT EXISTS transcript_confidence NUMERIC;
+
+-- ── Discovered keywords (ADR-012) ─────────────────────────────────────────
+-- Additive, so an existing keyword set keeps every row and every one of them
+-- correctly reads as 'seeded' — which is what they are.
+ALTER TABLE keywords ADD COLUMN IF NOT EXISTS origin           TEXT NOT NULL DEFAULT 'seeded';
+ALTER TABLE keywords ADD COLUMN IF NOT EXISTS discovered_at    TIMESTAMPTZ;
+ALTER TABLE keywords ADD COLUMN IF NOT EXISTS discovery_reason TEXT;
+ALTER TABLE keywords ADD COLUMN IF NOT EXISTS discovery_run_id UUID;
+ALTER TABLE keywords ADD COLUMN IF NOT EXISTS emergence_score  SMALLINT;
+ALTER TABLE keywords DROP CONSTRAINT IF EXISTS keywords_origin_check;
+ALTER TABLE keywords ADD  CONSTRAINT keywords_origin_check CHECK (origin IN ('seeded','discovered'));
+-- A discovered keyword awaiting a decision is the common lookup.
+CREATE INDEX IF NOT EXISTS keywords_workspace_origin_idx
+  ON keywords (workspace_id, origin, active);
+
+ALTER TABLE content_ideas ADD COLUMN IF NOT EXISTS content_format TEXT NOT NULL DEFAULT 'post';
+ALTER TABLE drafts        ADD COLUMN IF NOT EXISTS content_format TEXT NOT NULL DEFAULT 'post';
+
+-- Re-created by name so an existing table actually gains the constraint.
+ALTER TABLE content_ideas DROP CONSTRAINT IF EXISTS content_ideas_content_format_check;
+ALTER TABLE content_ideas ADD  CONSTRAINT content_ideas_content_format_check
+  CHECK (content_format IN ('post','short_form_script'));
+ALTER TABLE drafts        DROP CONSTRAINT IF EXISTS drafts_content_format_check;
+ALTER TABLE drafts        ADD  CONSTRAINT drafts_content_format_check
+  CHECK (content_format IN ('post','short_form_script'));
+
+-- Finding untranscribed video must not scan the whole corpus.
+CREATE INDEX IF NOT EXISTS scraped_items_untranscribed_idx
+  ON scraped_items (workspace_id) WHERE transcript IS NULL;
+-- The views filter and the high-signal flag both read this.
+CREATE INDEX IF NOT EXISTS scraped_items_views_idx
+  ON scraped_items (workspace_id, views DESC) WHERE views_available;

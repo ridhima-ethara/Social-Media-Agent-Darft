@@ -47,6 +47,23 @@ export interface RawPost {
   reactions: number
   comments: number
   reposts: number
+  /**
+   * Plays, for the lanes that state them. Meaningful ONLY when
+   * `viewsAvailable` is true — see below.
+   */
+  views: number
+  /**
+   * Whether the source stated a view or play count.
+   *
+   * Separate from `metricsAvailable` on purpose (ADR-009). Views are a property
+   * of video, and the two absences are different facts: an Instagram Reel can
+   * state plays and reactions both, a LinkedIn text post states reactions and
+   * has no plays to state, and an open-web citation states neither. Riding one
+   * flag would make `views = 0` mean three things at once.
+   *
+   * False means NOT STATED. It never means "nobody watched".
+   */
+  viewsAvailable: boolean
   hashtags: string[]
   /** The keyword whose query surfaced this post. */
   keyword: string
@@ -158,6 +175,10 @@ const parallelCapture: CaptureSource = {
           reactions: 0,
           comments: 0,
           reposts: 0,
+          // A cited research page is not a video. It has no play count and
+          // never had one, which is a third kind of absence again.
+          views: 0,
+          viewsAvailable: false,
           hashtags: [],
           keyword: input.keyword,
           sourceName: 'Parallel',

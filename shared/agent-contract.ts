@@ -272,6 +272,69 @@ export type Sourced<T> = T & {
 export const PLATFORMS = ['linkedin', 'instagram', 'x', 'facebook'] as const
 export type Platform = (typeof PLATFORMS)[number]
 
+/**
+ * WHAT KIND OF ARTEFACT AN IDEA BECOMES (ADR-007).
+ *
+ * A closed union, like `Platform`, and anything switching on it must be
+ * exhaustive. `'post'` is the default on every row so the column arrives
+ * without a backfill and every pre-existing idea stays valid.
+ *
+ * NOT to be confused with `EditorialFormat` in `server/src/agents/corpus.ts`,
+ * which is the editorial SHAPE of a post — Thought Leadership, Carousel, Case
+ * Study. That one used to be called `ContentFormat` too; ADR-007 renamed it,
+ * because two types with one name meaning different things is a landmine.
+ *
+ * `short_form_script` terminates at export and never enters the publish state
+ * machine (ADR-010).
+ */
+export const CONTENT_FORMATS = ['post', 'short_form_script'] as const
+export type ContentFormat = (typeof CONTENT_FORMATS)[number]
+
+/** What an operator sees. Kept beside the union so a rename cannot orphan it. */
+export const CONTENT_FORMAT_LABEL: Record<ContentFormat, string> = {
+  post: 'Post',
+  short_form_script: 'Short-form script',
+}
+
+/**
+ * THE HOOK PATTERN VOCABULARY.
+ *
+ * Each variant a run produces is tagged with the pattern it used, so "give me
+ * another curiosity-gap one" is answerable and "we only ever write pain-point
+ * hooks" is detectable. A closed union because `hook_variants.pattern` carries a
+ * CHECK constraint over exactly these values.
+ *
+ * The source specification names its five patterns in Hinglish and in terms of
+ * a creator's own reels. These are the same five structures, named for what
+ * they DO rather than for the phrase that opens them — a pattern named after
+ * its own example stops being a pattern the first time the example is reworded.
+ */
+export const HOOK_PATTERNS = [
+  'aspirational',
+  'pain_point',
+  'insider',
+  'specific_claim',
+  'curiosity_gap',
+] as const
+export type HookPattern = (typeof HOOK_PATTERNS)[number]
+
+export const HOOK_PATTERN_LABEL: Record<HookPattern, string> = {
+  aspirational: 'Aspirational',
+  pain_point: 'Pain point',
+  insider: 'Insider knowledge',
+  specific_claim: 'Specific claim',
+  curiosity_gap: 'Curiosity gap',
+}
+
+/** One line an operator can read, describing what each pattern is for. */
+export const HOOK_PATTERN_BRIEF: Record<HookPattern, string> = {
+  aspirational: 'Shows the better version of the thing the viewer already has.',
+  pain_point: 'Names a frustration the viewer is feeling right now.',
+  insider: 'Frames the content as something most people in the field do not know.',
+  specific_claim: 'States one measured number and what it produced. Needs stored evidence.',
+  curiosity_gap: 'Asks something the viewer cannot answer without watching.',
+}
+
 /** Exactly one of these lands on every candidate. Nothing is ever deleted. */
 export const VALIDATION_VERDICTS = [
   'pending',
@@ -315,6 +378,30 @@ export type CalendarSlot = 'primary' | 'suggestion'
  * disagree silently.
  */
 export const SIGNALS_CATEGORY = 'Signals'
+
+/**
+ * The two entries in the roster that are NOT operational agents.
+ *
+ * The registry declares twelve, and `scripts/check-agents.ts` asserts exactly
+ * twelve, because twelve is what the graph is built from. But two of them are not
+ * things an operator watches run:
+ *
+ *   · `assistant`  — Ethara Command. The command plane: the query or instruction
+ *                    the human passes in. It directs the others; it is not a
+ *                    pipeline stage that sits idle waiting for work.
+ *   · `knowledge`  — the Knowledge Base itself. A cited store that is read from
+ *                    and written to, not a worker with a run of its own.
+ *
+ * So "all N agents idle" counts TEN. Deriving it by exclusion rather than writing
+ * `10` keeps the number honest: add a real agent to the registry and the line
+ * follows, and the reason each one is excluded stays attached to the exclusion.
+ */
+export const NON_OPERATIONAL_AGENT_IDS = ['assistant', 'knowledge'] as const
+
+/** The agents an operator actually watches run — the roster minus the two above. */
+export function operationalAgents<T extends { agent_id: string }>(all: readonly T[]): T[] {
+  return all.filter((a) => !(NON_OPERATIONAL_AGENT_IDS as readonly string[]).includes(a.agent_id))
+}
 export type Confidence = 'High' | 'Medium' | 'Low'
 
 export type OperatorRole = 'marketing' | 'leadership'

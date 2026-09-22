@@ -59,7 +59,7 @@ export function AssistantBar() {
   const [highlighted, setHighlighted] = useState(0)
   const [placeholderIndex, setPlaceholderIndex] = useState(0)
 
-  const inputRef = useRef<HTMLInputElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const recogniser = useRef<ListenHandle | null>(null)
   const amplitudes = useMicAmplitudes(listening)
 
@@ -202,10 +202,25 @@ export function AssistantBar() {
             {listening && interim.length === 0 ? (
               <Waveform amplitudes={amplitudes} bars={38} height={20} />
             ) : (
-              <input
+              /*
+                A TEXTAREA, SO A LONG INSTRUCTION WRAPS INSTEAD OF SCROLLING OFF.
+                An <input> keeps one line and slides the text sideways, so past
+                roughly a dozen words the operator can no longer read what they
+                typed — and a command plane's whole premise is that you check
+                the instruction before it runs. It grows to a ceiling and then
+                scrolls vertically, so a long paste stays reachable without the
+                bar swallowing the screen.
+              */
+              <textarea
                 ref={inputRef}
+                rows={1}
                 value={interim.length > 0 ? interim : value}
                 onChange={(event) => setValue(event.target.value)}
+                onInput={(event) => {
+                  const el = event.currentTarget
+                  el.style.height = 'auto'
+                  el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape') {
                     stopMic()
@@ -219,16 +234,19 @@ export function AssistantBar() {
                     event.preventDefault()
                     setHighlighted((i) => Math.max(0, i - 1))
                   }
-                  if (event.key === 'Enter') {
+                  // Shift+Enter writes a new line; Enter alone sends. The
+                  // pairing every other message box already uses.
+                  if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault()
                     run(highlighted > 0 ? (suggestions[highlighted - 1] ?? null) : null, value, listening ? 'voice' : 'text')
+                    event.currentTarget.style.height = 'auto'
                   }
                 }}
                 placeholder={BAR_PLACEHOLDERS[placeholderIndex]}
                 aria-label="Ask Ethara"
                 aria-autocomplete="list"
                 aria-controls="ethara-bar-suggestions"
-                className={`w-full rounded-[9px] border bg-surface px-3 py-2 text-[14px] outline-none transition-colors ${
+                className={`w-full resize-none rounded-[9px] border bg-surface px-3 py-2 text-[14px] leading-relaxed outline-none transition-colors ${
                   interim.length > 0 ? 'text-ink-3' : 'text-ink'
                 } border-line-strong placeholder:text-ink-3 focus:border-accent`}
               />

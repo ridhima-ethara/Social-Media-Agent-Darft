@@ -50,6 +50,6 @@ Writes the published row, its append-only history, and the lineage edge back to 
 
 | Knob | Default | Description |
 |---|---|---|
-| `seedFirstHourMetrics` | `true` | On, a first metrics row is written immediately so the post has a reading before the platform reports. Clearly marked as an early estimate. |
+| `seedFirstHourMetrics` | `true` | On, a first metrics row is written immediately in DEMO mode so the analytics screens have something to render before any platform reports. It has never applied to a live post and cannot: a real publication’s numbers are whatever the platform says, and a shaped figure there would be fabricated evidence about a post the audience actually saw — which then becomes the baseline every later figure is generated against. On a live dispatch the reading stays absent until the platform reports it, and the run says so. |
 | `writeLineage` | `true` | On, the post is linked back to its idea and forward from its source item, which is what makes a trace possible. |
 

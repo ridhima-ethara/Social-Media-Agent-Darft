@@ -14,8 +14,13 @@ import {
   topicInProse,
 } from '../../../../shared/brand-voice'
 import { closeReference, hookReference } from '../../../../shared/caption-examples'
-import type { Platform } from '../../../../shared/agent-contract'
-import { SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
+import type { ContentFormat, HookPattern, Platform } from '../../../../shared/agent-contract'
+import {
+  HOOK_PATTERNS,
+  HOOK_PATTERN_BRIEF,
+  HOOK_PATTERN_LABEL,
+  SIGNALS_CATEGORY,
+} from '../../../../shared/agent-contract'
 import {
   temperatureFromPercent,
   textChain,
@@ -23,8 +28,16 @@ import {
   withChainFallback,
   writeTemplateCaption,
 } from '../../integrations'
-import { listKnowledge } from '../../db/repo'
-import { clampChars, clampWords, PLATFORM_LABEL, seededFor, similarity } from '../corpus'
+import {
+  activeVoiceProfile,
+  capturedPostPerformance,
+  insertVoiceProfile,
+  listKnowledge,
+  listVoiceSamples,
+  publishedPostPerformance,
+  type VoiceProfileRow,
+} from '../../db/repo'
+import { clamp, clampChars, clampWords, contentWords, mean, PLATFORM_LABEL, seededFor, similarity } from '../corpus'
 import { withCaptionSpec } from '../skills/skill-spec'
 import { registerSkill } from '../runtime'
 import { retrieveKnowledge, toGroundingEntry } from '../knowledge/handlers'
@@ -35,8 +48,77 @@ import type { CaptionPayload, GroundingEntry } from '../skills/index'
    CAPTION 1 · generation.caption.mode
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   NARRATIVE STANCE — the argumentative shape, not the register
+
+   Declared here beside the writing mode because both are resolved in the same
+   skill and an operator reads them together. The rotation is WEIGHTED toward
+   `default`: the caption skill names it the most common stance, and a calendar
+   where two posts in three argue from the brand would read as advertising.
+
+   Deterministic from the idea id, so the same post always draws the same stance
+   and a re-run is replayable rather than producing a different shape each time.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export type CaptionStance = 'default' | 'how-ethara-thinks' | 'problem-solution-trajectory'
+
+const STANCE_BY_LABEL: Record<string, CaptionStance> = {
+  Default: 'default',
+  'How Ethara thinks': 'how-ethara-thinks',
+  'Problem and solution': 'problem-solution-trajectory',
+}
+
+/** Two of four are `default`, so the mix stays mostly ordinary posts. */
+const STANCE_ROTATION: CaptionStance[] = [
+  'default',
+  'how-ethara-thinks',
+  'default',
+  'problem-solution-trajectory',
+]
+
+export const STANCE_LABEL: Record<CaptionStance, string> = {
+  default: 'Default',
+  'how-ethara-thinks': 'How Ethara thinks',
+  'problem-solution-trajectory': 'Problem and solution',
+}
+
+/**
+ * WHAT THE STANCE ASKS THE WRITER FOR.
+ *
+ * Appended to `voiceInstruction`, so it reaches the hook, the problem and the
+ * close through the one channel all three already read. The wording is
+ * deliberately defensive on the middle beat of the solution stance: that beat is
+ * the single place in this agent where a model will invent an Ethara capability,
+ * and the skill's boundary is that it is grounded or it is dropped.
+ */
+export function stanceInstruction(stance: CaptionStance): string {
+  switch (stance) {
+    case 'how-ethara-thinks':
+      return [
+        'STANCE — how Ethara thinks. Say what the topic is, then what we take from it:',
+        'which distinction matters, which assumption we would not make, what we would measure instead.',
+        'The topic comes from the scraped evidence; the reasoning comes from the grounding entries.',
+        'This is a point of view on evidence. Do not claim a product, a customer or a result.',
+      ].join(' ')
+    case 'problem-solution-trajectory':
+      return [
+        'STANCE — problem, what Ethara does about it, where the world is moving. Three beats:',
+        'first the problem the scraped evidence shows, and who it breaks for;',
+        'second how Ethara approaches it, using ONLY what the grounding entries state about our',
+        'capability — describe the approach, never an outcome, and state no customer, deployment,',
+        'figure or result that an entry does not;',
+        'third close on where the evidence points, as a direction of travel rather than a prediction of fact.',
+        'If the grounding says nothing about an Ethara capability here, omit the second beat entirely',
+        'and write an ordinary post. Do not substitute the positioning line for evidence.',
+      ].join(' ')
+    default:
+      return ''
+  }
+}
+
 registerSkill<CaptionPayload>('generation.caption.mode', (payload, ctx) => {
   const requested = ctx.str('mode', 'Auto')
+  const requestedStance = ctx.str('stance', 'Rotate')
   const preferModel = ctx.bool('preferModel', true)
 
   let writingMode = requested
@@ -47,6 +129,19 @@ registerSkill<CaptionPayload>('generation.caption.mode', (payload, ctx) => {
     else writingMode = 'Long-form'
   }
 
+  /*
+   * The stance. `Rotate` spreads the three shapes across the calendar; a named
+   * stance is honoured exactly. Whether the grounding it needs actually exists
+   * is decided in `generation.caption.voice`, which is the skill that holds the
+   * Knowledge Base entries — deciding it here would mean guessing.
+   */
+  const stance: CaptionStance =
+    requestedStance === 'Rotate'
+      ? ((STANCE_ROTATION[
+          Math.floor(seededFor(payload.ideaId || payload.title)() * STANCE_ROTATION.length)
+        ] ?? 'default') as CaptionStance)
+      : (STANCE_BY_LABEL[requestedStance] ?? 'default')
+
   // The ordered providers, not just the preferred one. Asking whether the
   // PREFERRED adapter is configured would report the template writer whenever
   // the primary is absent but its backup can serve — and then the caption would
@@ -54,7 +149,7 @@ registerSkill<CaptionPayload>('generation.caption.mode', (payload, ctx) => {
   const chain = textChain()
   const modelReady = preferModel && chain.length > 0
   ctx.log(
-    `Writing mode: ${writingMode} · ${
+    `Writing mode: ${writingMode} · stance: ${STANCE_LABEL[stance]} · ${
       modelReady
         ? `${textModelIdFor(chain[0]?.adapter.id)} will write it${
             chain.length > 1 ? `, with ${textModelIdFor(chain[1]?.adapter.id)} behind it` : ''
@@ -63,7 +158,7 @@ registerSkill<CaptionPayload>('generation.caption.mode', (payload, ctx) => {
     }`,
   )
 
-  return { writingMode }
+  return { writingMode, stance }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -128,13 +223,52 @@ registerSkill<CaptionPayload>('generation.caption.voice', async (payload, ctx) =
     ...brandEntries.map((e) => `${e.title}: ${e.content}`),
   ].join('\n')
 
+  /*
+   * THE STANCE IS GROUNDED OR IT IS ABANDONED.
+   *
+   * Decided here rather than in `generation.caption.mode` because this is the
+   * skill that holds the Knowledge Base entries — checking it there would mean
+   * guessing at what retrieval would return. A stance that asks the writer to
+   * speak for Ethara needs a corpus entry behind it; without one it degrades to
+   * `default` and the reason travels on the payload, because a stance that
+   * silently became something else is the kind of thing rule 6 exists to stop.
+   */
+  const requestedStance = (payload.stance ?? 'default') as CaptionStance
+  const corpusEntries = grounding.filter(
+    (entry) => entry.category !== 'Brand Voice' && entry.content.trim() !== '',
+  )
+  const brandCorpus = [...brandEntries, ...corpusEntries]
+
+  let stance = requestedStance
+  let stanceDegradedReason = ''
+
+  if (requestedStance !== 'default' && brandCorpus.length === 0) {
+    stance = 'default'
+    stanceDegradedReason =
+      `The “${STANCE_LABEL[requestedStance]}” stance needs a Knowledge Base corpus entry behind it and none is active for “${payload.sourceTopic}”. ` +
+      'Written as an ordinary post instead — the positioning line is not evidence.'
+    ctx.emit('activity', stanceDegradedReason, { status: 'warn' })
+  }
+
+  const clause = stanceInstruction(stance)
+  const instruction = clause === '' ? voiceInstruction : `${voiceInstruction}\n${clause}`
+
   ctx.log(
     grounding.length === 0
       ? 'No matching Knowledge Base entry — writing from the brand definition alone'
       : `Grounded in ${grounding.length} entr${grounding.length === 1 ? 'y' : 'ies'}: ${grounding.map((g) => g.title).slice(0, 2).join('; ')}${grounding.length > 2 ? '…' : ''}`,
   )
 
-  return { grounding, voiceInstruction }
+  if (stance !== 'default') {
+    ctx.log(`Stance: ${STANCE_LABEL[stance]} — ${brandCorpus.length} corpus entr${brandCorpus.length === 1 ? 'y' : 'ies'} behind it`)
+  }
+
+  return {
+    grounding,
+    voiceInstruction: instruction,
+    stance,
+    ...(stanceDegradedReason === '' ? {} : { stanceDegradedReason }),
+  }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1038,3 +1172,690 @@ registerSkill<CaptionPayload>('generation.caption.sourceLink', (payload, ctx) =>
 
   return { caption, citation }
 })
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE SHORT-FORM FAMILY — ADR-007
+
+   Four skills on the same agent, reading the same grounding the ten caption
+   skills read, producing a different artefact: a spoken script and the hooks
+   that open it.
+
+   Three rules govern all four and are worth stating once here rather than
+   four times below:
+
+     · ADR-008 — a voice profile is scoped to a content format. Every read
+       below names `'short_form_script'`, and the filter lives in the SQL. No
+       caption skill asks for a profile, and none can accidentally receive one.
+     · The brand rules are never relaxed. A profile shapes PHRASING. It cannot
+       raise the emoji budget, cannot authorise a sales CTA, and is not
+       consulted by `enforceBrandVoice`.
+     · A confidence is a factual claim. Where the evidence is absent, the output
+       is no score and a stated reason — never a default.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** The content format these four skills serve. Named once (ADR-008). */
+const SHORT_FORM: ContentFormat = 'short_form_script'
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 11 · caption.voice.derive
+   ───────────────────────────────────────────────────────────────────────────
+   A PROFILE IS AN OBSERVATION, NOT AN ASSERTION.
+
+   Everything written below is COUNTED from stored samples: which terms recur,
+   how long the sentences run, how the openings and closes are shaped. Nothing
+   is inferred about the writer, and nothing is generated — a model asked to
+   "describe this voice" produces fluent prose that reads like evidence and is
+   not, which is exactly the failure the never-fabricate rule exists to stop.
+
+   Below the sample floor it REFUSES and names the count it has. "A voice
+   learned from four scripts" is a claim four scripts cannot support.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('caption.voice.derive', async (_payload, ctx) => {
+  const minimum = ctx.num('voiceSampleMinimum', 20)
+  const maxSamples = ctx.num('maxSamples', 40)
+  const vocabularyTerms = ctx.num('vocabularyTerms', 40)
+  const minOccurrences = ctx.num('minTermOccurrences', 3)
+
+  const samples = await listVoiceSamples(ctx.workspaceId, {
+    contentFormat: SHORT_FORM,
+    limit: maxSamples,
+  })
+
+  if (samples.length < minimum) {
+    // Refused, not failed. The pipeline continues without a profile and the
+    // script writer falls back to the brand register alone, which is a real
+    // implementation rather than a degraded pretence of one.
+    const message =
+      `Not deriving a voice profile: ${samples.length} stored sample(s), below the ${minimum} required. ` +
+      'Paste more past scripts under Voice samples. Nothing is inferred from a short sample set.'
+    ctx.log(message)
+    ctx.emit('activity', message, { status: 'warn', have: samples.length, need: minimum })
+    return { voiceProfile: null, voiceProfileReason: message }
+  }
+
+  const bodies = samples.map((s) => s.body)
+
+  /* ── Vocabulary · counted, never characterised ───────────────────────────*/
+  const counts = new Map<string, number>()
+  for (const body of bodies) {
+    for (const word of contentWords(body)) {
+      counts.set(word, (counts.get(word) ?? 0) + 1)
+    }
+  }
+  const vocabulary = [...counts.entries()]
+    .filter(([, n]) => n >= minOccurrences)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, vocabularyTerms)
+    .map(([term, occurrences]) => ({ term, occurrences }))
+
+  /* ── Sentence shape · measured ───────────────────────────────────────────*/
+  const sentences = bodies.flatMap((b) =>
+    b.split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter((x) => x !== ''),
+  )
+  const lengths = sentences.map((x) => x.split(/\s+/).length)
+  const sorted = [...lengths].sort((a, b) => a - b)
+  const sentenceStats = {
+    sentences: sentences.length,
+    meanWords: lengths.length === 0 ? 0 : Math.round(mean(lengths) * 10) / 10,
+    medianWords: sorted.length === 0 ? 0 : (sorted[Math.floor(sorted.length / 2)] ?? 0),
+    shortestWords: sorted[0] ?? 0,
+    longestWords: sorted[sorted.length - 1] ?? 0,
+    /** What share run under eight words. The clearest single tell of pace. */
+    shortLineShare:
+      lengths.length === 0
+        ? 0
+        : Math.round((lengths.filter((n) => n <= 8).length / lengths.length) * 100),
+  }
+
+  /* ── Structure · the first and last lines, which is what shape means ─────*/
+  const openings = bodies
+    .map((b) => (b.split('\n').find((l) => l.trim() !== '') ?? '').trim())
+    .filter((l) => l !== '')
+  const closes = bodies
+    .map((b) => {
+      const lines = b.split('\n').map((l) => l.trim()).filter((l) => l !== '')
+      return lines[lines.length - 1] ?? ''
+    })
+    .filter((l) => l !== '')
+
+  const structurePattern = {
+    samplesRead: bodies.length,
+    meanLines:
+      Math.round(mean(bodies.map((b) => b.split('\n').filter((l) => l.trim() !== '').length)) * 10) /
+      10,
+    // Verbatim openings, capped. Stored because a pattern an operator can read
+    // is auditable and a summary of one is not.
+    openings: openings.slice(0, 12),
+    openingMeanWords:
+      openings.length === 0 ? 0 : Math.round(mean(openings.map((o) => o.split(/\s+/).length))),
+  }
+
+  /* ── CTA · counted by shape, because a CTA IS its shape ──────────────────*/
+  const question = closes.filter((c) => c.endsWith('?')).length
+  const imperative = closes.filter((c) => /^(try|read|watch|comment|tell|ask|check|drop|share)\b/i.test(c)).length
+  const ctaPattern = {
+    closesRead: closes.length,
+    questionShare: closes.length === 0 ? 0 : Math.round((question / closes.length) * 100),
+    imperativeShare: closes.length === 0 ? 0 : Math.round((imperative / closes.length) * 100),
+    closes: closes.slice(0, 12),
+  }
+
+  const profile = await insertVoiceProfile(ctx.workspaceId, {
+    name: `Short-form voice · ${samples.length} samples · ${new Date().toISOString().slice(0, 10)}`,
+    contentFormat: SHORT_FORM,
+    sampleIds: samples.map((s) => s.id),
+    vocabulary: { terms: vocabulary },
+    sentenceStats,
+    structurePattern,
+    ctaPattern,
+  })
+
+  ctx.log(
+    `Voice profile derived from ${samples.length} sample(s): ${sentenceStats.meanWords}-word mean sentence, ` +
+      `${sentenceStats.shortLineShare}% of lines under eight words, ${vocabulary.length} characteristic term(s), ` +
+      `${ctaPattern.questionShare}% of closes are questions.`,
+  )
+
+  return { voiceProfile: profile, voiceProfileReason: null }
+})
+
+/**
+ * Turns a stored profile into instructions a writer can follow.
+ *
+ * Deliberately a pure function over the stored row: everything it says is
+ * traceable to a counted figure, so a model cannot be told the account "sounds
+ * energetic" on the strength of nobody having measured that.
+ *
+ * It never emits anything that could loosen a brand rule — no emoji guidance,
+ * no CTA that asks for a sale. Those come from BRAND, which this cannot reach.
+ */
+function voiceInstructionFrom(profile: VoiceProfileRow): string {
+  const stats = profile.sentence_stats as Record<string, number>
+  const cta = profile.cta_pattern as Record<string, number>
+  const vocab = (profile.vocabulary as { terms?: Array<{ term: string }> }).terms ?? []
+
+  const lines = [
+    `Write in the account's own observed voice, learned from ${profile.sample_count} past scripts:`,
+    `· Sentences average ${stats.meanWords ?? 0} words; ${stats.shortLineShare ?? 0}% of lines run to eight words or fewer. Match that pace.`,
+    vocab.length > 0
+      ? `· Terms this account actually uses: ${vocab.slice(0, 24).map((v) => v.term).join(', ')}.`
+      : '',
+    (cta.questionShare ?? 0) >= 50
+      ? '· This account usually closes on a question. Do the same.'
+      : (cta.imperativeShare ?? 0) >= 50
+        ? '· This account usually closes by asking for one specific action. Do the same.'
+        : '',
+    'Every one of these is a measurement of past scripts, not a style you are being asked to invent.',
+  ]
+  return lines.filter((l) => l !== '').join('\n')
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 12 · caption.script.write
+   ───────────────────────────────────────────────────────────────────────────
+   Beats, then a close. Deliberately NO HOOK — `caption.hook.generate` writes
+   five competing ones, and a script that already opens with a hook produces two
+   first lines that fight each other.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('caption.script.write', async (payload, ctx) => {
+  const beatCount = ctx.num('scriptBeatCount', 3)
+  const sentencesPerBeat = ctx.num('sentencesPerBeat', 3)
+  const temperature = ctx.num('temperature', 55)
+  const includeHook = ctx.bool('includeHook', false)
+  const requireCta = ctx.bool('requireCta', true)
+  const useVoiceProfile = ctx.bool('useVoiceProfile', true)
+
+  const grounding = payload.grounding ?? []
+
+  /*
+   * ADR-008, at the one place it matters.
+   *
+   * The format is named in the call, and `activeVoiceProfile` filters on it in
+   * SQL. A caption skill would have to ask for `'post'` explicitly to receive a
+   * profile, and none of them asks for one at all.
+   */
+  const profile = useVoiceProfile
+    ? await activeVoiceProfile(ctx.workspaceId, SHORT_FORM)
+    : null
+
+  const voiceBlock = profile === null ? '' : voiceInstructionFrom(profile)
+  if (useVoiceProfile && profile === null) {
+    ctx.log(
+      'No active short-form voice profile, so the script is written in the brand register alone. ' +
+        'Derive one from stored samples to change that.',
+    )
+  }
+
+  const groundingBlock =
+    grounding.length === 0
+      ? 'No Knowledge Base entry covers this topic, so make no factual claim that needs a citation.'
+      : `Grounding — every factual claim must come from these:\n${grounding
+          .map((g) => `· ${g.title}: ${g.content}`)
+          .join('\n')
+          .slice(0, 2400)}`
+
+  const systemInstruction = withCaptionSpec(
+    [
+      `You are writing a spoken short-form video script for ${BRAND.wordmark}, ${BRAND.positioning}.`,
+      `Audience: ${payload.audience}.`,
+      `Voice: ${BRAND.voiceWords.join(', ')}. No emoji. No sales call to action.`,
+      voiceBlock,
+      groundingBlock,
+    ]
+      .filter((b) => b !== '')
+      .join('\n\n'),
+  )
+
+  const prompt = [
+    `Topic: ${payload.title}`,
+    `Angle: ${payload.angle}`,
+    payload.sourceTopic ? `Subject area: ${payload.sourceTopic}` : '',
+    '',
+    `Write exactly ${beatCount} beat(s), each at most ${sentencesPerBeat} sentence(s).`,
+    'Label them [BEAT 1], [BEAT 2] and so on, one per line.',
+    requireCta
+      ? 'End with a line labelled [CTA] asking the viewer to do one specific thing. It must never ask for a sale, a demo or a booking.'
+      : 'Do not write a call to action.',
+    includeHook
+      ? 'Open with a line labelled [HOOK].'
+      : 'Do NOT write a hook or an opening line. The script begins at BEAT 1; hooks are written separately.',
+    'This is spoken, not read. Short sentences. No headings, no hashtags, no markdown.',
+  ]
+    .filter((l) => l !== '')
+    .join('\n')
+
+  /**
+   * The deterministic writer, for a completely empty `.env`.
+   *
+   * It composes from the grounding that is actually present and says plainly
+   * when there is none, which is the same standard the model path is held to.
+   * It is not a fixture: every sentence is built from this idea's own fields.
+   */
+  const template = (): string => {
+    const beats: string[] = []
+    for (let i = 0; i < beatCount; i += 1) {
+      const entry = grounding[i % Math.max(1, grounding.length)]
+      const sentences =
+        entry === undefined
+          ? [
+              `${topicInProse(payload.sourceTopic || payload.title)} is being treated as settled.`,
+              'It is not, and the difference shows up in what gets measured.',
+            ]
+          : [
+              `${entry.title}.`,
+              clampChars(entry.content.replace(/\s+/g, ' ').trim(), 220),
+            ]
+      beats.push(`[BEAT ${i + 1}] ${sentences.slice(0, sentencesPerBeat).join(' ')}`)
+    }
+    if (requireCta) {
+      beats.push(
+        `[CTA] If you have measured this differently in your own work, say what you saw.`,
+      )
+    }
+    return beats.join('\n')
+  }
+
+  const outcome = await withChainFallback(
+    textChain(),
+    {
+      systemInstruction,
+      prompt,
+      temperature: temperatureFromPercent(temperature),
+      maxOutputTokens: 1024,
+    },
+    template,
+    (reason) => {
+      ctx.emit('activity', `Script written by the template writer — ${reason}`, {
+        status: 'warn',
+        reason,
+      })
+    },
+  )
+
+  let script = outcome.value.trim().replace(/^#+\s*/gm, '')
+
+  /*
+   * THE BRAND RULES ARE NOT RELAXED FOR A SCRIPT (ADR-008, clause 3).
+   *
+   * A voice profile shaped the phrasing above. It does not get a vote here.
+   * `enforceBrandVoice` reads BRAND and only BRAND — the emoji budget is zero
+   * for a script exactly as it is for a post, and nothing on a profile can
+   * reach this call.
+   */
+  const enforced = enforceBrandVoice(script, payload.sourceTopic || payload.title)
+  script = enforced.text
+  const brandNotes = enforced.notes
+
+  ctx.log(
+    `Script written by ${outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'the template writer'} · ` +
+      `${beatCount} beat(s)${requireCta ? ' and a close' : ''}${profile === null ? ', brand register only' : `, in the voice learned from ${profile.sample_count} samples`}` +
+      (brandNotes.length > 0 ? ` · ${brandNotes.length} brand correction(s)` : ''),
+  )
+
+  return {
+    script,
+    scriptSource: outcome.source,
+    scriptModel: outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'ethara-template-writer',
+    ...(outcome.source === 'live' ? {} : { scriptFallbackReason: outcome.fallbackReason }),
+    voiceProfileId: profile?.id ?? null,
+    brandNotes,
+  }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 13 · caption.hook.generate
+   ───────────────────────────────────────────────────────────────────────────
+   One hook per declared pattern, so the five are alternatives rather than five
+   rewordings of one idea. Structural distinctness comes from the patterns;
+   lexical distinctness is checked afterwards, and a variant too close to one
+   already written is dropped with the reason recorded rather than shipped as a
+   fake choice.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('caption.hook.generate', async (payload, ctx) => {
+  const wanted = ctx.num('hookVariantCount', 5)
+  const maxLines = ctx.num('hookMaxLines', 2)
+  const maxSeconds = ctx.num('hookMaxSpokenSeconds', 4)
+  const wpm = ctx.num('spokenWordsPerMinute', 150)
+  const temperature = ctx.num('temperature', 70)
+  const minDivergence = ctx.num('minDivergence', 30)
+
+  /*
+   * SPOKEN LENGTH, EXPRESSED AS SOMETHING A MODEL CAN COUNT.
+   *
+   * "Under four seconds" is the real constraint and is unenforceable: a model
+   * cannot time speech. Words at a stated rate is the same constraint in a unit
+   * that can be checked mechanically after generation, and the rate is a knob
+   * so a genuinely faster delivery gets correspondingly longer hooks.
+   */
+  const maxWords = Math.max(3, Math.round((maxSeconds / 60) * wpm))
+
+  const patterns = HOOK_PATTERNS.slice(0, Math.max(1, Math.min(wanted, HOOK_PATTERNS.length)))
+  if (patterns.length < HOOK_PATTERNS.length) {
+    ctx.log(
+      `Writing ${patterns.length} of ${HOOK_PATTERNS.length} patterns — ${HOOK_PATTERNS.slice(patterns.length)
+        .map((p) => HOOK_PATTERN_LABEL[p])
+        .join(', ')} were not written because the variant count is set below five.`,
+    )
+  }
+
+  const grounding = payload.grounding ?? []
+  const script = typeof payload.script === 'string' ? payload.script : ''
+
+  const accepted: Array<{ pattern: HookPattern; body: string }> = []
+  const rejected: string[] = []
+  let source: 'live' | 'fixture' = 'fixture'
+  let servedBy: string | undefined
+  let fallbackReason: string | undefined
+
+  for (const pattern of patterns) {
+    const systemInstruction = withCaptionSpec(
+      [
+        `You are writing the opening line of a short-form video for ${BRAND.wordmark}, ${BRAND.positioning}.`,
+        `Voice: ${BRAND.voiceWords.join(', ')}. No emoji. No clickbait, no manufactured urgency, no curiosity gap that the video does not actually close.`,
+        grounding.length === 0
+          ? 'There is no cited grounding for this topic, so the hook may not state a number or a finding.'
+          : `Grounding you may draw a specific claim from:\n${grounding.map((g) => `· ${g.title}: ${g.content}`).join('\n').slice(0, 1400)}`,
+      ].join('\n\n'),
+    )
+
+    const prompt = [
+      `Topic: ${payload.title}`,
+      script === '' ? '' : `The script it opens:\n${script.slice(0, 900)}`,
+      '',
+      `Write ONE hook using this pattern — ${HOOK_PATTERN_LABEL[pattern]}: ${HOOK_PATTERN_BRIEF[pattern]}`,
+      `At most ${maxLines} line(s) and ${maxWords} words, so it can be said in ${maxSeconds} seconds.`,
+      pattern === 'specific_claim'
+        ? 'It must carry a real number taken from the grounding above. If no number is available there, say exactly: NO EVIDENCE.'
+        : '',
+      'Return the hook alone. No label, no quotation marks, no explanation.',
+    ]
+      .filter((l) => l !== '')
+      .join('\n')
+
+    const outcome = await withChainFallback(
+      textChain(),
+      {
+        systemInstruction,
+        prompt,
+        temperature: temperatureFromPercent(temperature),
+        maxOutputTokens: 120,
+        fast: true,
+      },
+      () => templateHook(pattern, payload, grounding, maxWords),
+      (reason) => {
+        fallbackReason = reason
+      },
+    )
+
+    if (outcome.source === 'live') {
+      source = 'live'
+      servedBy = outcome.servedBy
+    } else if (fallbackReason === undefined) {
+      fallbackReason = outcome.fallbackReason
+    }
+
+    let body = outcome.value
+      .trim()
+      .replace(/^["'“‘]|["'”’]$/g, '')
+      .replace(/\p{Extended_Pictographic}/gu, '')
+      .trim()
+
+    /*
+     * THE ONE PATTERN THAT CAN REFUSE ITSELF.
+     *
+     * A specific-claim hook without a number is not a specific-claim hook; it
+     * is an aspirational one wearing the wrong label. Dropping it is the honest
+     * outcome — the alternative is a variant tagged with a pattern it does not
+     * follow, which makes the whole tagging worthless.
+     */
+    if (body === '' || /^NO EVIDENCE/i.test(body)) {
+      rejected.push(
+        `${HOOK_PATTERN_LABEL[pattern]} was not written: it needs a measured number and the grounding states none.`,
+      )
+      continue
+    }
+
+    // Trim to the spoken ceiling rather than discard: a hook two words over is
+    // a good hook that ran long.
+    const lines = body.split('\n').filter((l) => l.trim() !== '').slice(0, maxLines)
+    body = clampWords(lines.join('\n'), maxWords)
+
+    const tooClose = accepted.find(
+      (other) => similarity(other.body, body) * 100 >= 100 - minDivergence,
+    )
+    if (tooClose) {
+      rejected.push(
+        `${HOOK_PATTERN_LABEL[pattern]} was dropped: ${Math.round(similarity(tooClose.body, body) * 100)}% similar to the ${HOOK_PATTERN_LABEL[tooClose.pattern]} hook, below the ${minDivergence}% divergence floor. Five near-identical hooks are not five choices.`,
+      )
+      continue
+    }
+
+    accepted.push({ pattern, body })
+  }
+
+  for (const reason of rejected) {
+    ctx.emit('activity', reason, { status: 'warn' })
+  }
+
+  ctx.log(
+    `${accepted.length} hook(s) across ${accepted.map((a) => HOOK_PATTERN_LABEL[a.pattern]).join(', ') || 'no patterns'}` +
+      (rejected.length > 0 ? ` · ${rejected.length} not kept` : '') +
+      ` · by ${source === 'live' ? textModelIdFor(servedBy) : 'the template writer'}`,
+  )
+
+  return {
+    hooks: accepted.map((a, index) => ({ ...a, rank: index + 1 })),
+    hookSource: source,
+    hookModel: source === 'live' ? textModelIdFor(servedBy) : 'ethara-template-writer',
+    ...(source === 'live' || fallbackReason === undefined ? {} : { hookFallbackReason: fallbackReason }),
+    hookNotes: rejected,
+  }
+})
+
+/**
+ * The deterministic hook writer.
+ *
+ * Every line is built from this idea's own fields and the grounding actually
+ * retrieved — there is no bank of pre-written hooks to draw from, because a
+ * stock line dressed as a generated one is a fixture pretending to be work.
+ */
+function templateHook(
+  pattern: HookPattern,
+  payload: CaptionPayload,
+  grounding: GroundingEntry[],
+  maxWords: number,
+): string {
+  const topic = topicInProse(payload.sourceTopic || payload.title)
+  const figure = grounding
+    .map((g) => /(\d+(?:\.\d+)?\s*(?:%|x|ms|k|M|B)?)/.exec(g.content)?.[1] ?? '')
+    .find((f) => f !== '')
+
+  const line = ((): string => {
+    switch (pattern) {
+      case 'aspirational':
+        return `This is what ${topic} looks like when it is actually measured.`
+      case 'pain_point':
+        return `Your ${topic} numbers move and nobody can tell you why.`
+      case 'insider':
+        return `Most teams shipping ${topic} have never checked this.`
+      case 'specific_claim':
+        // Refuses rather than inventing a number — the same contract the model
+        // path is held to, for the same reason.
+        return figure === undefined ? 'NO EVIDENCE' : `${figure} of the gain in ${topic} is not the model.`
+      case 'curiosity_gap':
+        return `What breaks first when ${topic} scales?`
+    }
+  })()
+
+  return clampWords(line, maxWords)
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAPTION 14 · caption.hook.score
+   ───────────────────────────────────────────────────────────────────────────
+   THE SKILL THAT MOST EASILY BECOMES A LIE.
+
+   "Confidence 8/10" is a factual claim about how this hook will perform. It is
+   only defensible if a stored row supports it. So:
+
+     · a score is derived ONLY from the measured performance of a stored post
+       the hook demonstrably resembles;
+     · `confidence_basis` names that post and its real figures, in plain
+       language, every time;
+     · where nothing comparable exists the output is NO SCORE and a sentence
+       saying why. Not 5. Not 0. Not "low confidence".
+
+   The database agrees: `hook_variants` has a CHECK requiring a non-empty basis,
+   and a second one refusing a confidence with no matched row behind it. Getting
+   this wrong is a constraint violation, not a code review note.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+registerSkill<CaptionPayload>('caption.hook.score', async (payload, ctx) => {
+  const hooks = (payload.hooks ?? []) as Array<{ pattern: HookPattern; body: string; rank: number }>
+  if (hooks.length === 0) return {}
+
+  const minSimilarity = ctx.num('minMatchSimilarity', 35) / 100
+  const lookbackDays = ctx.num('lookbackDays', 180)
+  const minComparisons = ctx.num('minComparisons', 1)
+  const includeCaptured = ctx.bool('includeCaptured', true)
+
+  const corpus = await hookComparisonCorpus(ctx.workspaceId, {
+    lookbackDays,
+    includeCaptured,
+  })
+
+  if (corpus.length === 0) {
+    // Every hook returns unscored, each with the same honest reason. Not an
+    // error: a young account has nothing to compare against, and saying so is
+    // the correct output.
+    const basis =
+      `No comparable post is stored yet — nothing published or captured in the last ${lookbackDays} days ` +
+      'carries measured performance. A confidence would have no evidence behind it, so none is given.'
+    ctx.log(`No confidence scored for ${hooks.length} hook(s) — ${basis}`)
+    return {
+      scoredHooks: hooks.map((h) => ({
+        ...h,
+        confidence: null,
+        confidenceBasis: basis,
+        matchedPostId: null,
+        matchedItemId: null,
+      })),
+    }
+  }
+
+  const scored = hooks.map((hook) => {
+    const ranked = corpus
+      .map((row) => ({ row, score: similarity(hook.body, row.text) }))
+      .filter((m) => m.score >= minSimilarity)
+      .sort((a, b) => b.score - a.score)
+
+    if (ranked.length < minComparisons) {
+      const basis =
+        `No confidence: the closest stored post is ${Math.round((ranked[0]?.score ?? (corpus.length > 0 ? Math.max(...corpus.map((c) => similarity(hook.body, c.text))) : 0)) * 100)}% similar, ` +
+        `below the ${Math.round(minSimilarity * 100)}% needed to treat it as evidence about this hook` +
+        (minComparisons > 1 ? `, and ${minComparisons} comparisons are required.` : '.')
+      return {
+        ...hook,
+        confidence: null as number | null,
+        confidenceBasis: basis,
+        matchedPostId: null as string | null,
+        matchedItemId: null as string | null,
+      }
+    }
+
+    const used = ranked.slice(0, Math.max(minComparisons, 1))
+    const best = used[0] as (typeof ranked)[number]
+
+    /*
+     * THE SCORE ITSELF — a normalised reading of the matched posts' measured
+     * performance, weighted by how similar each one actually is.
+     *
+     * Not a judgement about the hook's craft. It says: posts this hook
+     * resembles performed at this level, on this evidence. The basis sentence
+     * below says exactly that, so nobody can read more into the number than the
+     * number supports.
+     */
+    const weighted =
+      used.reduce((t, m) => t + m.row.performance * m.score, 0) /
+      used.reduce((t, m) => t + m.score, 0)
+    const confidence = Math.round(clamp(weighted, 0, 100))
+
+    const kindWord = best.row.kind === 'published' ? 'our own published post' : 'a captured post'
+    const basis =
+      `${confidence}/100, derived from ${used.length} stored comparison(s). ` +
+      `Closest is ${kindWord} “${best.row.title.slice(0, 70)}” at ${Math.round(best.score * 100)}% similarity, ` +
+      `which measured ${best.row.evidence}.` +
+      (best.row.kind === 'published'
+        ? ''
+        : ' That post is someone else’s, so it is evidence about the topic rather than about this account.')
+
+    return {
+      ...hook,
+      confidence,
+      confidenceBasis: basis,
+      matchedPostId: best.row.kind === 'published' ? best.row.id : null,
+      matchedItemId: best.row.kind === 'captured' ? best.row.id : null,
+    }
+  })
+
+  const withScore = scored.filter((s) => s.confidence !== null).length
+  ctx.log(
+    `${withScore} of ${scored.length} hook(s) scored against stored evidence; ` +
+      `${scored.length - withScore} left unscored with the reason stated. A default score would be fabricated evidence.`,
+  )
+
+  return { scoredHooks: scored }
+})
+
+/**
+ * The stored posts a hook may be compared against, each reduced to a
+ * comparable text and a measured performance.
+ *
+ * `performance` is NORMALISED WITHIN THE CORPUS, not against an absolute. An
+ * account's 400-reaction post and a viral reel's 400,000 plays are not
+ * comparable on a shared axis, and pretending otherwise would let one corpus
+ * make every hook look weak and another make every hook look strong.
+ *
+ * Rows with no measured performance are excluded entirely rather than scored at
+ * zero — the same rule as everywhere else, applied where it would be easiest to
+ * forget.
+ */
+async function hookComparisonCorpus(
+  workspaceId: string,
+  opts: { lookbackDays: number; includeCaptured: boolean },
+): Promise<
+  Array<{
+    id: string
+    kind: 'published' | 'captured'
+    title: string
+    text: string
+    performance: number
+    evidence: string
+  }>
+> {
+  const since = new Date(Date.now() - opts.lookbackDays * 86_400_000).toISOString()
+
+  const published = await publishedPostPerformance(workspaceId, since)
+  const captured = opts.includeCaptured ? await capturedPostPerformance(workspaceId, since) : []
+
+  const build = (
+    rows: Array<{ id: string; title: string; text: string; raw: number; evidence: string }>,
+    kind: 'published' | 'captured',
+  ) => {
+    const max = rows.reduce((m, r) => Math.max(m, r.raw), 0)
+    if (max === 0) return []
+    return rows.map((r) => ({
+      id: r.id,
+      kind,
+      title: r.title,
+      text: r.text,
+      performance: (r.raw / max) * 100,
+      evidence: r.evidence,
+    }))
+  }
+
+  return [...build(published, 'published'), ...build(captured, 'captured')]
+}

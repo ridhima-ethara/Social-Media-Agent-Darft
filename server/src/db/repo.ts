@@ -19,6 +19,8 @@ import type {
   IdeaStatus,
   Platform,
   ResolvedConfig,
+  ContentFormat,
+  HookPattern,
   SkillRunStatus,
   ValidationVerdict,
 } from '../../../shared/agent-contract'
@@ -113,6 +115,12 @@ export interface KeywordRow {
   category: string
   weight: number
   active: boolean
+  /** 'seeded' — a human typed it. 'discovered' — the corpus surfaced it (ADR-012). */
+  origin: 'seeded' | 'discovered'
+  discovered_at: string | null
+  /** The sentence naming the posts and figures that produced it. */
+  discovery_reason: string | null
+  emergence_score: number | null
   created_at: string
 }
 
@@ -121,7 +129,8 @@ export async function listKeywords(
   activeOnly = false,
 ): Promise<KeywordRow[]> {
   return query<KeywordRow>(
-    `SELECT id, term, category, weight, active, created_at
+    `SELECT id, term, category, weight, active, origin, discovered_at,
+            discovery_reason, emergence_score, created_at
        FROM keywords
       WHERE workspace_id = $1 ${activeOnly ? 'AND active = true' : ''}
       ORDER BY weight DESC, term ASC`,
@@ -214,6 +223,7 @@ export interface KeywordSignalRow {
   search_url: string | null
   top_post_url: string | null
   top_post_title: string | null
+  measured_count: number
   captured_at: string
 }
 
@@ -225,7 +235,7 @@ export async function latestKeywordSignals(
     `SELECT DISTINCT ON (ks.keyword_id)
             ks.id, ks.keyword_id, k.term, ks.run_id, ks.post_count, ks.total_engagement,
             ks.avg_engagement, ks.velocity, ks.growth_pct, ks.trend_score, ks.rank,
-            ks.is_trending, ks.trend_reason, ks.search_url, ks.top_post_url, ks.top_post_title,
+            ks.is_trending, ks.trend_reason, ks.search_url, ks.top_post_url, ks.top_post_title, ks.measured_count,
             ks.captured_at
        FROM keyword_signals ks
        JOIN keywords k ON k.id = ks.keyword_id
@@ -235,16 +245,99 @@ export async function latestKeywordSignals(
   )
 }
 
-/** The current trending set, ordered by rank. */
+/**
+ * Every keyword the MOST RECENT RUN scored, ranked as that run ranked them.
+ *
+ * ═══ WHY THE TABLE NEEDS THIS AND NOT `latestKeywordSignals()` ═══
+ *
+ * `rank` and `trend_score` are RUN-RELATIVE. A run normalises every score
+ * against its own busiest keyword and numbers its own terms 1..N, so the top
+ * keyword of every run scores 100 and is ranked 1.
+ *
+ * Taking the newest row per keyword across all runs therefore stacks those
+ * scales on top of each other. Twelve runs of twelve keywords produced twelve
+ * rows claiming rank 1, and a column of 100s attached to post counts of 4, 8
+ * and 19 — figures that cannot all be the busiest keyword of anything. The
+ * numbers were each individually correct and collectively meaningless.
+ *
+ * This is the same defect `trendingKeywords()` above was fixed for, reaching
+ * the keyword table by the same route. The note there argued the table wants
+ * "the last thing known about every term", which holds for post counts and
+ * capture times — but not for a rank, which is a statement about a keyword's
+ * position among the others scored beside it.
+ *
+ * `latestKeywordSignals()` is unchanged and keeps its callers.
+ */
+export async function latestRunKeywordSignals(
+  workspaceId: string,
+): Promise<KeywordSignalRow[]> {
+  return query<KeywordSignalRow>(
+    `SELECT ks.id, ks.keyword_id, k.term, ks.run_id, ks.post_count, ks.total_engagement,
+            ks.avg_engagement, ks.velocity, ks.growth_pct, ks.trend_score, ks.rank,
+            ks.is_trending, ks.trend_reason, ks.search_url, ks.top_post_url,
+            ks.top_post_title, ks.measured_count, ks.captured_at
+       FROM keyword_signals ks
+       JOIN keywords k ON k.id = ks.keyword_id
+      WHERE ks.workspace_id = $1
+        AND ks.run_id = (
+          SELECT run_id FROM keyword_signals
+           WHERE workspace_id = $1 AND run_id IS NOT NULL
+           ORDER BY captured_at DESC
+           LIMIT 1
+        )
+      ORDER BY ks.rank NULLS LAST, ks.trend_score DESC`,
+    [workspaceId],
+  )
+}
+
+/**
+ * What is trending, AS OF THE MOST RECENT RUN.
+ *
+ * ═══ WHY THIS IS SCOPED TO ONE RUN ═══
+ *
+ * It used to read `latestKeywordSignals()` — the newest row PER KEYWORD, across
+ * every run ever — and filter `is_trending`. Each run flags its own top five
+ * with ranks 1..5, so once runs stopped scanning an identical keyword set those
+ * flags stopped overwriting each other and started accumulating: 31 trending
+ * rows across 7 runs, and a "top 5" that was five keywords from five different
+ * runs, every one of them showing rank 1 and score 100.
+ *
+ * The run console made the contradiction visible — its source cards showed the
+ * three keywords the run actually scanned, while the completion panel beside
+ * them listed five entirely different ones.
+ *
+ * "Trending" is a verdict a run reaches about the keywords IT scanned. A
+ * keyword the latest run did not look at is not currently trending; it is
+ * unmeasured, and carrying its last verdict forward as though it were current
+ * is the same error as reading a missing metric as a zero.
+ *
+ * `latestKeywordSignals()` keeps its own meaning and its own callers — the
+ * keyword table wants the last thing known about every term, which is a
+ * different and equally valid question.
+ */
 export async function trendingKeywords(
   workspaceId: string,
   limit = 5,
 ): Promise<KeywordSignalRow[]> {
-  const all = await latestKeywordSignals(workspaceId)
-  return all
-    .filter((s) => s.is_trending)
-    .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99))
-    .slice(0, limit)
+  return query<KeywordSignalRow>(
+    `SELECT ks.id, ks.keyword_id, k.term, ks.run_id, ks.post_count, ks.total_engagement,
+            ks.avg_engagement, ks.velocity, ks.growth_pct, ks.trend_score, ks.rank,
+            ks.is_trending, ks.trend_reason, ks.search_url, ks.top_post_url,
+            ks.top_post_title, ks.measured_count, ks.captured_at
+       FROM keyword_signals ks
+       JOIN keywords k ON k.id = ks.keyword_id
+      WHERE ks.workspace_id = $1
+        AND ks.is_trending
+        AND ks.run_id = (
+          SELECT run_id FROM keyword_signals
+           WHERE workspace_id = $1 AND run_id IS NOT NULL
+           ORDER BY captured_at DESC
+           LIMIT 1
+        )
+      ORDER BY ks.rank NULLS LAST, ks.trend_score DESC
+      LIMIT $2`,
+    [workspaceId, limit],
+  )
 }
 
 /**
@@ -305,6 +398,8 @@ export interface KeywordSignalInsert {
   searchUrl: string
   topPostUrl: string | null
   topPostTitle: string | null
+  /** Posts that stated engagement. Zero means the figure is N/A, not nil. */
+  measuredCount: number
 }
 
 export async function insertKeywordSignal(
@@ -315,8 +410,8 @@ export async function insertKeywordSignal(
     `INSERT INTO keyword_signals
        (workspace_id, keyword_id, run_id, post_count, total_engagement, avg_engagement,
         velocity, growth_pct, trend_score, rank, is_trending, trend_reason,
-        search_url, top_post_url, top_post_title)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        search_url, top_post_url, top_post_title, measured_count)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
     [
       workspaceId,
       s.keywordId,
@@ -333,6 +428,7 @@ export async function insertKeywordSignal(
       s.searchUrl,
       s.topPostUrl,
       s.topPostTitle,
+      s.measuredCount,
     ],
   )
 }
@@ -394,6 +490,20 @@ export interface ScrapedItemRow {
   platform: Platform | null
   /** False for everything a search-indexed crawl returns — see the schema note. */
   metrics_available: boolean
+  /** Plays. Meaningful only under `views_available` — a third state (ADR-009). */
+  views: number
+  views_available: boolean
+  /** The post's own opening line, as it opened. */
+  hook: string | null
+  /** `null` means NOT COMPUTABLE — it never means a rate of zero. */
+  engagement_rate: number | null
+  /** reel | short | video | post | article. */
+  media_format: string | null
+  signal_flags: string[]
+  /** `null` is NOT TRANSCRIBED. It is never "the speaker said nothing". */
+  transcript: string | null
+  transcript_source: string | null
+  transcript_confidence: number | null
   brand_relevance: number
   posted_at: string | null
   scraped_at: string
@@ -622,6 +732,8 @@ export interface IdeaRow {
   platform_rank: number | null
   calendar_slot: CalendarSlot
   status: IdeaStatus
+  /** Which KIND of artefact (ADR-007). 'short_form_script' never publishes. */
+  content_format: ContentFormat
   analysis: Record<string, unknown>
   feedback: Array<Record<string, unknown>>
   is_new_trend: boolean
@@ -806,6 +918,8 @@ export interface DraftRow {
   idea_id: string
   platform: Platform
   body: string
+  /** Mirrors the idea's. A script rendered as a caption is a category error. */
+  content_format: ContentFormat
   revision: number
   generated_by: string | null
   model: string | null
@@ -834,19 +948,22 @@ export async function upsertDraft(d: {
   generatedBy: string
   model: string
   source: 'live' | 'fixture'
+  /** Defaults to 'post'. A caption writer never has to think about this. */
+  contentFormat?: ContentFormat
 }): Promise<DraftRow | null> {
   return queryOne<DraftRow>(
-    `INSERT INTO drafts (idea_id, platform, body, revision, generated_by, model, source)
-     VALUES ($1,$2,$3,1,$4,$5,$6)
+    `INSERT INTO drafts (idea_id, platform, body, revision, generated_by, model, source, content_format)
+     VALUES ($1,$2,$3,1,$4,$5,$6,$7)
      ON CONFLICT (idea_id, platform) DO UPDATE
        SET body = EXCLUDED.body,
            revision = drafts.revision + 1,
            generated_by = EXCLUDED.generated_by,
            model = EXCLUDED.model,
            source = EXCLUDED.source,
+           content_format = EXCLUDED.content_format,
            updated_at = now()
      RETURNING *`,
-    [d.ideaId, d.platform, d.body, d.generatedBy, d.model, d.source],
+    [d.ideaId, d.platform, d.body, d.generatedBy, d.model, d.source, d.contentFormat ?? 'post'],
   )
 }
 
@@ -979,7 +1096,7 @@ export interface PostRow {
  */
 export async function listPosts(
   workspaceId: string,
-  opts: { platform?: Platform; limit?: number } = {},
+  opts: { platform?: Platform; limit?: number; includeWithdrawn?: boolean } = {},
 ): Promise<PostRow[]> {
   const params: Array<string | number> = [workspaceId]
   let where = 'p.workspace_id = $1'
@@ -987,6 +1104,13 @@ export async function listPosts(
     params.push(opts.platform)
     where += ` AND p.platform = $${params.length}`
   }
+  /*
+   * Withdrawn posts are hidden here rather than deleted upstream, so this is
+   * the single place the published view is narrowed. `includeWithdrawn` exists
+   * because an audit must still be able to see what was withdrawn and why —
+   * hiding a record from the product is not hiding it from an operator who asks.
+   */
+  if (!opts.includeWithdrawn) where += ' AND p.withdrawn_at IS NULL'
   params.push(opts.limit ?? 100)
 
   return query<PostRow>(
@@ -1007,6 +1131,33 @@ export async function listPosts(
       LIMIT $${params.length}`,
     params,
   )
+}
+
+/**
+ * Withdraw a published post from the published view, or restore it.
+ *
+ * This never deletes. The row keeps its `external_id`, its dispatch history and
+ * its metrics, because it is the receipt for something that really happened on a
+ * platform. Passing `null` restores it.
+ *
+ * It does NOT retract the post from the platform. That needs the platform's own
+ * delete API and a credential permitted to use it; this is the product's view of
+ * its own history, nothing more.
+ */
+export async function setPostWithdrawn(
+  workspaceId: string,
+  id: string,
+  reason: string | null,
+): Promise<PostRow | null> {
+  const rows = await query<PostRow>(
+    `UPDATE posts
+        SET withdrawn_at     = CASE WHEN $3::text IS NULL THEN NULL ELSE now() END,
+            withdrawn_reason = $3
+      WHERE workspace_id = $1 AND id = $2
+      RETURNING *`,
+    [workspaceId, id, reason],
+  )
+  return rows[0] ?? null
 }
 
 export async function getPost(workspaceId: string, id: string): Promise<PostRow | null> {
@@ -1074,14 +1225,23 @@ export async function insertPost(p: {
 }
 
 /** Appends a metrics reading. Never updates an existing row. */
+/**
+ * One reading of a post's performance.
+ *
+ * Every figure is nullable, and that is the point. A platform that reports no
+ * impressions and a platform that has not been asked are different facts; a
+ * zero written for the second would be a measurement nobody made, and it feeds
+ * `postBaseline()` — so one invented zero becomes the baseline the next
+ * comparison is judged against.
+ */
 export async function insertPostMetrics(m: {
   postId: string
-  reach: number
-  impressions: number
-  likes: number
-  comments: number
-  shares: number
-  engagementRate: number
+  reach: number | null
+  impressions: number | null
+  likes: number | null
+  comments: number | null
+  shares: number | null
+  engagementRate: number | null
 }): Promise<void> {
   await query(
     `INSERT INTO post_metrics
@@ -1118,6 +1278,9 @@ export async function postBaseline(
           WHERE post_id = p.id ORDER BY captured_at DESC LIMIT 1
        ) m ON true
       WHERE p.workspace_id = $1 AND p.platform = $2 AND p.status = 'published'
+        -- A withdrawn post is no longer ours to measure against; leaving it in
+        -- would keep shaping every future baseline it is compared with.
+        AND p.withdrawn_at IS NULL
       ORDER BY p.published_at DESC
       LIMIT $3`,
     [workspaceId, platform, windowPosts],
@@ -1982,6 +2145,24 @@ export interface ScrapedItemInsert {
   captureSource: 'live' | 'fixture'
   platform: Platform | null
   metricsAvailable: boolean
+  /**
+   * Plays, and whether the lane stated any. Optional on the insert so the
+   * Python tier — which has no view-bearing lane — does not have to assert a
+   * fact it cannot know. Absent means `views_available = false` (ADR-009).
+   */
+  views?: number
+  viewsAvailable?: boolean
+  /** The post's own opening line. */
+  hook?: string | null
+  /** `null` when not computable — never 0. */
+  engagementRate?: number | null
+  mediaFormat?: string | null
+  /** 'VIRAL' and the thresholds that produced it. */
+  signalFlags?: string[]
+  /** `undefined`/`null` both mean NOT TRANSCRIBED. Never `''`. */
+  transcript?: string | null
+  transcriptSource?: string | null
+  transcriptConfidence?: number | null
   brandRelevance: number
   postedAt: string
 }
@@ -2026,6 +2207,9 @@ export async function persistScrapedItems(
          relevance, credibility, freshness, is_duplicate,
          validation, verdict_reason, capture_source,
          platform, metrics_available, brand_relevance,
+         views, views_available,
+         hook, engagement_rate, media_format, signal_flags,
+         transcript, transcript_source, transcript_confidence,
          posted_at, validated_at,
          embedding, embedding_model, embedded_at
        ) VALUES (
@@ -2035,9 +2219,12 @@ export async function persistScrapedItems(
          $19, $20, $21, $22,
          $23, $24, $25,
          $26, $27, $28,
-         $29,
+         $29, $30,
+         $31, $32, $33,
+         $34, $35, $36, $37,
+         $38,
          CASE WHEN $23 = 'pending' THEN NULL ELSE now() END,
-         $30::vector, $31, CASE WHEN $30 IS NULL THEN NULL ELSE now() END
+         $39::vector, $40, CASE WHEN $39 IS NULL THEN NULL ELSE now() END
        )
        ON CONFLICT (workspace_id, external_id) DO UPDATE SET
          run_id = EXCLUDED.run_id,
@@ -2054,6 +2241,22 @@ export async function persistScrapedItems(
          capture_source = EXCLUDED.capture_source,
          platform = EXCLUDED.platform,
          metrics_available = EXCLUDED.metrics_available,
+         views = EXCLUDED.views,
+         views_available = EXCLUDED.views_available,
+         hook = EXCLUDED.hook,
+         engagement_rate = EXCLUDED.engagement_rate,
+         media_format = EXCLUDED.media_format,
+         signal_flags = EXCLUDED.signal_flags,
+         -- A RE-CAPTURE MUST NOT ERASE A TRANSCRIPT.
+         --
+         -- Transcription is a separate, later pass, and a re-scrape of the same
+         -- post arrives with transcript = NULL meaning "I did not transcribe
+         -- this", not "there is nothing to transcribe". Overwriting would throw
+         -- away minutes of sidecar time and turn a known fact back into an
+         -- unknown one — the same reason the embedding below is COALESCEd.
+         transcript = COALESCE(EXCLUDED.transcript, scraped_items.transcript),
+         transcript_source = COALESCE(EXCLUDED.transcript_source, scraped_items.transcript_source),
+         transcript_confidence = COALESCE(EXCLUDED.transcript_confidence, scraped_items.transcript_confidence),
          brand_relevance = EXCLUDED.brand_relevance,
          validated_at = CASE WHEN EXCLUDED.validation = 'pending' THEN NULL ELSE now() END,
          -- A re-capture keeps the vector it already has when this pass could not
@@ -2093,6 +2296,18 @@ export async function persistScrapedItems(
         item.platform,
         item.metricsAvailable,
         item.brandRelevance,
+        // Absent means the lane could not state it. Never coerced to a measured
+        // zero — that is the whole of constraint 2.
+        item.views ?? 0,
+        item.viewsAvailable ?? false,
+        item.hook ?? null,
+        // Absent stays absent all the way to the column.
+        item.engagementRate ?? null,
+        item.mediaFormat ?? null,
+        item.signalFlags ?? [],
+        item.transcript ?? null,
+        item.transcriptSource ?? null,
+        item.transcriptConfidence ?? null,
         item.postedAt,
         vector === null ? null : toSqlVector(vector),
         vector === null ? null : modelId,
@@ -2387,6 +2602,8 @@ export interface IdeaInsert {
   platformRank: number | null
   calendarSlot: CalendarSlot
   status: IdeaStatus
+  /** Defaults to 'post' when the planner does not say otherwise (ADR-007). */
+  contentFormat?: ContentFormat
   analysis: Record<string, unknown>
   isNewTrend: boolean
 }
@@ -2422,7 +2639,7 @@ export async function persistIdeas(
             SET scheduled_date = $2, scheduled_time = $3, confidence = $4,
                 priority_score = $5, platform_rank = $6, calendar_slot = $7,
                 alt_platforms = $8::jsonb, analysis = $9::jsonb,
-                is_new_trend = $10, updated_at = now()
+                is_new_trend = $10, content_format = $11, updated_at = now()
           WHERE id = $1`,
         [
           existing.id,
@@ -2435,6 +2652,7 @@ export async function persistIdeas(
           JSON.stringify(idea.altPlatforms),
           JSON.stringify(idea.analysis),
           idea.isNewTrend,
+          idea.contentFormat ?? 'post',
         ],
       )
       out.push({ id: existing.id, title: idea.title, created: false })
@@ -2446,12 +2664,12 @@ export async function persistIdeas(
          workspace_id, source_item_id, hashtag_id, title, description, source_topic,
          platform, alt_platforms, scheduled_date, scheduled_time,
          confidence, priority_score, platform_rank, calendar_slot, status,
-         analysis, is_new_trend
+         analysis, is_new_trend, content_format
        ) VALUES (
          $1, $2, $3, $4, $5, $6,
          $7, $8::jsonb, $9, $10,
          $11, $12, $13, $14, $15,
-         $16::jsonb, $17
+         $16::jsonb, $17, $18
        )
        RETURNING id`,
       [
@@ -2472,6 +2690,7 @@ export async function persistIdeas(
         idea.status,
         JSON.stringify(idea.analysis),
         idea.isNewTrend,
+        idea.contentFormat ?? 'post',
       ],
     )
     if (row) out.push({ id: row.id, title: idea.title, created: true })
@@ -2958,4 +3177,886 @@ export async function seedKeywordSchedule(
   }
 
   return { keywords: idFor.size, constants: constantRows, rotating: rotatingRows }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ORPHANED RUNS — R1.1
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Marks `running` rows left behind by a process that died as `failed`.
+ *
+ * WHY THIS EXISTS. The orchestrator is sequential and in-process. A deploy, an
+ * OOM or a crashed sidecar mid-run leaves `pipeline_runs` with a row stuck at
+ * `running` forever: the UI shows a phantom in-flight run, "is a run happening"
+ * becomes unanswerable, and the next scheduled run stacks on top of a ghost.
+ *
+ * Called once at boot, before the server accepts a request. Safe by
+ * construction: nothing in this process can legitimately be running at the
+ * moment this process starts, so every `running` row it finds is, by
+ * definition, from a previous life.
+ *
+ * It does not delete and it does not guess. The row keeps everything it had and
+ * gains a reason saying exactly what happened, which is the same standard a
+ * rejection is held to.
+ */
+export async function sweepOrphanedRuns(): Promise<{
+  pipelineRuns: number
+  agentRuns: number
+  agents: number
+}> {
+  const reason =
+    'The API restarted while this run was in flight. The run did not finish, and no partial ' +
+    'result from it was written after the restart.'
+
+  const pipelines = await query<{ id: string }>(
+    `UPDATE pipeline_runs
+        SET status = 'failed',
+            finished_at = now(),
+            summary = COALESCE(summary, '{}'::jsonb) || jsonb_build_object('error', $1::text, 'orphaned', true)
+      WHERE status = 'running'
+      RETURNING id`,
+    [reason],
+  )
+
+  const agents = await query<{ id: string }>(
+    `UPDATE agent_runs
+        SET status = 'failed',
+            finished_at = now(),
+            error = $1
+      WHERE status = 'running'
+      RETURNING id`,
+    [reason],
+  )
+
+  // `agent_state` is a live status board, not a history. A row left at
+  // 'running' makes the Orchestration screen animate an agent that is not
+  // doing anything, which is worse than an idle one because it is untrue.
+  const states = await query<{ agent_id: string }>(
+    `UPDATE agent_state
+        SET status = 'idle', current_task = 'Idle'
+      WHERE status = 'running'
+      RETURNING agent_id`,
+  )
+
+  return { pipelineRuns: pipelines.length, agentRuns: agents.length, agents: states.length }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TRACKED ACCOUNTS — the named-handle capture lane
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface TrackedAccountRow {
+  id: string
+  platform: Platform
+  handle: string
+  label: string | null
+  note: string | null
+  active: boolean
+  last_captured_at: string | null
+  added_at: string
+}
+
+export async function listTrackedAccounts(
+  workspaceId: string,
+  opts: { activeOnly?: boolean } = {},
+): Promise<TrackedAccountRow[]> {
+  return query<TrackedAccountRow>(
+    `SELECT id, platform, handle, label, note, active, last_captured_at, added_at
+       FROM tracked_accounts
+      WHERE workspace_id = $1 ${opts.activeOnly ? 'AND active' : ''}
+      ORDER BY platform, lower(handle)`,
+    [workspaceId],
+  )
+}
+
+/**
+ * Adds a handle, or reactivates one that was switched off before.
+ *
+ * Re-adding a deactivated handle must not fail and must not duplicate. The
+ * unique index is on `(workspace_id, platform, lower(handle))`, so the conflict
+ * target below is that expression and the update flips `active` back on —
+ * nothing is deleted, and nothing is stacked.
+ */
+export async function upsertTrackedAccount(
+  workspaceId: string,
+  a: { platform: Platform; handle: string; label?: string; note?: string },
+): Promise<TrackedAccountRow | null> {
+  const handle = a.handle.trim().replace(/^@+/, '')
+  if (handle === '') return null
+  return queryOne<TrackedAccountRow>(
+    `INSERT INTO tracked_accounts (workspace_id, platform, handle, label, note)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (workspace_id, platform, lower(handle)) DO UPDATE
+       SET label = COALESCE(EXCLUDED.label, tracked_accounts.label),
+           note = COALESCE(EXCLUDED.note, tracked_accounts.note),
+           active = true
+     RETURNING id, platform, handle, label, note, active, last_captured_at, added_at`,
+    [workspaceId, a.platform, handle, a.label ?? null, a.note ?? null],
+  )
+}
+
+/** Activates or deactivates. There is no delete — a capture keeps a valid parent. */
+export async function setTrackedAccountActive(
+  workspaceId: string,
+  id: string,
+  active: boolean,
+): Promise<TrackedAccountRow | null> {
+  return queryOne<TrackedAccountRow>(
+    `UPDATE tracked_accounts SET active = $3
+      WHERE workspace_id = $1 AND id = $2
+      RETURNING id, platform, handle, label, note, active, last_captured_at, added_at`,
+    [workspaceId, id, active],
+  )
+}
+
+export async function markTrackedAccountsCaptured(
+  workspaceId: string,
+  ids: string[],
+): Promise<void> {
+  if (ids.length === 0) return
+  await query(
+    `UPDATE tracked_accounts SET last_captured_at = now()
+      WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+    [workspaceId, ids],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   VOICE PROFILES AND SAMPLES — ADR-008
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface VoiceSampleRow {
+  id: string
+  profile_id: string | null
+  content_format: ContentFormat
+  body: string
+  source: string
+  label: string | null
+  captured_at: string
+}
+
+export interface VoiceProfileRow {
+  id: string
+  name: string
+  content_format: ContentFormat
+  sample_count: number
+  derived_at: string
+  vocabulary: Record<string, unknown>
+  sentence_stats: Record<string, unknown>
+  structure_pattern: Record<string, unknown>
+  cta_pattern: Record<string, unknown>
+  active: boolean
+  created_at: string
+}
+
+export async function listVoiceSamples(
+  workspaceId: string,
+  opts: { contentFormat?: ContentFormat; limit?: number } = {},
+): Promise<VoiceSampleRow[]> {
+  const params: Array<string | number> = [workspaceId]
+  let where = 'workspace_id = $1'
+  if (opts.contentFormat) {
+    params.push(opts.contentFormat)
+    where += ` AND content_format = $${params.length}`
+  }
+  params.push(opts.limit ?? 200)
+  return query<VoiceSampleRow>(
+    `SELECT id, profile_id, content_format, body, source, label, captured_at
+       FROM voice_samples WHERE ${where}
+      ORDER BY captured_at DESC LIMIT $${params.length}`,
+    params,
+  )
+}
+
+export async function countVoiceSamples(
+  workspaceId: string,
+  contentFormat: ContentFormat,
+): Promise<number> {
+  const row = await queryOne<{ n: string }>(
+    `SELECT count(*)::text AS n FROM voice_samples
+      WHERE workspace_id = $1 AND content_format = $2`,
+    [workspaceId, contentFormat],
+  )
+  return Number(row?.n ?? 0)
+}
+
+/**
+ * Stores pasted samples.
+ *
+ * De-duplicated on the body itself rather than on a supplied id, because the
+ * realistic input is a bulk paste that an operator repeats after fixing one
+ * entry — and twenty samples counted as forty would inflate `sample_count`,
+ * which is a claim about how much evidence a profile rests on.
+ */
+export async function insertVoiceSamples(
+  workspaceId: string,
+  samples: Array<{ body: string; contentFormat?: ContentFormat; source?: string; label?: string }>,
+): Promise<{ inserted: number; duplicates: number }> {
+  let inserted = 0
+  let duplicates = 0
+  for (const sample of samples) {
+    const body = sample.body.trim()
+    if (body === '') continue
+    const format = sample.contentFormat ?? 'short_form_script'
+    const existing = await queryOne<{ id: string }>(
+      `SELECT id FROM voice_samples
+        WHERE workspace_id = $1 AND content_format = $2 AND md5(body) = md5($3) LIMIT 1`,
+      [workspaceId, format, body],
+    )
+    if (existing) {
+      duplicates += 1
+      continue
+    }
+    await query(
+      `INSERT INTO voice_samples (workspace_id, content_format, body, source, label)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [workspaceId, format, body, sample.source ?? 'operator', sample.label ?? null],
+    )
+    inserted += 1
+  }
+  return { inserted, duplicates }
+}
+
+export async function listVoiceProfiles(
+  workspaceId: string,
+  opts: { contentFormat?: ContentFormat; activeOnly?: boolean } = {},
+): Promise<VoiceProfileRow[]> {
+  const params: string[] = [workspaceId]
+  let where = 'workspace_id = $1'
+  if (opts.contentFormat) {
+    params.push(opts.contentFormat)
+    where += ` AND content_format = $${params.length}`
+  }
+  if (opts.activeOnly) where += ' AND active'
+  return query<VoiceProfileRow>(
+    `SELECT id, name, content_format, sample_count, derived_at, vocabulary,
+            sentence_stats, structure_pattern, cta_pattern, active, created_at
+       FROM voice_profiles WHERE ${where}
+      ORDER BY derived_at DESC`,
+    params,
+  )
+}
+
+/**
+ * The profile a generator should read for a format, or `null`.
+ *
+ * ADR-008 in SQL: the `content_format` filter is here, in the query, rather
+ * than in a conditional at the call site. A caption skill asking for a profile
+ * would have to name `'post'` explicitly to get one, and no caption skill does.
+ */
+export async function activeVoiceProfile(
+  workspaceId: string,
+  contentFormat: ContentFormat,
+): Promise<VoiceProfileRow | null> {
+  return queryOne<VoiceProfileRow>(
+    `SELECT id, name, content_format, sample_count, derived_at, vocabulary,
+            sentence_stats, structure_pattern, cta_pattern, active, created_at
+       FROM voice_profiles
+      WHERE workspace_id = $1 AND content_format = $2 AND active
+      ORDER BY derived_at DESC LIMIT 1`,
+    [workspaceId, contentFormat],
+  )
+}
+
+/**
+ * Writes a derived profile and stamps the samples it was derived from.
+ *
+ * Two things happen together on purpose: a profile whose samples are not
+ * stamped cannot answer "what did you learn this from", and the whole point of
+ * keeping `voice_samples` is that the answer exists.
+ *
+ * The previous active profile for the same format is deactivated rather than
+ * replaced. Nothing is deleted; the old profile stays readable, and reactivating
+ * it is one UPDATE.
+ */
+export async function insertVoiceProfile(
+  workspaceId: string,
+  p: {
+    name: string
+    contentFormat: ContentFormat
+    sampleIds: string[]
+    vocabulary: Record<string, unknown>
+    sentenceStats: Record<string, unknown>
+    structurePattern: Record<string, unknown>
+    ctaPattern: Record<string, unknown>
+  },
+): Promise<VoiceProfileRow | null> {
+  await query(
+    `UPDATE voice_profiles SET active = false
+      WHERE workspace_id = $1 AND content_format = $2 AND active`,
+    [workspaceId, p.contentFormat],
+  )
+
+  const row = await queryOne<VoiceProfileRow>(
+    `INSERT INTO voice_profiles (
+       workspace_id, name, content_format, sample_count,
+       vocabulary, sentence_stats, structure_pattern, cta_pattern
+     ) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb)
+     RETURNING id, name, content_format, sample_count, derived_at, vocabulary,
+               sentence_stats, structure_pattern, cta_pattern, active, created_at`,
+    [
+      workspaceId,
+      p.name,
+      p.contentFormat,
+      p.sampleIds.length,
+      JSON.stringify(p.vocabulary),
+      JSON.stringify(p.sentenceStats),
+      JSON.stringify(p.structurePattern),
+      JSON.stringify(p.ctaPattern),
+    ],
+  )
+
+  if (row && p.sampleIds.length > 0) {
+    await query(`UPDATE voice_samples SET profile_id = $1 WHERE id = ANY($2::uuid[])`, [
+      row.id,
+      p.sampleIds,
+    ])
+  }
+
+  return row
+}
+
+export async function setVoiceProfileActive(
+  workspaceId: string,
+  id: string,
+  active: boolean,
+): Promise<VoiceProfileRow | null> {
+  if (active) {
+    // Activating one deactivates its siblings for the same format: "the profile
+    // a generator reads" has to be singular, and two active profiles would make
+    // which one won depend on row order.
+    const target = await queryOne<{ content_format: ContentFormat }>(
+      `SELECT content_format FROM voice_profiles WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, id],
+    )
+    if (target) {
+      await query(
+        `UPDATE voice_profiles SET active = false
+          WHERE workspace_id = $1 AND content_format = $2 AND id <> $3`,
+        [workspaceId, target.content_format, id],
+      )
+    }
+  }
+  return queryOne<VoiceProfileRow>(
+    `UPDATE voice_profiles SET active = $3 WHERE workspace_id = $1 AND id = $2
+     RETURNING id, name, content_format, sample_count, derived_at, vocabulary,
+               sentence_stats, structure_pattern, cta_pattern, active, created_at`,
+    [workspaceId, id, active],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   HOOK VARIANTS — ADR-007
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface HookVariantRow {
+  id: string
+  idea_id: string
+  draft_id: string | null
+  body: string
+  pattern: HookPattern
+  rank: number
+  /** NULL means "not derivable from anything stored" — never a default score. */
+  confidence: number | null
+  confidence_basis: string
+  matched_post_id: string | null
+  matched_item_id: string | null
+  source: 'live' | 'fixture'
+  model: string | null
+  fallback_reason: string | null
+  selected: boolean
+  created_at: string
+}
+
+export async function listHookVariants(
+  workspaceId: string,
+  ideaId: string,
+): Promise<HookVariantRow[]> {
+  return query<HookVariantRow>(
+    `SELECT id, idea_id, draft_id, body, pattern, rank, confidence, confidence_basis,
+            matched_post_id, matched_item_id, source, model, fallback_reason, selected, created_at
+       FROM hook_variants
+      WHERE workspace_id = $1 AND idea_id = $2
+      ORDER BY rank, created_at`,
+    [workspaceId, ideaId],
+  )
+}
+
+export async function listHookVariantsForIdeas(
+  workspaceId: string,
+  ideaIds: string[],
+): Promise<HookVariantRow[]> {
+  if (ideaIds.length === 0) return []
+  return query<HookVariantRow>(
+    `SELECT id, idea_id, draft_id, body, pattern, rank, confidence, confidence_basis,
+            matched_post_id, matched_item_id, source, model, fallback_reason, selected, created_at
+       FROM hook_variants
+      WHERE workspace_id = $1 AND idea_id = ANY($2::uuid[])
+      ORDER BY idea_id, rank`,
+    [workspaceId, ideaIds],
+  )
+}
+
+export interface HookVariantInsert {
+  body: string
+  pattern: HookPattern
+  rank: number
+  confidence: number | null
+  confidenceBasis: string
+  matchedPostId?: string | null
+  matchedItemId?: string | null
+  source: 'live' | 'fixture'
+  model?: string | null
+  fallbackReason?: string | null
+}
+
+/**
+ * Writes one generation's variant set, REPLACING the previous one.
+ *
+ * R4, idempotency beyond publishing: a retried generation must not append a
+ * second set of five. The unique index is `(idea_id, pattern)`, so the upsert
+ * below rewrites in place and a set that came back with fewer patterns than
+ * last time leaves the extras behind — which is why the stale ones are cleared
+ * explicitly rather than left to expire.
+ *
+ * A SELECTED VARIANT SURVIVES REGENERATION. If the operator has already chosen
+ * a hook, that choice is a human decision about this idea, and silently
+ * discarding it because a button was pressed twice would be exactly the kind of
+ * quiet loss the "nothing is deleted" law exists to prevent. The chosen row is
+ * left untouched and the regeneration fills the patterns around it.
+ */
+export async function replaceHookVariants(
+  workspaceId: string,
+  ideaId: string,
+  draftId: string | null,
+  variants: HookVariantInsert[],
+): Promise<HookVariantRow[]> {
+  const selected = await queryOne<{ pattern: HookPattern }>(
+    `SELECT pattern FROM hook_variants
+      WHERE workspace_id = $1 AND idea_id = $2 AND selected LIMIT 1`,
+    [workspaceId, ideaId],
+  )
+  const keep = selected?.pattern ?? null
+
+  const incoming = variants.filter((v) => v.pattern !== keep)
+  const patterns = incoming.map((v) => v.pattern)
+
+  // Clear what this generation did not produce, so the set on screen is the set
+  // that was just generated rather than a union with whatever ran before.
+  await query(
+    `DELETE FROM hook_variants
+      WHERE workspace_id = $1 AND idea_id = $2 AND NOT selected
+        AND NOT (pattern = ANY($3::text[]))`,
+    [workspaceId, ideaId, patterns],
+  )
+
+  for (const v of incoming) {
+    await query(
+      `INSERT INTO hook_variants (
+         workspace_id, idea_id, draft_id, body, pattern, rank,
+         confidence, confidence_basis, matched_post_id, matched_item_id,
+         source, model, fallback_reason
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       ON CONFLICT (idea_id, pattern) DO UPDATE SET
+         draft_id = EXCLUDED.draft_id,
+         body = EXCLUDED.body,
+         rank = EXCLUDED.rank,
+         confidence = EXCLUDED.confidence,
+         confidence_basis = EXCLUDED.confidence_basis,
+         matched_post_id = EXCLUDED.matched_post_id,
+         matched_item_id = EXCLUDED.matched_item_id,
+         source = EXCLUDED.source,
+         model = EXCLUDED.model,
+         fallback_reason = EXCLUDED.fallback_reason,
+         created_at = now()`,
+      [
+        workspaceId,
+        ideaId,
+        draftId,
+        v.body,
+        v.pattern,
+        v.rank,
+        v.confidence,
+        v.confidenceBasis,
+        v.matchedPostId ?? null,
+        v.matchedItemId ?? null,
+        v.source,
+        v.model ?? null,
+        v.fallbackReason ?? null,
+      ],
+    )
+  }
+
+  return listHookVariants(workspaceId, ideaId)
+}
+
+/**
+ * Marks the chosen variant, and unmarks the rest. Never deletes the others:
+ * "the four we did not pick" is evidence about what this account decided.
+ */
+export async function selectHookVariant(
+  workspaceId: string,
+  id: string,
+): Promise<HookVariantRow[]> {
+  const target = await queryOne<{ idea_id: string }>(
+    `SELECT idea_id FROM hook_variants WHERE workspace_id = $1 AND id = $2`,
+    [workspaceId, id],
+  )
+  if (!target) return []
+  await query(
+    `UPDATE hook_variants SET selected = false
+      WHERE workspace_id = $1 AND idea_id = $2 AND selected`,
+    [workspaceId, target.idea_id],
+  )
+  await query(`UPDATE hook_variants SET selected = true WHERE id = $1`, [id])
+  return listHookVariants(workspaceId, target.idea_id)
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TRANSCRIPTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Captured video rows that have no transcript yet.
+ *
+ * `transcript IS NULL` is the filter, and it reads exactly as it means: not
+ * transcribed. A row transcribed to an empty string is NOT returned, because
+ * "the sidecar ran and heard nothing" is a finished fact, not a pending one.
+ */
+export async function untranscribedItems(
+  workspaceId: string,
+  limit: number,
+): Promise<Array<{ id: string; url: string | null; title: string; platform: Platform | null }>> {
+  return query(
+    `SELECT id, url, title, platform
+       FROM scraped_items
+      WHERE workspace_id = $1
+        AND transcript IS NULL
+        AND url IS NOT NULL
+        AND views_available
+      ORDER BY scraped_at DESC
+      LIMIT $2`,
+    [workspaceId, limit],
+  )
+}
+
+export async function setItemTranscript(
+  id: string,
+  t: { transcript: string; source: string; confidence: number | null },
+): Promise<void> {
+  await query(
+    `UPDATE scraped_items
+        SET transcript = $2, transcript_source = $3, transcript_confidence = $4
+      WHERE id = $1`,
+    [id, t.transcript, t.source, t.confidence],
+  )
+}
+
+/**
+ * Per-keyword rank history across the last N runs, most recent first.
+ *
+ * Read from `keyword_signals`, which is what past runs actually wrote — the
+ * repeat and sustained flags are claims about history, and inferring them from
+ * anything other than the stored rows would be inventing the history.
+ *
+ * Keyed by run rather than by row, because two signals from the same run are
+ * one appearance. Without that, a run that wrote a keyword twice would count as
+ * two weeks of a trend.
+ */
+export async function keywordRankHistory(
+  workspaceId: string,
+  runs: number,
+): Promise<Map<string, Array<{ runId: string | null; rank: number | null; capturedAt: string }>>> {
+  const rows = await query<{
+    keyword_id: string
+    run_id: string | null
+    rank: number | null
+    captured_at: string
+  }>(
+    `WITH recent AS (
+       SELECT DISTINCT run_id, max(captured_at) AS at
+         FROM keyword_signals
+        WHERE workspace_id = $1 AND run_id IS NOT NULL
+        GROUP BY run_id
+        ORDER BY at DESC
+        LIMIT $2
+     )
+     SELECT ks.keyword_id, ks.run_id, ks.rank, ks.captured_at
+       FROM keyword_signals ks
+       JOIN recent r ON r.run_id = ks.run_id
+      WHERE ks.workspace_id = $1
+      ORDER BY ks.captured_at DESC`,
+    [workspaceId, runs],
+  )
+
+  const byKeyword = new Map<
+    string,
+    Array<{ runId: string | null; rank: number | null; capturedAt: string }>
+  >()
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const key = `${row.keyword_id}|${row.run_id ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const list = byKeyword.get(row.keyword_id) ?? []
+    list.push({
+      runId: row.run_id,
+      rank: row.rank === null ? null : Number(row.rank),
+      capturedAt: row.captured_at,
+    })
+    byKeyword.set(row.keyword_id, list)
+  }
+  return byKeyword
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   HOOK COMPARISON CORPUS
+
+   The stored evidence `caption.hook.score` derives a confidence from. Two
+   queries rather than one union, because the two kinds of row are different
+   claims — "a post of ours that performed" and "someone else's post that
+   performed" — and the basis sentence has to be able to say which.
+
+   Both apply the same rule the whole pipeline applies: a row with no MEASURED
+   performance is excluded, never scored as zero. A post nobody measured is not
+   a post that did badly.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface PerformanceRow {
+  id: string
+  title: string
+  text: string
+  /** The raw measured figure. Normalised by the caller, within its own corpus. */
+  raw: number
+  /** The figure in words, for the confidence basis. Never a bare number. */
+  evidence: string
+}
+
+/**
+ * Our own published posts and their latest measured metrics.
+ *
+ * The LATERAL join is the house convention: metrics append rather than
+ * overwrite, so "the latest reading" is always `ORDER BY captured_at DESC
+ * LIMIT 1` rather than a column someone updated.
+ */
+export async function publishedPostPerformance(
+  workspaceId: string,
+  since: string,
+): Promise<PerformanceRow[]> {
+  /*
+   * `post_metrics` HAS NO `engagement` COLUMN.
+   *
+   * It stores the interactions separately — `likes`, `comments`, `shares` —
+   * plus a derived `engagement_rate`. An earlier version of this query selected
+   * a single `engagement` column that has never existed, so hook scoring failed
+   * at the database with `column "engagement" does not exist` on every run.
+   *
+   * Summed here rather than added as a column: the three parts are what the
+   * platform reports, and a stored total would be a fourth number that can
+   * disagree with them.
+   *
+   * COALESCE ONLY INSIDE THE SUM, NEVER AROUND IT. A post stating 4 likes and
+   * no comment count has engagement 4; a post stating none of the three has
+   * engagement NULL, not 0. `NULLIF(..., 0)` would be wrong too — a genuine
+   * zero is a measurement — so the availability test is whether any of the
+   * three columns is non-null, which is what the GREATEST/NULL shape below asks.
+   */
+  const rows = await query<{
+    id: string
+    title: string
+    content: string
+    impressions: number | null
+    engagement: number | null
+  }>(
+    `SELECT p.id, p.title, p.content, m.impressions, m.engagement
+       FROM posts p
+       LEFT JOIN LATERAL (
+         SELECT impressions,
+                CASE
+                  WHEN likes IS NULL AND comments IS NULL AND shares IS NULL THEN NULL
+                  ELSE COALESCE(likes, 0) + COALESCE(comments, 0) + COALESCE(shares, 0)
+                END AS engagement
+           FROM post_metrics
+          WHERE post_id = p.id
+          ORDER BY captured_at DESC
+          LIMIT 1
+       ) m ON true
+      WHERE p.workspace_id = $1
+        AND p.published_at >= $2
+        AND p.withdrawn_at IS NULL
+      ORDER BY p.published_at DESC
+      LIMIT 200`,
+    [workspaceId, since],
+  )
+
+  return rows
+    // A post nobody has measured is excluded from the comparison corpus
+    // entirely. It is not a post that performed badly, and scoring a hook
+    // against it would be scoring against nothing.
+    .filter((r) => (r.impressions ?? 0) > 0 || (r.engagement ?? 0) > 0)
+    .map((r) => {
+      const impressions = Number(r.impressions ?? 0)
+      const engagement = Number(r.engagement ?? 0)
+      return {
+        id: r.id,
+        title: r.title,
+        // The first line is the hook the post actually opened with, which is
+        // the only part a hook is comparable to. Comparing against a whole post
+        // would score on subject overlap and call it hook resemblance.
+        text: (r.content.split('\n').find((l) => l.trim() !== '') ?? r.title).slice(0, 400),
+        raw: engagement > 0 ? engagement : impressions,
+        evidence:
+          engagement > 0 && impressions > 0
+            ? `${engagement.toLocaleString()} engagements on ${impressions.toLocaleString()} impressions`
+            : engagement > 0
+              ? `${engagement.toLocaleString()} engagements`
+              : `${impressions.toLocaleString()} impressions`,
+      }
+    })
+}
+
+/**
+ * Captured posts from other accounts, with the figures their lane stated.
+ *
+ * `metrics_available OR views_available` is the filter and it is doing real
+ * work: a row from the open-web lane states neither and would otherwise arrive
+ * with two structural zeros that the normaliser would read as "performed
+ * worst", quietly making every hook look better than the evidence allows.
+ */
+export async function capturedPostPerformance(
+  workspaceId: string,
+  since: string,
+): Promise<PerformanceRow[]> {
+  const rows = await query<{
+    id: string
+    title: string
+    snippet: string | null
+    engagement: number
+    views: number
+    metrics_available: boolean
+    views_available: boolean
+  }>(
+    `SELECT id, title, snippet, engagement, views, metrics_available, views_available
+       FROM scraped_items
+      WHERE workspace_id = $1
+        AND scraped_at >= $2
+        AND (metrics_available OR views_available)
+        AND validation <> 'rejected'
+      ORDER BY scraped_at DESC
+      LIMIT 400`,
+    [workspaceId, since],
+  )
+
+  return rows
+    .filter((r) => (r.views_available && r.views > 0) || (r.metrics_available && r.engagement > 0))
+    .map((r) => ({
+      id: r.id,
+      title: r.title,
+      text: r.title.slice(0, 400),
+      // Plays where stated, engagement otherwise. The two are not interchangeable
+      // as magnitudes, which is exactly why the caller normalises within corpus
+      // rather than across one.
+      raw: r.views_available && r.views > 0 ? r.views : r.engagement,
+      evidence:
+        r.views_available && r.views > 0
+          ? `${Number(r.views).toLocaleString()} plays`
+          : `${Number(r.engagement).toLocaleString()} engagements`,
+    }))
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DISCOVERED KEYWORDS — ADR-012
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Writes terms the corpus surfaced, and returns what was actually written.
+ *
+ * NEVER OVERWRITES A HUMAN'S DECISION. The conflict target is the same unique
+ * index `createKeyword` uses, and on conflict this updates only the discovery
+ * columns — the reason and the score, which are facts about the latest run.
+ * `active`, `weight` and `category` are left exactly as they are, because a
+ * keyword an operator switched off, re-weighted or re-filed must not be quietly
+ * reset by a scraper that found it again. That is the same rule the
+ * "nothing is ever deleted" law encodes, applied to a decision rather than a row.
+ *
+ * A term that already exists as `origin = 'seeded'` therefore stays seeded: it
+ * was not discovered, it was re-encountered, and relabelling it would make the
+ * origin column lie about where the keyword set came from.
+ */
+/**
+ * `discovery_run_id` is a UUID column, and a run id that is not one must not
+ * take the whole promotion down with it.
+ *
+ * Losing the link back to the run is a small loss; losing every keyword the run
+ * discovered because the id was the wrong shape is a large one. So a
+ * non-UUID id is stored as absent — the reason text still names the evidence,
+ * which is the part that makes the row explainable.
+ */
+function asUuid(value: string | undefined): string | null {
+  return value !== undefined && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : null
+}
+
+export async function insertDiscoveredKeywords(
+  workspaceId: string,
+  keywords: Array<{
+    term: string
+    category: string
+    weight: number
+    active: boolean
+    emergenceScore: number
+    reason: string
+    runId?: string
+  }>,
+): Promise<KeywordRow[]> {
+  const written: KeywordRow[] = []
+  for (const keyword of keywords) {
+    const term = keyword.term.trim()
+    if (term === '') continue
+    const row = await queryOne<KeywordRow>(
+      `INSERT INTO keywords (
+         workspace_id, term, category, weight, active,
+         origin, discovered_at, discovery_reason, discovery_run_id, emergence_score
+       ) VALUES ($1,$2,$3,$4,$5,'discovered',now(),$6,$7,$8)
+       ON CONFLICT (workspace_id, lower(term)) DO UPDATE SET
+         discovery_reason = EXCLUDED.discovery_reason,
+         emergence_score = EXCLUDED.emergence_score,
+         discovery_run_id = EXCLUDED.discovery_run_id
+       RETURNING id, term, category, weight, active, origin, discovered_at,
+                 discovery_reason, emergence_score, created_at`,
+      [
+        workspaceId,
+        term,
+        keyword.category,
+        keyword.weight,
+        keyword.active,
+        keyword.reason,
+        asUuid(keyword.runId),
+        keyword.emergenceScore,
+      ],
+    )
+    if (row) written.push(row)
+  }
+  return written
+}
+
+/**
+ * Active keywords the platform discovered for itself.
+ *
+ * Read separately from the rota because they are not ON it and never will be: a
+ * rota is a plan someone wrote, and a discovered term by definition arrived
+ * after that plan. Without this read the whole feature is inert — a promoted
+ * term would sit in the table waiting for a slot nobody is going to create.
+ */
+export async function activeDiscoveredKeywords(workspaceId: string): Promise<KeywordRow[]> {
+  return query<KeywordRow>(
+    `SELECT id, term, category, weight, active, origin, discovered_at,
+            discovery_reason, emergence_score, created_at
+       FROM keywords
+      WHERE workspace_id = $1 AND active AND origin = 'discovered'
+      ORDER BY emergence_score DESC NULLS LAST, discovered_at DESC`,
+    [workspaceId],
+  )
 }

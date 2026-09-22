@@ -73,7 +73,7 @@ Renders the plan and every result as Ethara speech in the declared persona, stre
 
 | Knob | Default | Description |
 |---|---|---|
-| `verbosity` | `normal` | Terse gives the outcome only. Normal adds the evidence. Detailed narrates every step as it runs. |
+| `verbosity` | `terse` | Terse gives the outcome only — what changed, in a sentence or two. Normal adds the evidence behind it. Detailed narrates every step as it runs. Terse is the default because the panel is read mid-task: a paragraph explaining a move that already happened is read as the assistant stalling rather than acting. |
 | `speakSummaryOnly` | `true` | Voice output reads just the first sentence. Off reads the whole narration aloud, which is rarely wanted. |
 | `tokenDelayMs` | `18` | The delay between narration tokens. Purely cosmetic — it makes Ethara read as thinking rather than pasting. |
 

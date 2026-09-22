@@ -40,6 +40,7 @@ import type {
   AssistantNotice,
   AssistantPlan,
   AssistantTurn,
+  Draft,
   KnowledgeEntry,
   LiveCapture,
   LiveLane,
@@ -226,8 +227,20 @@ const DEFAULT_SETTINGS: Settings = {
   approvalRequired: true,
   autoScheduling: true,
   autoPublish: false,
-  imageModel: 'brand-svg',
-  captionModel: 'ethara-writer',
+  /*
+   * THE PANEL DEFAULTS TO GEMINI, WITH THE FLOOR INTACT.
+   *
+   * These defaulted to the local renderer and the template writer, so the
+   * review panel opened on the weakest option and every revision was stamped
+   * "Ethara Writer" unless the operator went and changed it.
+   *
+   * The floor is unaffected: these name a PREFERENCE, and `textChain()` /
+   * the painter chain decide what actually serves. With Gemini unreachable the
+   * template writer still answers and stamps why — the degradation is labelled,
+   * not hidden, and that behaviour is unchanged.
+   */
+  imageModel: 'gcp-gemini-image',
+  captionModel: 'gcp-gemini',
   topKeywords: 5,
   topHashtagsPerKeyword: 5,
   knowledgeHashtagCount: 25,
@@ -363,10 +376,34 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
 
   ensureDraft: (ideaId: string, platform?: Platform) => Promise<void>
   regenerateDraft: (ideaId: string, platform?: Platform) => Promise<void>
+
+  /* ── Short-form: scripts, hooks and the learned voice (ADR-007) ─────────── */
+  /**
+   * Every one of these requires the API. There is no in-bundle short-form
+   * writer, and a locally invented script or a locally invented confidence
+   * would be fabricated evidence — so in standalone mode they say so and do
+   * nothing, which is the honest degradation.
+   */
+  /** Guards every short-form action: they all need the API. See the note there. */
+  requireApi: (what: string) => boolean
+  writeScript: (ideaId: string) => Promise<void>
+  generateHooks: (ideaId: string) => Promise<void>
+  selectHook: (ideaId: string, hookId: string) => Promise<void>
+  addVoiceSamples: (bodies: string[]) => Promise<void>
+  deriveVoiceProfile: () => Promise<void>
+  setVoiceProfileActive: (id: string, active: boolean) => Promise<void>
+  addTrackedAccount: (platform: Platform, handle: string, label?: string) => Promise<void>
+  setTrackedAccountActive: (id: string, active: boolean) => Promise<void>
   ensureImage: (ideaId: string, platform?: Platform) => Promise<void>
   regenerateImage: (ideaId: string, platform?: Platform, model?: string) => Promise<void>
   instructImage: (ideaId: string, instruction: string, references?: ModelReference[]) => Promise<void>
   instructAI: (ideaId: string, instruction: string, references?: ModelReference[]) => Promise<string>
+  /**
+   * Returns the caption to an earlier step on the thread. `at` is that step's
+   * stamp. Resolves to the sentence to show; the thread is not rewound — the
+   * revert is appended to it, so going forward again stays possible.
+   */
+  revertDraft: (ideaId: string, at: string) => Promise<string>
   updateDraft: (ideaId: string, body: string) => void
 
   moveIdea: (ideaId: string, date: string) => Promise<void>
@@ -526,6 +563,7 @@ function snapshotOf(state: Store): StatePayload {
     workspace: state.workspace,
     keywords: state.keywords,
     keywordSignals: state.keywordSignals,
+    trending: state.trending,
     hashtags: state.hashtags,
     topHashtags: state.topHashtags,
     scraped: state.scraped,
@@ -540,6 +578,10 @@ function snapshotOf(state: Store): StatePayload {
     analytics: state.analytics,
     reviewQueue: state.reviewQueue,
     sources: state.sources,
+    hooks: state.hooks,
+    voiceProfiles: state.voiceProfiles,
+    voiceSampleCount: state.voiceSampleCount,
+    trackedAccounts: state.trackedAccounts,
     pipeline: state.pipeline,
     platformLabels: state.platformLabels,
     assistant: {
@@ -1427,6 +1469,184 @@ export const useStore = create<Store>((set, get) => ({
     get().setAgent('caption', { status: 'completed', current_task: 'Idle' })
   },
 
+  /* ── Short-form ─────────────────────────────────────────────────────────── */
+
+  /**
+   * The one guard every action below shares.
+   *
+   * Returns false and says why when the API is unreachable. There is no local
+   * fallback on this path deliberately: a script or a hook confidence invented
+   * in the browser would be indistinguishable on screen from one the pipeline
+   * derived from stored evidence, and that is the exact failure the
+   * never-fabricate rule exists to prevent.
+   */
+  requireApi: (what: string): boolean => {
+    if (get().apiMode === 'connected') return true
+    get().toast(
+      `${what} needs the API. Nothing is written locally, because a script or a confidence invented here would look identical to one derived from stored evidence.`,
+      'warn',
+    )
+    return false
+  },
+
+  writeScript: async (ideaId) => {
+    if (!get().requireApi('Writing a script')) return
+    const idea = get().ideas.find((i) => i.id === ideaId)
+    if (!idea) return
+
+    get().setAgent('caption', { status: 'running', current_task: 'Writing the script' })
+    try {
+      const result = await api.writeScript(ideaId)
+      const draft: Draft = {
+        body: result.script,
+        content_format: 'short_form_script',
+        revision: (idea.draft?.revision ?? 0) + 1,
+        model: result.model,
+        source: result.source === 'live' ? 'live' : 'fixture',
+      }
+      set({
+        drafts: { ...get().drafts, [`${ideaId}|${idea.platform}`]: draft },
+        ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, draft } : i)),
+      })
+      // Reconcile by refetching rather than by trusting this response: law 8
+      // says state is server-truth, and the hooks were written by the same call.
+      await get().refreshState()
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The script could not be written.', 'warn')
+    } finally {
+      get().setAgent('caption', { status: 'completed', current_task: 'Idle' })
+    }
+  },
+
+  generateHooks: async (ideaId) => {
+    if (!get().requireApi('Generating hooks')) return
+    get().setAgent('caption', { status: 'running', current_task: 'Writing hooks' })
+    try {
+      const result = await api.generateHooks(ideaId)
+      if (result.note) get().toast(result.note, 'warn')
+      set({
+        hooks: { ...get().hooks, [ideaId]: result.hooks },
+        ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, hooks: result.hooks } : i)),
+      })
+      const unscored = result.hooks.filter((h) => h.confidence === null).length
+      if (unscored > 0) {
+        // Said out loud rather than left to be noticed. An unscored hook is a
+        // finding — "nothing stored resembles this" — not a rendering gap.
+        get().toast(
+          `${unscored} of ${result.hooks.length} hook(s) carry no confidence: no stored post resembled them closely enough to say anything. The reason is on each one.`,
+          'neutral',
+        )
+      }
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The hooks could not be written.', 'warn')
+    } finally {
+      get().setAgent('caption', { status: 'completed', current_task: 'Idle' })
+    }
+  },
+
+  selectHook: async (ideaId, hookId) => {
+    if (!get().requireApi('Selecting a hook')) return
+    try {
+      const result = await api.selectHook(hookId)
+      set({
+        hooks: { ...get().hooks, [ideaId]: result.hooks },
+        ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, hooks: result.hooks } : i)),
+      })
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'That hook could not be selected.', 'warn')
+    }
+  },
+
+  addVoiceSamples: async (bodies) => {
+    if (!get().requireApi('Storing voice samples')) return
+    const samples = bodies.map((body) => ({ body })).filter((s) => s.body.trim().length >= 20)
+    if (samples.length === 0) {
+      get().toast('Nothing was stored: every sample was shorter than 20 characters.', 'warn')
+      return
+    }
+    try {
+      const result = await api.addVoiceSamples(samples)
+      set({ voiceSampleCount: result.total })
+      get().toast(
+        `${result.inserted} sample(s) stored` +
+          (result.duplicates > 0
+            ? `, ${result.duplicates} already present and not counted twice`
+            : '') +
+          ` · ${result.total} in total.`,
+        'good',
+      )
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The samples could not be stored.', 'warn')
+    }
+  },
+
+  deriveVoiceProfile: async () => {
+    if (!get().requireApi('Deriving a voice profile')) return
+    try {
+      const result = await api.deriveVoiceProfile()
+      set({ voiceProfiles: [result.profile, ...get().voiceProfiles.map((p) => ({ ...p, active: false }))] })
+      get().toast(
+        `Voice profile derived from ${result.profile.sample_count} sample(s). It governs short-form scripts only.`,
+        'good',
+      )
+    } catch (error) {
+      // The 422 body carries the count it has. Surfaced verbatim, because
+      // "18 of 20" is more useful than "could not derive".
+      get().toast(
+        error instanceof Error ? error.message : 'No profile was derived.',
+        'warn',
+      )
+    }
+  },
+
+  setVoiceProfileActive: async (id, active) => {
+    if (!get().requireApi('Changing a voice profile')) return
+    try {
+      const result = await api.setVoiceProfileActive(id, active)
+      set({
+        voiceProfiles: get().voiceProfiles.map((p) =>
+          p.id === result.profile.id
+            ? result.profile
+            : // Activating one deactivates its siblings for the same format, so
+              // the local copy has to follow or two would render as active.
+              active && p.content_format === result.profile.content_format
+              ? { ...p, active: false }
+              : p,
+        ),
+      })
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'That profile could not be changed.', 'warn')
+    }
+  },
+
+  addTrackedAccount: async (platform, handle, label) => {
+    if (!get().requireApi('Tracking an account')) return
+    try {
+      const result = await api.addTrackedAccount({
+        platform,
+        handle,
+        ...(label === undefined ? {} : { label }),
+      })
+      const others = get().trackedAccounts.filter((a) => a.id !== result.account.id)
+      set({ trackedAccounts: [...others, result.account] })
+      get().toast(`@${result.account.handle} is now tracked on ${platform}.`, 'good')
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'That account could not be tracked.', 'warn')
+    }
+  },
+
+  setTrackedAccountActive: async (id, active) => {
+    if (!get().requireApi('Changing a tracked account')) return
+    try {
+      const result = await api.setTrackedAccountActive(id, active)
+      set({
+        trackedAccounts: get().trackedAccounts.map((a) => (a.id === id ? result.account : a)),
+      })
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'That account could not be changed.', 'warn')
+    }
+  },
+
   ensureImage: async (ideaId, platform) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
@@ -1496,6 +1716,8 @@ export const useStore = create<Store>((set, get) => ({
           ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, media } : i)),
         })
         get().toast('Creative re-rendered.', 'good')
+        // Same reason as the caption path: the turn is on the stored thread now.
+        void get().refreshState()
         return
       } catch (error) {
         get().toast(error instanceof Error ? error.message : 'The re-render failed.', 'warn')
@@ -1536,6 +1758,10 @@ export const useStore = create<Store>((set, get) => ({
         })
         get().setAgent('review', { status: 'completed', current_task: 'Idle' })
         if (result.applied === false) get().toast('The caption was not changed.', 'warn')
+        // The server appended this turn to the post's thread. Refetching is what
+        // makes it survive closing the panel — law 8, the client reconciles from
+        // `/state` rather than keeping its own copy of what happened.
+        void get().refreshState()
         return result.note
       } catch (error) {
         get().setAgent('review', { status: 'completed', current_task: 'Idle' })
@@ -1569,6 +1795,39 @@ export const useStore = create<Store>((set, get) => ({
         : ` ${references.length} attached reference(s) were not read — the local template writer cannot use them. Start the API to apply them.`
 
     return `${result.note}${finding}${ignored}`
+  },
+
+  /**
+   * Returns the caption to an earlier step on the thread.
+   *
+   * The thread is server-truth, so this goes to the server and then refetches
+   * rather than editing the local copy: the revert is a new entry on the
+   * history, and inventing that entry on the client would show a step the
+   * database does not have.
+   *
+   * Disconnected there is no stored thread to return to — the panel's history
+   * is whatever this session built — so it says so rather than pretending.
+   */
+  revertDraft: async (ideaId, at) => {
+    const idea = get().ideas.find((i) => i.id === ideaId)
+    if (!idea) return 'That idea no longer exists.'
+
+    if (get().apiMode !== 'connected') {
+      return 'Reverting needs the API — the thread on this screen is not stored yet. Start the API to keep history across sessions.'
+    }
+
+    try {
+      const result = await api.revert(ideaId, { platform: idea.platform, at })
+      set({
+        drafts: { ...get().drafts, [`${ideaId}|${idea.platform}`]: result.draft },
+        ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, draft: result.draft } : i)),
+      })
+      // The thread gained an entry. Refetching is how the client learns it.
+      await get().refreshState()
+      return result.note
+    } catch (error) {
+      return error instanceof Error ? error.message : 'That step could not be restored.'
+    }
   },
 
   updateDraft: (ideaId, body) => {
@@ -2135,6 +2394,7 @@ export const useStore = create<Store>((set, get) => ({
           : typeof d.via === 'string'
             ? d.via
             : 'Source not named',
+      url: typeof d.url === 'string' && d.url !== '' ? d.url : null,
       relevance,
       held: null,
     }
@@ -2208,6 +2468,9 @@ export const useStore = create<Store>((set, get) => ({
             // restate which source captured it. Saying so is honest; naming a
             // source would be a guess.
             source: typeof d.source === 'string' ? d.source : 'Source not named',
+            // Same reason as `source` above: the validation event does not
+            // restate the page, and inventing one would point at the wrong page.
+            url: typeof d.url === 'string' && d.url !== '' ? d.url : null,
             relevance: null,
             held,
           },

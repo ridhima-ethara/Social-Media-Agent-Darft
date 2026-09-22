@@ -22,8 +22,9 @@ import {
   type ImageConcept,
   type ImageModelId,
 } from '../../../../shared/image-models'
-import { listMediaForIdeas, listIdeas } from '../../db/repo'
+import { listKnowledge, listMediaForIdeas, listIdeas } from '../../db/repo'
 import { clampChars, clampWords, headlineFrom, PLATFORM_LABEL, similarity } from '../corpus'
+import { licensedAnnotations } from './annotations'
 import { registerSkill } from '../runtime'
 import { availableImageModels, renderCreative,
   preferredImageModel,
@@ -86,7 +87,45 @@ registerSkill<ImagePayload>('generation.image.reference', async (payload, ctx) =
 
   ctx.log(`${references.length} recent asset(s) considered as reference`)
 
-  return { references }
+  /*
+   * THE LABELS THAT MAKE THE IMAGE INFORMATIVE — visual-reference rule 5.
+   *
+   * Everything above decides what the creative should LOOK like. This decides
+   * what it can SAY: the named parts of the mechanism, each licensed by the
+   * caption or a Knowledge Base entry. Without it the agent produces artwork
+   * with a sentence over it, which is decoration, not a diagram.
+   */
+  if (!ctx.bool('annotateStructure', true)) {
+    ctx.log('Structure labelling is off — the creative will render unlabelled')
+    return { references, annotations: [], labelCitations: [] }
+  }
+
+  const knowledge = await listKnowledge(ctx.workspaceId, {
+    activeOnly: true,
+    limit: ctx.num('knowledgeLookback', 24),
+  })
+
+  const licensed = licensedAnnotations({
+    caption: payload.caption,
+    title: payload.title,
+    sourceTopic: payload.sourceTopic,
+    knowledge,
+    minLabels: ctx.num('minLabels', 3),
+    maxLabels: ctx.num('maxLabels', 6),
+  })
+
+  ctx.log(licensed.note)
+  for (const dropped of licensed.unsupportedLabels) {
+    // Rule 5: dropped candidates are reported, never silently discarded.
+    ctx.emit('activity', `Label not drawn — ${dropped}`, { status: 'warn' })
+  }
+
+  return {
+    references,
+    annotations: licensed.annotations,
+    labelCitations: licensed.annotations.map((a) => ({ label: a.label, citation: a.citation })),
+    unsupportedLabels: licensed.unsupportedLabels,
+  }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -98,6 +137,7 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
   const headlineMaxWords = ctx.num('headlineMaxWords', 12)
   const safeMargin = ctx.num('safeMargin', 64)
   const useReferenceImages = ctx.bool('useReferenceImages', true)
+  const showHeadline = ctx.bool('showHeadline', false)
 
   const canvas = canvasFor(payload.platform)
 
@@ -123,13 +163,19 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
   return {
     layout,
     safeMargin,
+    showHeadline,
     headline,
     kicker: payload.sourceTopic.toUpperCase(),
     footer: `${BRAND.wordmark} · ${PLATFORM_LABEL[payload.platform]}`,
     width: canvas.width,
     height: canvas.height,
     canvas: canvasKey(payload.platform),
-    backgroundPrompt: backgroundPromptFor(concept, payload.sourceTopic, styleClause),
+    backgroundPrompt: backgroundPromptFor(
+      concept,
+      payload.sourceTopic,
+      styleClause,
+      (payload.annotations ?? []).length > 0,
+    ),
   }
 })
 
@@ -138,14 +184,62 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
  * brand copy is never sent to a diffusion model. An optional `styleClause` from
  * the brand reference images is appended when configured.
  */
-function backgroundPromptFor(concept: ImageConcept, topic: string, styleClause = ''): string {
+/**
+ * THE ANNOTATION COLUMN HAS TO BE EMPTY BEFORE THE LABELS ARRIVE.
+ *
+ * The brand layer draws its callouts down the right of the canvas, and it draws
+ * them last — so whatever the painter put there is simply underneath them. The
+ * first annotated renders came back with six labels lying across a monolith
+ * that the painter had, reasonably, centred on the right.
+ *
+ * The painter cannot be told about the labels (no lettering ever reaches it),
+ * but it can be told where the composition must not go. Asking for the hero
+ * left of centre with the right third held as negative space reserves the
+ * column without the painter knowing why — and produces a better composition
+ * anyway, because every house reference seats its hero off-centre.
+ */
+const ANNOTATION_SPACE =
+  'Compose with the subject to the right of centre and keep the left third of the frame as ' +
+  'empty negative space — dark, uncluttered, no part of the subject entering it.'
+
+function backgroundPromptFor(
+  concept: ImageConcept,
+  topic: string,
+  styleClause = '',
+  reserveAnnotationSpace = false,
+): string {
+  /*
+   * COMPOSITIONS, NOT WASHES — visual-reference rule 14.
+   *
+   * These were one-line textures: "a deep violet gradient field", "abstract
+   * vertical luminous bars". A painter given a texture returns a texture, and a
+   * texture with a headline set over it is exactly the flat, generic creative
+   * this agent was producing. None of the house references are textures; each
+   * is a structure a reader could describe back.
+   *
+   * So each concept now names a hero object and its arrangement. This is the
+   * floor used when no manifest entry governs the concept — the manifest still
+   * outranks it, because those clauses were written from finished work.
+   */
   const base: Record<ImageConcept, string> = {
-    'gradient-field': 'a deep violet gradient field, soft volumetric light, no text, no logos, abstract',
-    'signal-lines': 'thin luminous signal lines rising across a dark violet field, no text, abstract',
-    'reward-surface': 'a smooth three-dimensional optimisation surface in violet and magenta, no text, abstract',
-    'agent-graph': 'a sparse network of connected nodes glowing violet on near-black, no text, abstract',
-    'benchmark-bars': 'abstract vertical luminous bars of varying height in violet tones, no text',
-    'data-lattice': 'a fine three-dimensional lattice of violet points receding into darkness, no text',
+    'gradient-field':
+      'a single luminous violet volume suspended in near-black space, its internal structure ' +
+      'visible as fine gradient banding, one directional light source, deep negative space',
+    'signal-lines':
+      'a vertical spine of glowing violet ring-nodes on pure black, fine signal lines branching ' +
+      'outward from each node and fading into the dark, one clear direction of travel',
+    'reward-surface':
+      'a three-dimensional optimisation surface rendered as a violet wireframe mesh over black, ' +
+      'peaks and basins clearly readable, a single marker resting in one basin',
+    'agent-graph':
+      'a sparse directed network of glowing violet nodes joined by thin white connector lines on ' +
+      'near-black, one node brighter than the rest, arrangement clearly deliberate rather than scattered',
+    'benchmark-bars':
+      'a row of luminous violet volumetric bars of clearly differing heights standing on a dark ' +
+      'reflective plane, isometric view, generous negative space above them',
+    'data-lattice':
+      'a fine three-dimensional lattice of violet points receding into darkness, one traced path ' +
+      'picked out in white running through it, stark and high-contrast',
   }
 
   /*
@@ -164,10 +258,20 @@ function backgroundPromptFor(concept: ImageConcept, topic: string, styleClause =
    * editorial framing still travel, because those are not in conflict.
    */
   if (styleClause !== '') {
-    return `${styleClause} Editorial, high contrast, cinematic. Subject matter: ${topic}.`
+    return (
+      `${styleClause} Editorial, high contrast, cinematic. ` +
+      (reserveAnnotationSpace ? `${ANNOTATION_SPACE} ` : '') +
+      // The subject is named last and framed as what the structure depicts, so
+      // the topic shapes the composition rather than being decoration on it.
+      `The composition should read as a visual argument about: ${topic}.`
+    )
   }
 
-  return `${base[concept]}, editorial, high contrast, cinematic, subject matter: ${topic}`
+  return (
+    `${base[concept]}, editorial, high contrast, cinematic` +
+    (reserveAnnotationSpace ? `. ${ANNOTATION_SPACE}` : '') +
+    `. Subject matter: ${topic}`
+  )
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -224,6 +328,8 @@ registerSkill<ImagePayload>('generation.image.render', async (payload, ctx) => {
     showLogomark: payload.showLogomark ?? true,
     safeMargin: payload.safeMargin ?? 64,
     headlineMaxWords: 12,
+    annotations: payload.annotations ?? [],
+    showHeadline: payload.showHeadline ?? false,
     timeoutMs,
     retries,
     compositeBrandLayer,

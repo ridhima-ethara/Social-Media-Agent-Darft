@@ -94,96 +94,127 @@ function Tile({
   )
 }
 
+
 /* ═══════════════════════════════════════════════════════════════════════════
-   AGAINST THIS ACCOUNT'S OWN MEAN
+   THE BEST POST — the one finding this screen exists to make
    ───────────────────────────────────────────────────────────────────────────
-   The section that turns three bars into a finding. Each post is a row: what
-   it was, what it scored, and how far that sits from the mean of every post
-   that reported a rate. The bar is drawn against the strongest post, so the
-   comparison is between posts rather than against an invented ceiling.
+   Four KPI tiles say what the account did in total. They do not say which post
+   did it, and that is the question an operator actually arrives with. So the
+   strongest reported post gets the one card that is allowed to be loud: a lit
+   gradient edge, its own metrics broken out, and its distance from the account
+   mean stated rather than implied.
+
+   It replaces a per-post bar list that ranked all three posts against the mean.
+   Ranking three rows is not a finding — naming the leader and what it scored is.
+
+   Every colour is a token. ADR-004, and `verify.ts` fails the build on a hex.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-function Baseline({ posts, avgRate }: { posts: PostAnalytic[]; avgRate: number | null }) {
-  const rated = posts.filter((p) => p.rate !== null)
-  if (rated.length === 0 || avgRate === null) {
-    return (
-      <section className="card p-4">
-        <h3 className="display text-sm">Against your own mean</h3>
-        <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-3">
-          No post has reported an engagement rate yet, so there is no mean to measure against. This
-          appears as soon as the platform reports one.
-        </p>
-      </section>
-    )
-  }
+function Metric({ label, value, tint }: { label: string; value: string; tint?: string }) {
+  return (
+    <div
+      className="rounded-[12px] px-3.5 py-3"
+      style={{
+        background: 'color-mix(in srgb, var(--color-ink-3) 5%, transparent)',
+        border: '1px solid color-mix(in srgb, var(--color-ink-3) 10%, transparent)',
+      }}
+    >
+      <span className="mono block text-[9px] uppercase tracking-[0.12em] text-ink-3">{label}</span>
+      <span
+        className="tabular mt-1 block text-[20px] font-semibold leading-none tracking-[-0.02em]"
+        style={{ color: tint ?? 'var(--color-ink)' }}
+      >
+        {value}
+      </span>
+    </div>
+  )
+}
 
-  const peak = Math.max(...rated.map((p) => Number(p.rate)))
-  const ranked = [...rated].sort((a, b) => Number(b.rate) - Number(a.rate))
-  const above = ranked.filter((p) => Number(p.delta) > 0).length
+function BestPost({
+  post,
+  avgRate,
+  platform,
+}: {
+  post: PostAnalytic
+  avgRate: number | null
+  platform: Platform
+}) {
+  const rate = post.rate === null ? null : Number(post.rate)
+  const ahead = post.delta !== null && post.delta > 0
 
   return (
-    <section className="card p-4">
-      <header className="mb-3">
-        <h3 className="display text-sm">Against your own mean</h3>
-        <p className="mt-0.5 text-[11px] text-ink-3">
-          Mean engagement rate {avgRate.toFixed(2)}% across {rated.length} reported post
-          {rated.length === 1 ? '' : 's'} · {above} above it
-        </p>
-      </header>
+    /* The gradient lives on a 1px wrapper rather than a border, because a
+       gradient border cannot follow a radius cleanly in CSS. */
+    <section
+      className="rounded-[17px] p-px"
+      style={{
+        background:
+          'linear-gradient(160deg, color-mix(in srgb, var(--color-magenta) 50%, transparent), ' +
+          'color-mix(in srgb, var(--color-accent) 35%, transparent) 50%, ' +
+          'color-mix(in srgb, var(--color-ink-3) 12%, transparent))',
+      }}
+    >
+      <div className="relative flex flex-wrap items-center gap-6 overflow-hidden rounded-[16px] bg-surface p-5">
+        {/* A soft bloom behind the eyebrow, so the card reads as lit rather than
+            merely outlined. Decorative, and hidden from assistive tech. */}
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute -left-16 -top-16 h-60 w-60 rounded-full"
+          style={{
+            background:
+              'radial-gradient(circle, color-mix(in srgb, var(--color-magenta) 12%, transparent), transparent 70%)',
+          }}
+        />
 
-      <ul className="flex flex-col gap-2.5">
-        {ranked.map((post) => {
-          const rate = Number(post.rate)
-          const delta = post.delta
-          const ahead = delta !== null && delta > 0
-          return (
-            <li key={post.id} className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-2">
-                <PlatformIcon platform={post.platform} size={11} />
-                <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2" title={post.title}>
-                  {post.title}
-                </span>
-                <span className="mono shrink-0 text-[9.5px] text-ink-3">{post.label}</span>
-                <span className="tabular w-[52px] shrink-0 text-right text-[12px] font-semibold text-ink">
-                  {rate.toFixed(2)}%
-                </span>
-                {delta === null ? null : (
-                  <span
-                    className="tabular w-[58px] shrink-0 text-right text-[10.5px] font-medium"
-                    style={{ color: ahead ? 'var(--color-good-ink)' : 'var(--color-serious)' }}
-                    title={`${Math.abs(delta).toFixed(2)} points ${ahead ? 'above' : 'below'} the mean`}
-                  >
-                    {ahead ? '+' : '−'}
-                    {Math.abs(delta).toFixed(2)}
-                  </span>
-                )}
-              </div>
+        <div className="relative min-w-[260px] flex-[1.4]">
+          <div className="flex items-center gap-2">
+            <span
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{ background: 'linear-gradient(135deg, var(--color-magenta), var(--color-accent))' }}
+            />
+            <span className="mono text-[10px] uppercase tracking-[0.16em] text-magenta-ink">
+              Best reported post
+            </span>
+          </div>
 
-              {/* The bar runs to the strongest post; the notch is the mean. */}
-              <div className="relative h-[6px] overflow-hidden rounded-full bg-surface-3">
-                <div
-                  className="h-full rounded-full"
-                  style={{
-                    width: `${peak > 0 ? (rate / peak) * 100 : 0}%`,
-                    background: PLATFORM_TOKEN[post.platform],
-                    animation: 'eth-seg 620ms cubic-bezier(0.16, 1, 0.3, 1) both',
-                  }}
-                />
-                <span
-                  aria-hidden="true"
-                  title="Your mean"
-                  className="absolute inset-y-0 w-px bg-ink-3"
-                  style={{ left: `${peak > 0 ? (avgRate / peak) * 100 : 0}%` }}
-                />
-              </div>
-            </li>
-          )
-        })}
-      </ul>
+          <h3 className="mt-3 text-[18px] font-semibold leading-[1.35] tracking-[-0.005em] text-ink">
+            {post.title}
+          </h3>
 
-      <p className="mono mt-3 border-t border-line pt-2.5 text-[9px] uppercase tracking-[0.1em] text-ink-3">
-        the hairline is your mean · posts with no reported rate are not listed
-      </p>
+          <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
+            <span className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-3">
+              <PlatformIcon platform={platform} size={11} />
+              {PLATFORM_LABEL[platform]} · {post.label}
+            </span>
+            {post.delta === null ? null : (
+              <span
+                className="mono rounded-full px-2.5 py-[3px] text-[10.5px] font-semibold"
+                style={{
+                  color: ahead ? 'var(--color-good-ink)' : 'var(--color-serious)',
+                  background: `color-mix(in srgb, ${ahead ? 'var(--color-good-ink)' : 'var(--color-serious)'} 8%, transparent)`,
+                  border: `1px solid color-mix(in srgb, ${ahead ? 'var(--color-good-ink)' : 'var(--color-serious)'} 30%, transparent)`,
+                }}
+                title={`${Math.abs(post.delta).toFixed(2)} points ${ahead ? 'above' : 'below'} the account mean${avgRate === null ? '' : ` of ${avgRate.toFixed(2)}%`}`}
+              >
+                {ahead ? '+' : '−'}
+                {Math.abs(post.delta).toFixed(2)} {ahead ? 'above' : 'below'} account mean
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* The same four numbers the tiles total, for this post alone. */}
+        <div className="relative grid min-w-[280px] flex-1 grid-cols-2 gap-2.5 sm:grid-cols-4">
+          <Metric
+            label="Engagement"
+            value={rate === null ? '—' : `${rate.toFixed(2)}%`}
+            tint={ahead ? 'var(--color-good-ink)' : undefined}
+          />
+          <Metric label="Reach" value={post.reach === null ? '—' : fmt(post.reach)} />
+          <Metric label="Impressions" value={post.impressions === null ? '—' : fmt(post.impressions)} />
+          <Metric label="Interactions" value={post.interactions === null ? '—' : fmt(post.interactions)} />
+        </div>
+      </div>
     </section>
   )
 }
@@ -216,6 +247,32 @@ export default function PublishedGraphs({
 
   /* Composition needs at least two posts to be a comparison rather than a fact. */
   const stacked = charts.interactions.length > 1
+
+  /*
+   * The strongest post that actually reported a rate.
+   *
+   * Null when nothing has — the card is then omitted rather than rendered with
+   * an em dash where the finding should be. An unmeasured post is not a weak
+   * post, and ranking it as one would be the reading this screen exists to avoid.
+   */
+  const best =
+    charts.posts
+      .filter((p) => p.rate !== null)
+      .sort((a, b) => Number(b.rate) - Number(a.rate))[0] ?? null
+
+  /*
+   * The movement across the reported rates, first to last.
+   *
+   * Stated only when there are at least two, because one reading has nothing to
+   * move from. `engagement` is already in publication order.
+   */
+  const firstRate = charts.engagement.length > 1 ? Number(charts.engagement[0]?.Rate ?? NaN) : NaN
+  const lastRate =
+    charts.engagement.length > 1
+      ? Number(charts.engagement[charts.engagement.length - 1]?.Rate ?? NaN)
+      : NaN
+  const drift =
+    Number.isFinite(firstRate) && Number.isFinite(lastRate) ? lastRate - firstRate : null
 
   return (
     <div className="flex flex-col gap-4">
@@ -253,7 +310,9 @@ export default function PublishedGraphs({
       </div>
 
       {/* ── the finding ─────────────────────────────────────────────────── */}
-      <Baseline posts={charts.posts} avgRate={charts.avgRate} />
+      {best === null ? null : (
+        <BestPost post={best} avgRate={charts.avgRate} platform={platform} />
+      )}
 
       {/* ── the readings behind it ──────────────────────────────────────── */}
       <div className="grid grid-cols-1 gap-4 2xl:grid-cols-2">
@@ -297,6 +356,40 @@ export default function PublishedGraphs({
           title="Engagement rate over time"
           subtitle={chartNote(charts.engagement.length, charts.missingEngagement, 'an engagement rate')}
           height={220}
+          /*
+            The two numbers a reader would otherwise have to compute off the
+            chart: what the mean is, and which way the series has moved. Stated
+            as pills in the header so the line does not have to be read twice.
+          */
+          actions={
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {charts.avgRate === null ? null : (
+                <span
+                  className="mono rounded-full px-2.5 py-1 text-[10.5px] font-semibold"
+                  style={{
+                    color: 'var(--color-magenta-ink)',
+                    background: 'color-mix(in srgb, var(--color-magenta) 8%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--color-magenta) 30%, transparent)',
+                  }}
+                >
+                  MEAN {charts.avgRate.toFixed(2)}%
+                </span>
+              )}
+              {drift === null || Math.abs(drift) < 0.005 ? null : (
+                <span
+                  className="mono rounded-full px-2.5 py-1 text-[10.5px] font-semibold"
+                  style={{
+                    color: drift > 0 ? 'var(--color-good-ink)' : 'var(--color-serious)',
+                    background: `color-mix(in srgb, ${drift > 0 ? 'var(--color-good-ink)' : 'var(--color-serious)'} 8%, transparent)`,
+                    border: `1px solid color-mix(in srgb, ${drift > 0 ? 'var(--color-good-ink)' : 'var(--color-serious)'} 30%, transparent)`,
+                  }}
+                  title={`Between the first and last reported rate on this channel`}
+                >
+                  {drift > 0 ? '▲' : '▼'} {Math.abs(drift).toFixed(2)} pts
+                </span>
+              )}
+            </div>
+          }
         >
           <TrendLine
             data={charts.engagement}

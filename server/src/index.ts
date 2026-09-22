@@ -14,10 +14,12 @@ import { REGISTRY_SUMMARY } from '../../shared/agent-registry'
 import { TOOL_SUMMARY } from '../../shared/tool-registry'
 import { config, describeConfiguration } from './config'
 import { assertDb, closePool } from './db/pool'
+import { sweepOrphanedRuns } from './db/repo'
 import { describeDrift, findSchemaDrift } from './db/schema-drift'
 import { createApiRouter } from './api'
 import { auditSkillCoverage } from './agents/skills/_register'
 import { auditToolCoverage } from './assistant/tools/index'
+import { describeWhisper, whisperTranscribe } from './integrations/whisper'
 import { scheduledJobs, startScheduler, stopScheduler } from './scheduler'
 
 const DIM = '\u001B[2m'
@@ -45,6 +47,27 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
+  /* ── 1b · Runs this process cannot possibly be running (R1.1) ──────────── */
+  /*
+   * The orchestrator is sequential and in-process, and the scheduler is
+   * node-cron. A deploy, an OOM or a crashed sidecar mid-run leaves
+   * `pipeline_runs` with a row stuck at `running` forever: the console shows a
+   * phantom in-flight run, "is anything running" stops being answerable, and
+   * the Apify credit that run spent bought nothing anybody can see.
+   *
+   * Safe by construction: nothing in THIS process can be running at the moment
+   * this process starts, so every `running` row found here is from a previous
+   * life. It is marked failed with a stated reason and is never deleted.
+   */
+  const orphans = await sweepOrphanedRuns()
+  if (orphans.pipelineRuns > 0 || orphans.agentRuns > 0 || orphans.agents > 0) {
+    console.log(
+      `  ${GREEN}✓${RESET} recovery ${orphans.pipelineRuns} pipeline run(s), ${orphans.agentRuns} agent run(s) ` +
+        `and ${orphans.agents} agent state(s) were left mid-flight by a previous process and have been ` +
+        `marked failed with the reason recorded`,
+    )
+  }
+
   /* ── 2 · Coverage audits ───────────────────────────────────────────────── */
   const skills = auditSkillCoverage()
   console.log(
@@ -61,6 +84,20 @@ async function main(): Promise<void> {
   )
 
   /* ── 3 · Configuration, stated out loud ────────────────────────────────── */
+  /*
+   * R7: the boot sweep already refuses to start on an unreachable database,
+   * schema drift, a missing critical handler or an unhandled tool. A new
+   * adapter joins it here rather than being discovered from a failed run.
+   * Whisper is reported, never required — blank is a supported configuration
+   * and the run simply says what it could not transcribe.
+   */
+  const whisperReason = whisperTranscribe.unavailableReason()
+  console.log(
+    whisperReason === ''
+      ? `  ${GREEN}✓${RESET} whisper  ${describeWhisper()}`
+      : `  ${DIM}·${RESET} whisper  off — ${whisperReason.split('\n')[0]}`,
+  )
+
   for (const line of describeConfiguration()) {
     console.log(`  ${DIM}·${RESET} ${line}`)
   }
