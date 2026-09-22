@@ -22,7 +22,7 @@ import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { BRAND_CORPUS_TAG, BRAND_DOMAIN_TAG } from '../../../../shared/brand-voice'
-import { config } from '../../config'
+import { agentPython } from '../../integrations/agent-tier'
 import { insertKnowledgeEntry, listKnowledge, setKnowledgeActive } from '../../db/repo'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -71,7 +71,16 @@ function folderTags(file: string): string[] {
 }
 
 function extract(files: string[]): ExtractedFile[] {
-  const python = config.crawl4ai.python
+  /*
+   * The agent tier's interpreter, not a scraper's.
+   *
+   * This read `CRAWL4AI_PYTHON` because that happened to be the venv with the
+   * PDF libraries in it. Reading a PDF is not scraping, and the crawler is gone,
+   * so it now asks the one resolver that owns the Python boundary — which also
+   * derives the venv from the repo root when no override is set, so this stops
+   * needing a key at all in the ordinary case.
+   */
+  const python = agentPython()
   const needsPython = files.some((f) => extname(f).toLowerCase() === '.pdf')
 
   if (needsPython && python === '') {

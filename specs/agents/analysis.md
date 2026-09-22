@@ -35,6 +35,8 @@ Scores how well an opportunity sits with what Ethara can credibly say, given the
 |---|---|---|
 | `minBrandFit` | `45` | Opportunities below this are not carried into the calendar. Raising it makes the account narrower and more consistent. |
 | `requireDomainMatch` | `false` | On, an opportunity must map to one of the six declared research domains. Off allows adjacent commentary. |
+| `dropNonEditorial` | `true` | The corpus is other accounts’ posts, so it contains job ads, certification announcements, personal product reviews and event promotion. Those mention our vocabulary and therefore pass a keyword brand-fit score, which is how “Hire a generative AI engineer” became a calendar suggestion. On, a subject that is an announcement about a person or company rather than a finding about the world is rejected before it is scored, and the reason is named. Off lets them through. |
+| `titleMergeThreshold` | `70` | Two formed ideas whose titles are at least this similar are one idea, and the weaker is folded away rather than ranked. Clustering merges on the scraped post text, so two posts making the same point in different words survive as two clusters and produce two near-identical suggestions. Lower merges more aggressively; higher lets close variants both stand. |
 
 ### `analysis.engagement.predict`
 

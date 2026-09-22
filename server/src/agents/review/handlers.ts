@@ -74,7 +74,27 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
         // the new channel rather than relabelled.
         platformVoiceInstruction(payload.platform),
         'Apply the operator’s instruction exactly. Do not add a call to action. Do not add emoji.',
-        'Return only the revised post.',
+        /*
+         * THE STRUCTURE IS PART OF THE POST, NOT DECORATION.
+         *
+         * This block was absent, and the omission was expensive: "improve the
+         * clarity" returned a single tidy paragraph, which is a correct reading
+         * of the instruction and a destroyed caption. One revision collapsed a
+         * 2,200-character short-line post with a closing question, five
+         * hashtags and an Instagram keyword footer into 310 characters of prose
+         * with none of them. Nothing in the prompt had said any of that mattered.
+         *
+         * So the shape is stated as a constraint the instruction operates
+         * INSIDE. A request to change the wording is not a request to change the
+         * format, and where the two genuinely conflict the format holds and the
+         * conflict is reported rather than resolved silently.
+         */
+        'Preserve the post’s structure exactly unless the instruction explicitly asks to change it:',
+        '· One short sentence or complete thought per line, with a blank line between thoughts. Never merge the post into a paragraph.',
+        '· Keep the first line as the hook and the last prose line as the close. If the close is a question, it stays a question.',
+        '· Keep every trailing footer line exactly as given: the hashtag line, and on Instagram the bracketed keyword line below it. Do not reword, reorder, renumber or drop them.',
+        '· Keep any "Source:" attribution line, positioned above the footer.',
+        'Return only the revised post, with its line breaks intact.',
       ].join('\n'),
       prompt: `Instruction: ${instruction}${describeReferences(payload.references)}\n\nCurrent post:\n${payload.body}`,
       temperature: 0.4,
@@ -89,7 +109,65 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
     },
   )
 
-  const revisedBody = outcome.value.trim()
+  const rawRevision = outcome.value.trim()
+
+  /*
+   * THE FOOTER IS RESTORED MECHANICALLY, BECAUSE A PROMPT CANNOT BE TRUSTED WITH IT.
+   *
+   * The instruction above tells the model to keep the hashtag and keyword lines.
+   * Models drop them anyway, and the cost is asymmetric: a caption that loses its
+   * five hashtags and its bracketed keywords fails the caption specification's
+   * acceptance check outright, and an operator reading a tidier paragraph has no
+   * way to see what went missing. So the trailing footer blocks are lifted off the
+   * ORIGINAL, and if the revision came back without them they are put back in the
+   * order they were in.
+   *
+   * This is restoration, not authorship: the lines are the ones the post already
+   * had. An instruction that genuinely targets the footer — "use different
+   * hashtags" — reaches it through the hashtag skill on a regeneration, not here.
+   */
+  const isFooterLine = (block: string): boolean =>
+    /^#[\p{L}\p{N}_]/u.test(block.trim()) || /^\[[^\]]*\]$/.test(block.trim())
+
+  const originalBlocks = payload.body.split(/\n{2,}/)
+  const originalFooter: string[] = []
+  while (originalBlocks.length > 0 && isFooterLine(originalBlocks[originalBlocks.length - 1] as string)) {
+    originalFooter.unshift(originalBlocks.pop() as string)
+  }
+
+  let revisedBody = rawRevision
+  const structureNotes: string[] = []
+
+  if (originalFooter.length > 0) {
+    const revisedBlocks = revisedBody.split(/\n{2,}/)
+    const revisedFooter: string[] = []
+    while (revisedBlocks.length > 0 && isFooterLine(revisedBlocks[revisedBlocks.length - 1] as string)) {
+      revisedFooter.unshift(revisedBlocks.pop() as string)
+    }
+    if (revisedFooter.length === 0) {
+      revisedBody = [...revisedBlocks, ...originalFooter].join('\n\n')
+      structureNotes.push(
+        `The revision dropped the ${originalFooter.length === 1 ? 'footer line' : 'footer lines'}; ${originalFooter.length === 1 ? 'it was' : 'they were'} restored from the previous revision.`,
+      )
+    }
+  }
+
+  /*
+   * A collapse into one block is reported, never accepted quietly.
+   *
+   * Restoring the footer fixes the footer; it cannot un-merge prose. If the post
+   * arrived as short connected lines and came back as a paragraph, the operator
+   * needs to know before it goes to the approval gate \u2014 the specification's body
+   * test is explicit that dense paragraphs are a failure.
+   */
+  const blocksBefore = payload.body.split(/\n{2,}/).filter((b) => b.trim() !== '').length
+  const blocksAfter = revisedBody.split(/\n{2,}/).filter((b) => b.trim() !== '').length
+  if (blocksBefore >= 4 && blocksAfter <= 2) {
+    structureNotes.push(
+      `The revision collapsed ${blocksBefore} short lines into ${blocksAfter}. The caption specification asks for one thought per line with a blank line between thoughts \u2014 regenerate, or ask for the change again without "rewrite" or "condense".`,
+    )
+  }
+
   // The template writer only knows a handful of mechanical instructions; for
   // anything else it returns the body untouched. That is a legitimate outcome,
   // but reporting it as "Applied" is not — the operator reads the note, sees
@@ -99,6 +177,14 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
   // The human instruction has been applied. Now the finding is raised alongside
   // it — never instead of it, and never silently resolved.
   const conflictNotes: string[] = []
+  /*
+   * Structural findings are raised through the same channel as brand findings,
+   * because they are the same kind of thing: the instruction was carried out, and
+   * something about the result needs a person's attention. Put first — a lost
+   * hashtag footer or a collapsed post changes what ships, so it outranks a
+   * wording note.
+   */
+  conflictNotes.push(...structureNotes)
   if (humanOverridesBrand) {
     const check = checkBrandCompliance({
       caption: revisedBody,

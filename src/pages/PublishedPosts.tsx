@@ -57,22 +57,78 @@ export function PublishedPosts() {
     const dated = [...rows]
       .filter((post) => post.published_at !== null)
       .sort((a, b) => String(a.published_at).localeCompare(String(b.published_at)))
-    const label = (post: PublishedPost) => formatDate(String(post.published_at))
 
+    /*
+     * A LABEL THAT IDENTIFIES THE POST, NOT THE DAY.
+     *
+     * Two posts published on the same day both drew the axis label "17 Sept",
+     * so the chart showed three bars under two identical captions and there was
+     * no way to tell which post was which. The second and later post of a day
+     * carries its ordinal.
+     */
+    const seen = new Map<string, number>()
+    const labels = new Map<string, string>()
+    for (const post of dated) {
+      const day = formatDate(String(post.published_at))
+      const n = (seen.get(day) ?? 0) + 1
+      seen.set(day, n)
+      labels.set(post.id, n === 1 ? day : `${day} · ${n}`)
+    }
+    const label = (post: PublishedPost): string => labels.get(post.id) ?? formatDate(String(post.published_at))
+
+    /* A reading that never came back stays `null` all the way into the chart. */
     const reach = dated
       .filter((post) => post.reach !== null || post.impressions !== null)
-      .map((post) => ({ label: label(post), Reach: post.reach ?? 0, Impressions: post.impressions ?? 0 }))
+      .map((post) => ({ label: label(post), Reach: post.reach, Impressions: post.impressions }))
     const interactions = dated
       .filter((post) => post.likes !== null || post.comments !== null || post.shares !== null)
-      .map((post) => ({ label: label(post), Likes: post.likes ?? 0, Comments: post.comments ?? 0, Shares: post.shares ?? 0 }))
+      .map((post) => ({ label: label(post), Likes: post.likes, Comments: post.comments, Shares: post.shares }))
     const engagement = dated
       .filter((post) => post.engagement_rate !== null)
       .map((post) => ({ label: label(post), Rate: Number(post.engagement_rate) }))
+
+    /*
+     * THE BASELINE IS THIS ACCOUNT'S OWN MEAN, over the posts that actually
+     * reported a rate. Every per-post verdict on this screen is a distance from
+     * that number, never a judgement against an outside benchmark we do not have.
+     */
+    const rated = dated.filter((post) => post.engagement_rate !== null)
+    const avgRate =
+      rated.length > 0 ? rated.reduce((sum, p) => sum + Number(p.engagement_rate), 0) / rated.length : null
+
+    const posts = dated.map((post) => {
+      const parts = [post.likes, post.comments, post.shares].filter((v): v is number => v !== null)
+      const rate = post.engagement_rate === null ? null : Number(post.engagement_rate)
+      return {
+        id: post.id,
+        label: label(post),
+        title: post.title,
+        platform: post.platform,
+        reach: post.reach,
+        impressions: post.impressions,
+        /* Summed over the reported parts only; `reportedParts` says how many of
+           the three that was, so a partial sum is never read as a total. */
+        interactions: parts.length === 0 ? null : parts.reduce((a, b) => a + b, 0),
+        reportedParts: parts.length,
+        rate,
+        delta: rate === null || avgRate === null ? null : rate - avgRate,
+      }
+    })
+
+    const sumOf = (pick: (p: (typeof posts)[number]) => number | null): { value: number; from: number } | null => {
+      const vals = posts.map(pick).filter((v): v is number => v !== null)
+      return vals.length === 0 ? null : { value: vals.reduce((a, b) => a + b, 0), from: vals.length }
+    }
 
     return {
       reach,
       interactions,
       engagement,
+      posts,
+      avgRate,
+      measured: posts.filter((p) => p.rate !== null || p.reach !== null || p.interactions !== null).length,
+      totalReach: sumOf((p) => p.reach),
+      totalInteractions: sumOf((p) => p.interactions),
       missingReach: rows.length - reach.length,
       missingInteractions: rows.length - interactions.length,
       missingEngagement: rows.length - engagement.length,

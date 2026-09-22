@@ -70,6 +70,21 @@ registerSkill<PipelinePayload>('analysis.trend.cluster', (payload, ctx) => {
         members: cluster.members.length,
         trendScore: trend?.trendScore ?? seed.relevance,
         brandRelevance: 0,
+        /*
+         * The mean of what capture actually measured on these pages.
+         *
+         * Every member carries a `brandRelevance` scored at capture against the
+         * brand topics AND the live Knowledge Base. Averaging the cluster's own
+         * members keeps that evidence attached to the opportunity, which is what
+         * lets `analysis.brand.fit` produce a real number instead of a step.
+         */
+        capturedRelevance:
+          cluster.members.length === 0
+            ? 0
+            : Math.round(
+                cluster.members.reduce((sum, m) => sum + (m.brandRelevance ?? 0), 0) /
+                  cluster.members.length,
+              ),
         predictedEngagement: 0,
         engagementLevel: 'Medium',
         format: 'Thought Leadership',
@@ -93,23 +108,100 @@ registerSkill<PipelinePayload>('analysis.trend.cluster', (payload, ctx) => {
    ANALYSIS 2 · analysis.brand.fit
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * SUBJECTS THAT ARE SOMEBODY ELSE'S POST, NOT A TOPIC WE CAN WRITE ABOUT.
+ *
+ * The corpus is other people's LinkedIn and Instagram posts, so it contains job
+ * ads, certification announcements, personal model reviews and event promotion
+ * alongside actual research discussion. Those mention our vocabulary — a job ad
+ * for an "AI agent engineer" hits `agent` and `AI` — so they clear a keyword
+ * based brand-fit score and become Ethara post ideas. The observed result was a
+ * More suggestions list holding "Hire a hands-on generative AI engineer with
+ * seven to ten years" and "Share insights from passing the Azure AI Apps
+ * certification".
+ *
+ * Brand fit cannot catch these because they ARE on-topic; what disqualifies them
+ * is that the subject is an announcement about a person or a company rather than
+ * a finding about the world. That is a different test, so it is a different
+ * filter, and it is declared here rather than hidden in a score.
+ */
+const NON_EDITORIAL_SUBJECT: Array<{ label: string; pattern: RegExp }> = [
+  { label: 'recruitment', pattern: /\b(hir(e|ing)|we'?re hiring|apply now|job opening|open role|vacancy|candidates?|years of experience|résumé|resume|recruit)\b/i },
+  { label: 'credential', pattern: /\b(certifica(te|tion)|certified|passed the|earned my|completed my|badge|diploma|graduat(ed|ion))\b/i },
+  { label: 'self-promotion', pattern: /\b(i reviewed|i built|my new|check out my|excited to (share|announce)|proud to (share|announce)|thrilled to|happy to share|i'?m joining)\b/i },
+  { label: 'event promotion', pattern: /\b(register now|sign up now|join us|webinar|livestream|our booth|see you at|save the date|don'?t miss)\b/i },
+  { label: 'engagement bait', pattern: /\b(giveaway|tag someone|follow for more|like and share|link in bio|dm me|comment below)\b/i },
+]
+
 registerSkill<PipelinePayload>('analysis.brand.fit', (payload, ctx) => {
   const minBrandFit = ctx.num('minBrandFit', 45)
   const requireDomainMatch = ctx.bool('requireDomainMatch', false)
+  const dropNonEditorial = ctx.bool('dropNonEditorial', true)
+  const titleMergeThreshold = ctx.num('titleMergeThreshold', 70) / 100
 
   const opportunities = payload.opportunities ?? []
   const kept: Opportunity[] = []
   let dropped = 0
+  let nonEditorial = 0
+  let merged = 0
 
   for (const opportunity of opportunities) {
     const text = `${opportunity.title} ${opportunity.description} ${opportunity.sourceTopic}`
+
+    /*
+     * Checked before the score, because no score should be able to rescue it. A
+     * job ad is not a post we can write, however many brand words it contains.
+     */
+    if (dropNonEditorial) {
+      const match = NON_EDITORIAL_SUBJECT.find((rule) => rule.pattern.test(text))
+      if (match) {
+        nonEditorial += 1
+        dropped += 1
+        ctx.log(
+          `Dropped “${opportunity.title.slice(0, 60)}” — the subject is ${match.label}, not a finding we can write about`,
+        )
+        continue
+      }
+    }
+
     const domainHits = BRAND.domains.filter((d) =>
       text.toLowerCase().includes(d.toLowerCase()),
     )
     const topicHits = countTopicMatches(text)
 
+    /*
+     * THE SCORE IS MEASURED, NOT STEPPED.
+     *
+     * This was `42 + topicHits * 11 + domainHits * 9`. Both terms are small
+     * integer counts, so the result could only ever land on `42 + 11k + 9m` —
+     * and across fifty-four stored LinkedIn ideas it produced exactly five
+     * distinct values, four of them plain multiples of eleven: 64, 75, 86, 97.
+     * The card presented that as "BRAND 86" out of 100, which claims a precision
+     * the number does not have and reads as identical on most posts.
+     *
+     * The evidence for this already existed and was being ignored. Every captured
+     * page is scored 0-100 at capture against the brand topic set AND the live
+     * Knowledge Base, and those scores are genuinely continuous — thirty-six
+     * distinct values between 24 and 100 across the validated corpus. The cluster
+     * carries the mean of its own members as `capturedRelevance`.
+     *
+     * So the measured mean leads, and the keyword signal adjusts it. The keyword
+     * terms are kept because they test something the page score cannot: whether
+     * the TITLE AND ANGLE this opportunity will be written from are on-brand, not
+     * merely the pages behind it. They move the number rather than define it.
+     */
+    const measured = clamp(opportunity.capturedRelevance, 0, 100)
+    // Saturating rather than linear: the difference between touching one brand
+    // topic and touching two is large, between five and six is not.
+    const topicSignal = 100 * (1 - Math.exp(-0.55 * topicHits))
+    const domainSignal = 100 * (1 - Math.exp(-0.7 * domainHits.length))
+
     opportunity.brandRelevance = clamp(
-      42 + topicHits * 11 + domainHits.length * 9,
+      Math.round(
+        measured * 0.62 +
+          topicSignal * 0.26 +
+          domainSignal * 0.12,
+      ),
       0,
       100,
     )
@@ -122,12 +214,43 @@ registerSkill<PipelinePayload>('analysis.brand.fit', (payload, ctx) => {
       dropped += 1
       continue
     }
+
+    /*
+     * NEAR-IDENTICAL TITLES ARE ONE IDEA, NOT TWO SUGGESTIONS.
+     *
+     * `analysis.trend.cluster` merges on the POST text, which leaves two posts
+     * that made the same point in different words as two clusters — and the
+     * titles derived from them then differ only by phrasing. The list carried
+     * "An AI agent optimizes for the reward it is given, not the outcome you
+     * intended" beside "An AI agent will optimise for the reward you give it,
+     * not the outcome you wanted": one claim, two slots, and an operator reading
+     * More suggestions sees the same post twice.
+     *
+     * So titles are compared once they exist. The first occurrence wins, which
+     * keeps selection deterministic; the second is folded away rather than
+     * ranked, and the merge is reported.
+     */
+    const twin = kept.find(
+      (existing) => similarity(existing.title, opportunity.title) >= titleMergeThreshold,
+    )
+    if (twin) {
+      merged += 1
+      ctx.log(
+        `Merged “${opportunity.title.slice(0, 52)}” into “${twin.title.slice(0, 52)}” — ${Math.round(
+          similarity(twin.title, opportunity.title) * 100,
+        )}% the same claim`,
+      )
+      continue
+    }
+
     kept.push(opportunity)
   }
 
   ctx.log(
     `${kept.length} opportunit${kept.length === 1 ? 'y' : 'ies'} clear the ${minBrandFit}% brand-fit floor` +
-      (dropped > 0 ? `, ${dropped} did not` : ''),
+      (dropped > 0 ? `, ${dropped} did not` : '') +
+      (nonEditorial > 0 ? ` (${nonEditorial} were recruitment, credential or promotional posts)` : '') +
+      (merged > 0 ? `, ${merged} folded into a near-identical idea` : ''),
   )
 
   return { opportunities: kept }

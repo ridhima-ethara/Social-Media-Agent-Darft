@@ -46,7 +46,6 @@ export type PageId =
   | 'orchestration'
   | 'intelligence'
   | 'studio'
-  | 'console'
   | 'assistant'
   | 'knowledge'
   | 'settings'
@@ -630,7 +629,7 @@ export interface ApiHealth {
    *
    * `apify` carries an extra `platformLanes` field naming which implementation
    * the four platform lanes will actually bind — `apify` when a token is set,
-   * `crawl4ai` when it is not. It is reported rather than inferred because "why
+   * `unavailable` when it is not. It is reported rather than inferred because "why
    * does this post have no reaction count" should be answerable from the health
    * payload instead of from the zeros on a card.
    *
@@ -644,7 +643,7 @@ export interface ApiHealth {
     {
       configured: boolean
       reason: string
-      platformLanes?: 'apify' | 'crawl4ai'
+      platformLanes?: 'apify' | 'unavailable'
       /** Ordered text providers, primary first. Only present on `text`. */
       chain?: Array<'ollama' | 'gcp'>
       /** The provider behind the primary, or null when there is none. */

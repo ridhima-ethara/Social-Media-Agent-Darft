@@ -7,6 +7,7 @@
 
 import { similarity } from '../../../../shared/brand-voice'
 import type { Confidence } from '../../../../shared/agent-contract'
+import { SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
 import { listHashtags, listKnowledge, listScrapedItems, priorKeywordAverages } from '../../db/repo'
 import { aliasGroupLabel, aliasKey, clamp, contentWords, countTopicMatches, credibilityBase, credibilityLabel, growthPercent, halfLifeScore, hoursSince, matchedTopics, mean, normalise, normaliseTag, rescaleGrowth, round } from '../corpus'
 import { registerSkill } from '../runtime'
@@ -454,12 +455,34 @@ registerSkill<PipelinePayload>('validation.duplicate.detect', async (payload, ct
     ? await listScrapedItems(ctx.workspaceId, { limit: 400, validation: 'rejected' })
     : []
 
-  // The active Knowledge Base — entries and every URL they cite. An item whose
-  // citation is already cited by a live entry is already known, and an item
-  // whose body closely matches an entry is telling us what we already recorded.
-  const knowledge = checkKnowledgeBase
+  /*
+   * The active Knowledge Base — RESEARCH entries only, and every URL they cite.
+   * An item whose citation is already cited by a live entry is already known,
+   * and an item whose body closely matches an entry is telling us what we
+   * already recorded.
+   *
+   * WHY THE SIGNAL ENTRIES ARE EXCLUDED, AND WHY THIS IS NOT OPTIONAL.
+   *
+   * `recordScrapedTopicsAsKnowledge` writes one `Signal · <keyword>` entry per
+   * capture, citing the URL of every page it captured. That record is written in
+   * the SCRAPING stage, which runs before this one. So on the next line, without
+   * this filter, every page in the current run is "already cited by the
+   * Knowledge Base" — by the entry the same run created seconds earlier. The
+   * effect is total: a 133-item capture came back 133 duplicates, the Analysis
+   * Agent received nothing validated, and the calendar filled with nothing.
+   *
+   * The distinction is real rather than a workaround. A `Signals` entry is a
+   * record of WHAT WE SCRAPED; a research entry is a record of WHAT WE LEARNED.
+   * Only the second is grounds for calling a fresh page redundant. Filtering on
+   * the pair — `origin: 'learned'` AND `category: 'Signals'` — keeps a genuine
+   * operator-taught lesson (also `learned`, but never `Signals`) doing its job.
+   */
+  const knowledgeAll = checkKnowledgeBase
     ? await listKnowledge(ctx.workspaceId, { activeOnly: true, limit: 500 })
     : []
+  const knowledge = knowledgeAll.filter(
+    (entry) => !(entry.origin === 'learned' && entry.category === SIGNALS_CATEGORY),
+  )
   const citedUrls = new Map<string, string>() // url → entry title
   for (const entry of knowledge) {
     for (const src of entry.sources ?? []) {

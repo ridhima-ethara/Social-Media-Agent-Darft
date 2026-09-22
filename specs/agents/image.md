@@ -65,6 +65,7 @@ Renders in two layers: an optional model-painted background, and the vector bran
 | `model` | `auto` | Which model paints the background beneath the brand layer. `auto` uses whichever painter this deployment actually has — Imagen first, then the local FLUX.2 Klein, then Z-Image — and lands on the brand renderer only when none is configured. Naming a model instead pins it: if it is unreachable the run says so rather than quietly painting with something else. The brand renderer never fails and never paints, so it is the floor, not a choice. |
 | `timeoutMs` | `60000` | How long to wait for the model before falling back to the local renderer. |
 | `retries` | `1` | How many times to retry a failed model render before falling back. |
+| `maxCorrectionAttempts` | `2` | Skill rule 15: how many automatic correction passes a candidate may take when a validation check fails, before the remaining issue is returned for human review rather than marked ready. Zero returns the first failure straight to review. |
 | `compositeBrandLayer` | `true` | This is invariant 21 and should never be off: no diffusion model is asked to draw brand text, which is what makes rules 12, 13 and 15 hold. Off produces unusable creative. |
 
 ### `generation.image.export`

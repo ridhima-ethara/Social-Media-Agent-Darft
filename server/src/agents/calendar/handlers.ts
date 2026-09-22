@@ -747,6 +747,10 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
   // The registry declares 5. A different fallback here meant a run without the
   // knob resolved silently placed twice as many.
   const topPerPlatform = ctx.num('topPerPlatform', 5)
+  // How many weeks the cap above applies to. Declared in the registry as 2, so a
+  // run fills this week and the next rather than thinning one week's worth of
+  // posts across a fortnight.
+  const planningWeeks = ctx.num('planningWeeks', 2)
   const confidenceWeight = ctx.num('rankConfidenceWeight', 45) / 100
   const relevanceWeight = ctx.num('rankRelevanceWeight', 35) / 100
   const trendWeight = ctx.num('rankTrendWeight', 20) / 100
@@ -874,7 +878,9 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
   function nextFreeDate(platform: Platform): string {
     const booked = bookedByPlatform.get(platform) ?? new Set<string>()
     const from = planningStart()
-    for (let offset = 0; offset < 21; offset += 1) {
+    // Bounded by the weeks being planned plus slack for the weekends skipped
+    // inside them, so a fortnight plan can actually reach the fortnight's end.
+    for (let offset = 0; offset < planningWeeks * 7 + 7; offset += 1) {
       const date = isoDate(addDays(from, offset))
       if (isWeekend(date)) continue
       if (booked.has(date)) continue
@@ -892,9 +898,26 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
 
     if (forPlatform.length === 0) continue
 
+    /*
+     * THE CAP IS PER PLATFORM PER WEEK, NOT PER PLANNING HORIZON.
+     *
+     * It used to be `topPerPlatform` across the whole horizon. With a fortnight
+     * of planning that meant five LinkedIn slots spread over fourteen days —
+     * about two a week — so a freshly scraped week rendered almost empty while
+     * twenty-odd ideas sat in More suggestions. The cap was being read as "five
+     * on the calendar" when the operator-facing label says "slots per platform
+     * on the week".
+     *
+     * So the effective allowance is the weekly cap multiplied by the number of
+     * weeks being planned. `nextFreeDate` then spreads the winners one per
+     * platform per weekday, which distributes them across those weeks instead of
+     * stacking them into the first few days.
+     */
+    const weeklyCap = topPerPlatform * Math.max(1, planningWeeks)
+
     // Slots a person already owns. Counted first and never touched.
     const locked = forPlatform.filter((c) => c.slot === 'primary' && !c.movable)
-    const headroom = Math.max(0, topPerPlatform - locked.length)
+    const headroom = Math.max(0, weeklyCap - locked.length)
 
     const contestable = forPlatform.filter((c) => !(c.slot === 'primary' && !c.movable))
     const winners = reconcile ? contestable.slice(0, headroom) : contestable.filter((c) => c.slot === 'primary').slice(0, headroom)
@@ -919,7 +942,7 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
           const withinWindow =
             current !== '' &&
             new Date(`${current}T12:00:00Z`) >= planningStart() &&
-            new Date(`${current}T12:00:00Z`) < addDays(planningStart(), 14)
+            new Date(`${current}T12:00:00Z`) < addDays(planningStart(), planningWeeks * 7)
           if (!withinWindow || booked.has(current)) {
             c.idea.scheduledDate = nextFreeDate(platform)
             c.idea.slotReasons = [
@@ -955,11 +978,11 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
     const held = locked.length
     ctx.emit(
       'idea.ranked',
-      `${PLATFORM_LABEL[platform]}: ${Math.min(topPerPlatform, held + winners.length)} on the calendar of ${topPerPlatform}` +
+      `${PLATFORM_LABEL[platform]}: ${Math.min(weeklyCap, held + winners.length)} on the calendar of ${weeklyCap} (${topPerPlatform}/week × ${planningWeeks})` +
         (promoted > 0 ? ` · ${promoted} promoted` : '') +
         (demoted > 0 ? ` · ${demoted} moved to suggestions` : '') +
         (held > 0 ? ` · ${held} held by a human review` : ''),
-      { platform, promoted, demoted, locked: held, cap: topPerPlatform },
+      { platform, promoted, demoted, locked: held, cap: weeklyCap, perWeek: topPerPlatform, weeks: planningWeeks },
     )
 
     if (demoted > 0 || promoted > 0) {
@@ -979,7 +1002,7 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
 
   ctx.log(
     counts
-      .map((c) => `${PLATFORM_LABEL[c.platform]} ${c.primary}/${topPerPlatform} + ${c.suggestions}`)
+      .map((c) => `${PLATFORM_LABEL[c.platform]} ${c.primary}/${topPerPlatform * Math.max(1, planningWeeks)} + ${c.suggestions}`)
       .join(' · ') + (balance ? '' : ' · cross-platform balancing off'),
   )
 

@@ -1,11 +1,58 @@
 {
   "references": [
     {
-      "file": "example-mood.jpg",
-      "label": "House mood — dark editorial",
-      "style": "deep near-black ground, restrained violet and magenta accents, soft volumetric light, generous negative space, cinematic and high-contrast",
-      "concepts": [],
-      "active": false
+      "file": "WhatsApp Image 2026-09-18 at 16.59.27.jpeg",
+      "label": "AI Factories — server hall + input/process/output flow",
+      "style": "near-black editorial ground, one dominant 3D isometric server-hall hero rendered in dark metal with restrained violet edge-glow along its base, bold white display headline upper-left with a purple accent word, a clean three-stage input/process/output flow of glass cube and node-graph objects beneath, generous negative space, thin white connector arrows, premium and research-forward",
+      "concepts": [
+        "benchmark-bars"
+      ],
+      "active": true
+    },
+    {
+      "file": "WhatsApp Image 2026-09-18 at 16.59.28.jpeg",
+      "label": "No single view of a model — lit monolith",
+      "style": "matte black ground, a single tall textured monolith hero lit by directional beams, each face revealing a different network texture (gold neural web, violet grid, dark voxel cluster), large airy white headline on the left, thin callout labels with dot leaders, dramatic controlled lighting, purple used sparingly as the emphasis accent, deep cinematic negative space",
+      "concepts": [
+        "reward-surface"
+      ],
+      "active": true
+    },
+    {
+      "file": "WhatsApp Image 2026-09-18 at 16.59.29.jpeg",
+      "label": "Loop Engineering — continuous feedback loop diagram",
+      "style": "near-black ground with faint violet contour linework in the corners, a centred circular feedback-loop diagram of thin-outline icon nodes joined by white arrows, white and purple headline, a bordered key-insights row of four outline icons beneath, restrained purple accents, clean editorial spacing, no photographic elements",
+      "concepts": [
+        "agent-graph"
+      ],
+      "active": true
+    },
+    {
+      "file": "WhatsApp Image 2026-09-18 at 16.59.29 (1).jpeg",
+      "label": "Reinforcement Learning — state/agent/action/environment schematic",
+      "style": "deep navy-to-black ground, a clean four-box systems schematic (state, agent, action, environment) with softly glowing rounded-rectangle outlines, thin-outline icons, labelled solid and dashed connector arrows showing the RL loop, small serif math subscripts, restrained multi-hue node accents kept subordinate to a violet lead, generous spacing, technical and precise",
+      "concepts": [
+        "gradient-field"
+      ],
+      "active": true
+    },
+    {
+      "file": "WhatsApp Image 2026-09-18 at 16.59.28 (1).jpeg",
+      "label": "Long-horizon maze — monochrome question hook",
+      "style": "pure black ground, a single large monochrome grey maze as the hero with one white traced partial path and a white marker dot, bold white all-caps question headline beneath, stark high-contrast minimalism, no colour accent, heavy deliberate negative space around the type",
+      "concepts": [
+        "data-lattice"
+      ],
+      "active": true
+    },
+    {
+      "file": "WhatsApp Image 2026-09-18 at 16.59.29 (2).jpeg",
+      "label": "Visible outcome — reasoning iceberg",
+      "style": "black ground, a single wireframe polygonal iceberg hero split above and below a thin waterline, a vertical spine of glowing violet ring-nodes descending through the submerged mass, large white headline on the left with a purple accent phrase, thin outline icons and dotted callout labels on the right, controlled purple glow, editorial and restrained",
+      "concepts": [
+        "signal-lines"
+      ],
+      "active": true
     }
   ]
 }

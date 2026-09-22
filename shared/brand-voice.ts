@@ -803,6 +803,84 @@ export function deriveHashtags(topic: string, count = 4): string[] {
   return out
 }
 
+/**
+ * THE INSTAGRAM KEYWORD FOOTER.
+ *
+ * The caption skill requires Instagram to close with 7–8 distinct, topic-relevant
+ * keywords in one pair of square brackets, below the hashtag line. They are
+ * metadata rather than copy, and they are deliberately NOT hashtags: natural
+ * lower-case phrasing, no `#`, and a multiword phrase counts as one entry.
+ *
+ * Derived rather than fixed. A reusable block is explicitly forbidden, so the
+ * order here mirrors `deriveHashtags`: the brand domain vocabulary the topic
+ * actually mentions first, then the canonical concepts, and a generic tail only
+ * if a short topic cannot fill the quota on its own.
+ *
+ * Subsumption is checked the same way too — "agentic ai" beside "agentic" would
+ * spend two of eight entries saying one thing.
+ */
+export function deriveKeywords(topic: string, count = 7): string[] {
+  const clamped = Math.max(7, Math.min(8, count))
+  const prose = topic.toLowerCase()
+
+  /** Natural phrasing, as a reader would say it. */
+  const canonical = [
+    'AI evaluation',
+    'agentic AI',
+    'reinforcement learning',
+    'reward modeling',
+    'model evaluation',
+    'post-training',
+    'long-horizon reasoning',
+    'RL environments',
+    'evaluation criteria',
+    'failure analysis',
+    'benchmark design',
+    'agent reliability',
+  ]
+
+  const pool: string[] = []
+  // The domain vocabulary the topic genuinely contains, longest concept first.
+  for (const term of BRAND_TOPICS.filter((t) => t.length > 3 && prose.includes(t)).sort(
+    (a, b) => b.length - a.length,
+  )) {
+    pool.push(term)
+  }
+  // Canonical concepts the topic names, then the rest as the on-brand tail.
+  for (const c of canonical) if (prose.includes(c.toLowerCase())) pool.push(c)
+  for (const c of canonical) pool.push(c)
+
+  const singular = (key: string): string => key.replace(/s$/, '')
+  const taken: string[] = []
+  const out: string[] = []
+
+  for (const raw of pool) {
+    const entry = raw.trim().toLowerCase()
+    if (entry.length < 4) continue
+    if (GENERIC_HASHTAGS.includes(entry.replace(/[^a-z0-9]/g, ''))) continue
+    // No entry may contain, be contained by, or be the plural of one already taken.
+    if (
+      taken.some(
+        (other) =>
+          other.includes(entry) || entry.includes(other) || singular(other) === singular(entry),
+      )
+    ) {
+      continue
+    }
+    taken.push(entry)
+    // Acronyms keep their case; everything else reads as natural lower case.
+    out.push(
+      raw
+        .split(/\s+/)
+        .map((w) => (ACRONYMS.has(w.toLowerCase().replace(/[^a-z]/g, '')) ? w.toUpperCase() : w.toLowerCase()))
+        .join(' '),
+    )
+    if (out.length === clamped) break
+  }
+
+  return out
+}
+
 function pascalPhrase(joined: string, words: string[]): string {
   // Rebuild "rewardmodeling" as "RewardModeling" using the original word split.
   for (let i = 0; i < words.length - 1; i += 1) {

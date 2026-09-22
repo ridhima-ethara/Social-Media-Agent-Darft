@@ -297,6 +297,24 @@ export type IdeaStatus = (typeof IDEA_STATUSES)[number]
 /** The per-platform cap (`topPerPlatform`, 5 by default): only `primary` ideas take a calendar slot. */
 export type CalendarSlot = 'primary' | 'suggestion'
 
+/**
+ * The Knowledge Base category holding the scrape's own record of itself.
+ *
+ * `recordScrapedTopicsAsKnowledge` writes one `Signal · <keyword>` entry per
+ * capture, listing the topics and hashtags it saw and citing every page URL. It
+ * exists so an operator can see what a run scraped.
+ *
+ * It is bookkeeping, not a finding, and three readers have to agree on that:
+ * retrieval excludes it from grounding (it would otherwise match every keyword
+ * query, since the keyword is its title, and then hand a raw social URL to a
+ * caption as its "Source:"), the duplicate check excludes it (a run would
+ * otherwise mark its own capture redundant against the entry it just wrote), and
+ * the Knowledge Base screen includes it (that is the point of writing it).
+ *
+ * One home for the name, so a rename cannot make the writer and those readers
+ * disagree silently.
+ */
+export const SIGNALS_CATEGORY = 'Signals'
 export type Confidence = 'High' | 'Medium' | 'Low'
 
 export type OperatorRole = 'marketing' | 'leadership'

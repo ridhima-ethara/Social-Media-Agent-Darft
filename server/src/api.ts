@@ -404,7 +404,6 @@ export function createApiRouter(): Router {
           reason: statuses.apify.reason,
           platformLanes: statuses.apify.platformLanes,
         },
-        crawl4ai: { configured: statuses.crawl4ai.configured, reason: statuses.crawl4ai.reason },
         // The second engine's process boundary. Reported here for the same reason
         // crawl4ai is: it is a spawned sidecar, and "why did Run agents do
         // nothing" must be answerable from the health payload rather than from a
@@ -1386,7 +1385,12 @@ export function createApiRouter(): Router {
       // weakest primary and says so.
       if (body.calendarSlot === 'primary' && idea.calendar_slot !== 'primary') {
         const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
-        const primaries = await primaryIdeasForPlatform(workspaceId, body.platform ?? idea.platform)
+        // Counted in the week this post is landing in, not across all time.
+        const primaries = await primaryIdeasForPlatform(
+          workspaceId,
+          body.platform ?? idea.platform,
+          body.date ?? idea.scheduled_date,
+        )
         if (primaries.length >= cap) {
           const weakest = primaries[primaries.length - 1]
           if (weakest && weakest.id !== id) {
@@ -1725,7 +1729,7 @@ export function createApiRouter(): Router {
   /**
    * Runs the workflow, streaming each agent's start and finish as SSE.
    *
-   * Every frame is also mirrored onto the global event bus, so the Run Console
+   * Every frame is also mirrored onto the global event bus, so the activity feed
    * and the Orchestration screen light up without subscribing separately.
    */
   api.post('/agents/run', async (req, res) => {
@@ -1749,7 +1753,7 @@ export function createApiRouter(): Router {
      *
      * This route holds an SSE connection open for the whole run, so a spawn
      * failure used to arrive as `error` with "spawn ENOENT" — or, worse, as a
-     * stream that simply stopped producing frames, which the Run Console shows
+     * stream that simply stopped producing frames, which the activity feed shows
      * as an agent run that started and never finished. Resolving first means an
      * absent interpreter is a single frame naming the key and the fix.
      */
@@ -1971,7 +1975,31 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
   const mediaMap: Record<string, Record<string, unknown>> = {}
   for (const m of media) {
     mediaMap[`${m.idea_id}|${m.platform}`] = {
-      dataUri: m.data_uri,
+      /*
+       * A URL, NOT THE BYTES.
+       *
+       * These used to carry the full base64 `data:` URI, and the same creative
+       * was serialised twice — once under `media` and again nested in `ideas` —
+       * so a workspace with nineteen assets answered `/api/state` with 65 MB.
+       * On localhost that is 0.3s and invisible; over a tunnel it is over two
+       * minutes, and the calendar never rendered because the state fetch had not
+       * finished. The payload is the bug, not the renderer.
+       *
+       * `GET /api/media/:id.png` rasterises the stored SVG on demand, is mounted
+       * ahead of the session guard so an image needs no cookie, and answers
+       * `cache-control: immutable` — a creative is addressed by the id of a row
+       * that is never rewritten, so the browser and any CDN fetch it once.
+       *
+       * The field keeps its name deliberately: every consumer puts it straight
+       * into an `<img src>`, which takes a URL and a data URI identically, so
+       * nothing downstream changes. The bytes still live in `media_assets`, and
+       * the publishing path reads them from there rather than from here.
+       *
+       * Root-relative on purpose — the router is mounted at `/api`, and the
+       * bundle already asks for `/api` on whatever host served it, so this
+       * resolves through a tunnel, a container and localhost without a branch.
+       */
+      dataUri: m.id ? `/api/media/${m.id}.png` : null,
       model: m.model,
       renderMode: m.render_mode,
       concept: m.concept,
@@ -2007,7 +2035,16 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     })),
     drafts: draftMap,
     media: mediaMap,
-    published,
+    /*
+     * Same reason as `mediaMap` above: `listPosts` joins `ma.data_uri`, so the
+     * published feed carried another several megabytes of base64. The published
+     * screens render this through an `<img src>` too, so a URL substitutes
+     * cleanly and the bytes stay in `media_assets`.
+     */
+    published: published.map((p) => ({
+      ...p,
+      data_uri: p.media_asset_id ? `/api/media/${p.media_asset_id}.png` : null,
+    })),
     knowledge,
     knowledgeCounts,
     knowledgeBuild,

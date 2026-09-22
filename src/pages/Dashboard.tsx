@@ -44,6 +44,22 @@ function isoDate(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
+/**
+ * Desktop track count and width cap per tile count, as whole class strings.
+ *
+ * Written out rather than generated so Tailwind's compiler sees every class it
+ * must emit. `w-*` fractions mirror `count / 6`, which is what keeps a short row
+ * the same tile size as a full one.
+ */
+const TILE_GRID: Record<number, string> = {
+  1: 'sm:grid-cols-1 sm:w-1/6',
+  2: 'sm:grid-cols-2 sm:w-2/6',
+  3: 'sm:grid-cols-3 sm:w-3/6',
+  4: 'sm:grid-cols-4 sm:w-4/6',
+  5: 'sm:grid-cols-5 sm:w-5/6',
+  6: 'sm:grid-cols-6',
+}
+
 export function Dashboard() {
   const user = useStore((s) => s.user)
   const analytics = useStore((s) => s.analytics)
@@ -90,12 +106,41 @@ export function Dashboard() {
     const rows = reportedRows.filter((r) => typeof r.metrics[key] === 'number')
     return rows.length === 0 ? null : rows.reduce((sum, r) => sum + (r.metrics[key] ?? 0), 0)
   }
-  const reach = metric('reach') ?? metric('impressions')
-  const engagementRate = (() => {
+  const rollupReach = metric('reach') ?? metric('impressions')
+  const rollupRate = (() => {
     const rows = reportedRows.filter((r) => typeof r.metrics.engagementRate === 'number')
     return rows.length === 0 ? null : rows.reduce((s, r) => s + (r.metrics.engagementRate ?? 0), 0) / rows.length
   })()
+
+  /*
+   * WHEN NO MONTHLY ROLLUP EXISTS, READ OUR OWN POSTS — AND SAY SO.
+   *
+   * These three figures came only from `platform_analytics`, the platform's own
+   * monthly rollup, and that table is empty for this workspace. So the command
+   * centre showed "—" for reach while the Published Posts screen, reading the
+   * very same account, showed a reach summed from the posts' own readings. Two
+   * screens disagreeing about one account is worse than either answer.
+   *
+   * The rollup still wins when it exists, because a platform's monthly reach is
+   * not the same quantity as the sum of what our posts reported. When it does
+   * not exist we show what we measured, labelled as being from posts. Followers
+   * have no per-post equivalent, so they stay missing rather than invented.
+   */
+  const fromPosts = useMemo(() => {
+    const reached = published.map((p) => p.reach).filter((v): v is number => v !== null)
+    const rated = published.map((p) => p.engagement_rate).filter((v): v is string => v !== null).map(Number)
+    return {
+      reach: reached.length === 0 ? null : reached.reduce((a, b) => a + b, 0),
+      rate: rated.length === 0 ? null : rated.reduce((a, b) => a + b, 0) / rated.length,
+      posts: Math.max(reached.length, rated.length),
+    }
+  }, [published])
+
+  const reach = rollupReach ?? fromPosts.reach
+  const engagementRate = rollupRate ?? fromPosts.rate
   const followers = metric('followerGrowth')
+  /** True when the figures above came from our posts, not the platform's month. */
+  const readFromPosts = reportedRows.length === 0 && (fromPosts.reach !== null || fromPosts.rate !== null)
   const daily = useMemo(() => {
     const byDate = new Map<string, number>()
     for (const row of reportedRows) for (const d of row.daily) byDate.set(d.date, (byDate.get(d.date) ?? 0) + d.value)
@@ -139,10 +184,23 @@ export function Dashboard() {
     () => [...ideas].filter((i) => i.status !== 'suggested' && i.status !== 'rejected').sort((a, b) => b.confidence - a.confidence).slice(0, 4),
     [ideas],
   )
-  /** What is next in the week, from today, with its creative. */
-  const upcomingWeek = useMemo(() => {
+  /*
+   * WHAT THE WEEK HOLDS — AND NEVER AN EMPTY LIST BESIDE A COUNT.
+   *
+   * This listed only posts dated today or later, so on a Sunday — with every
+   * one of the week's posts behind it — the panel read "Nothing placed in this
+   * week" directly under a hint saying seven were placed. Two true statements
+   * that cannot both be true of the same week.
+   *
+   * So it shows what is still ahead, and when nothing is, what the week held,
+   * saying which of the two it is. Empty now means the week is genuinely empty.
+   */
+  const weekList = useMemo(() => {
     const todayKey = isoDate(today)
-    return week.flatMap((d) => d.items).filter((i) => i.scheduled_date >= todayKey).slice(0, 3)
+    const all = week.flatMap((d) => d.items)
+    const ahead = all.filter((i) => i.scheduled_date >= todayKey)
+    if (ahead.length > 0) return { rows: ahead.slice(0, 3), ahead: true, total: all.length }
+    return { rows: [...all].reverse().slice(0, 3), ahead: false, total: all.length }
   }, [week, today])
   /** What the Analyze panel shows: lessons if any, else the most-cited entries. */
   const insightRows = useMemo(() => {
@@ -414,21 +472,43 @@ export function Dashboard() {
                     return (
                       <span
                         key={iso}
+                        title={
+                          items.length === 0
+                            ? `${day.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' })}: nothing placed`
+                            : `${day.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' })}: ${items.map((i) => PLATFORM_LABEL[i.platform]).join(', ')}`
+                        }
                         className={`rounded-[9px] border px-0 py-1.5 text-center transition-colors ${isToday ? 'border-accent bg-accent/15' : 'border-line bg-surface-2/50'}`}
                         style={isToday ? { boxShadow: '0 0 14px -4px var(--color-accent)' } : undefined}
                       >
                         <span className="mono block text-[7.5px] uppercase text-ink-3">{day.toLocaleDateString('en-GB', { weekday: 'short' })}</span>
                         <span className="mt-0.5 block text-[12px] font-bold text-ink">{day.getDate()}</span>
-                        <span className="mx-auto mt-[3px] block h-[3px] w-[3px] rounded-full" style={{ background: items.length > 0 ? 'var(--color-accent-bright)' : 'transparent' }} aria-hidden="true" />
+                        {/* The row of dates carries the posts themselves: one
+                            dot per placed post, in its platform's colour. A
+                            single anonymous dot said only "something", which is
+                            the one thing the day number already implied. */}
+                        <span className="mx-auto mt-[3px] flex h-[3px] items-center justify-center gap-[2px]" aria-hidden="true">
+                          {items.slice(0, 4).map((idea) => (
+                            <span
+                              key={idea.id}
+                              className="h-[3px] w-[3px] rounded-full"
+                              style={{ background: PLATFORM_TOKEN[idea.platform] }}
+                            />
+                          ))}
+                        </span>
                       </span>
                     )
                   })}
                 </div>
+                {!weekList.ahead && weekList.total > 0 ? (
+                  <p className="mono mt-2 text-[8px] uppercase tracking-[0.1em] text-ink-3">
+                    nothing left this week · what it held
+                  </p>
+                ) : null}
                 <ul className="mt-2.5 flex flex-col gap-[7px]">
-                  {upcomingWeek.length === 0 ? (
+                  {weekList.total === 0 ? (
                     <li><NotMeasured>Nothing placed in this week.</NotMeasured></li>
                   ) : (
-                    upcomingWeek.map((idea) => (
+                    weekList.rows.map((idea) => (
                       <li key={idea.id}>
                         <Row>
                           <span className="mono w-12 shrink-0 text-[9px] text-accent-bright">{idea.scheduled_time}</span>
@@ -511,7 +591,11 @@ export function Dashboard() {
                 {/* What the platform has not measured, said rather than zeroed. */}
                 {reportedRows.length === 0 || !breakdown.reported ? (
                   <p className="mono mt-2.5 text-[7.5px] uppercase tracking-[0.06em] text-ink-3">
-                    {reportedRows.length === 0 ? 'no monthly rollup reported' : ''}
+                    {readFromPosts
+                      ? `from ${fromPosts.posts} reported post${fromPosts.posts === 1 ? '' : 's'} · no monthly rollup`
+                      : reportedRows.length === 0
+                        ? 'no monthly rollup reported'
+                        : ''}
                     {reportedRows.length === 0 && !breakdown.reported ? ' · ' : ''}
                     {!breakdown.reported ? 'no reactions reported' : ''}
                   </p>
@@ -521,13 +605,64 @@ export function Dashboard() {
           </div>
 
           {/* ── the foot: every other screen ───────────────────────── */}
-          <div className="flex flex-col gap-4 xl:flex-row" style={{ transform: 'translateZ(6px)' }}>
+          {/*
+            CLEAR OF THE ROTATED PANELS ABOVE, AND IN FRONT OF THEM.
+
+            The two side panels carry `rotateY(±8deg) translateZ(-14px)` inside a
+            `perspective: 1200px` stage. A rotated plane's near corner projects
+            outward, so their bottom edges swung down over this bar — the reported
+            posts caption and this bar's own "N screens" label rendered on top of
+            each other.
+
+            Perspective overlap is not solved by z-index alone, because the
+            painting order follows the 3D positions. So this bar is moved clearly
+            in FRONT on the Z axis and given real vertical separation, which
+            removes the intersection rather than hiding it. `relative` plus a
+            stacking context keeps it above anything still reaching into its row.
+          */}
+          <div
+            className="relative z-10 mt-2 flex flex-col gap-4 xl:flex-row"
+            style={{ transform: 'translateZ(34px)' }}
+          >
             <div className="glass-panel flex-1 rounded-[14px] px-3.5 py-3">
               <div className="flex items-center justify-between">
                 <span className="text-[11.5px] font-bold text-ink">Everything else</span>
                 <span className="mono text-[8px] uppercase tracking-[0.08em] text-ink-3">{controls.length} screens</span>
               </div>
-              <div className="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+              {/*
+                CENTRED WHEN THE ROW IS NOT FULL.
+
+                Marketing holds six of these, which fill `sm:grid-cols-6`
+                exactly. Leadership holds three, and in a six-track grid those
+                sat in the first three columns with the right half of the panel
+                empty — it read as a layout bug rather than as a shorter list.
+
+                So a short list gets its own track count at the matching
+                fraction of the width: three tracks across half the panel keeps
+                each tile the same size it would have been at six, and `mx-auto`
+                centres the group. The six-item case is untouched.
+              */}
+              {/*
+                ONE ROW ON DESKTOP, WHATEVER THE COUNT — THREE ON MOBILE.
+
+                A hardcoded `sm:grid-cols-3` was right for Leadership's three
+                tiles and wrong the moment Marketing dropped to five: five items
+                in three columns wrap to 3 + 2, which is what produced the two
+                stacked rows.
+
+                The track count has to follow the item count. An inline
+                `gridTemplateColumns` would do it, but inline styles beat classes
+                at EVERY breakpoint, so it would also force five cramped columns
+                on a phone. Tailwind cannot take a dynamic class name either —
+                the compiler would never see it. So the count maps to complete,
+                statically written class strings, which the compiler can see and
+                which keep `grid-cols-3` for mobile intact.
+
+                The width cap is the same fraction, so each tile stays exactly the
+                size it would have had in a full six-column row and `mx-auto`
+                centres a short row rather than leaving a gap on the right.
+              */}
+              <div className={`mt-2 grid grid-cols-3 gap-1.5 sm:mx-auto ${TILE_GRID[Math.min(controls.length, 6)] ?? 'sm:grid-cols-6'}`}>
                 {controls.map((item) => (
                   <button
                     key={item.page}

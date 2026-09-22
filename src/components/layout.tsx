@@ -15,7 +15,6 @@ import {
   LayoutDashboard,
   LogOut,
   Network,
-  ScrollText,
   Send,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -97,7 +96,6 @@ export const MARKETING_NAV: NavGroup[] = [
     label: 'Control',
     items: [
       { page: 'studio', label: 'Agent Studio', icon: Sliders },
-      { page: 'console', label: 'Run Console', icon: ScrollText },
       { page: 'settings', label: 'Settings', icon: SettingsIcon },
     ],
   },

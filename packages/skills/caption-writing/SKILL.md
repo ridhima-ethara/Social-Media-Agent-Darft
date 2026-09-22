@@ -103,9 +103,15 @@ Output passes to `brand-voice` for compliance review.
    results. When research is used, retain its qualifications, scope and attribution, and keep the
    source's finding separate from Ethara's interpretation.
 
-6. **Length targets, excluding hashtags:** LinkedIn 150–230 words; Instagram and Facebook 100–180.
+6. **Length targets, excluding the hashtag and keyword footers:** LinkedIn 150–230 words;
+   Facebook 100–180. **Instagram inherits the corresponding LinkedIn prose length** — it does not get
+   a shorter target, because its prose is the LinkedIn prose (rule 9).
+
    These are editorial defaults, not platform limits. Shorten when the evidence cannot support useful
-   depth. Honour explicit length requests and the application's configured platform limits.
+   depth. Honour explicit length requests and the application's configured platform limits. Count the
+   complete rendered caption including spaces, line breaks, hashtags and keywords. If shared prose
+   cannot fit Instagram with its required footer, flag the conflict for review — never silently
+   truncate it and never change only Instagram.
 
 7. **The close is exactly one meaningful ending** — one relevant question, or one concluding thought.
    It must follow from the body, return to the central issue, and give the audience something
@@ -118,7 +124,20 @@ Output passes to `brand-voice` for compliance review.
    - Never `Thoughts?`, `Agree?`, `Comment YES`, `Tag someone`, or an unrelated sales request. Never
      ask readers to disclose confidential organisational information.
 
-8. **5 to 7 hashtags on every caption option**, clamped to the brand's declared range.
+8. **Hashtags: 5 to 7 on LinkedIn, Facebook and X — exactly 5 on Instagram.**
+
+   Instagram is a fixed number rather than a range, and it is followed by a keyword footer:
+
+   - Exactly **5** distinct, topic-relevant hashtags on one line after the close.
+   - Then a blank line, then exactly **7 or 8** distinct topic-relevant keywords or short keyword
+     phrases inside one pair of square brackets, comma-separated. A multiword phrase counts as one
+     entry. No `#` symbols, no duplicates or near-duplicate filler, no unsupported product names,
+     no fixed reusable block. The bracketed line is the **final** line of the caption.
+   - This keyword footer is Instagram-only. Do not add it to LinkedIn, Facebook or X.
+
+   Keywords are drawn from the caption's own subject, problem, mechanism, evaluation method or
+   application, and may overlap conceptually with the hashtags while remaining a separate readable
+   list. Never alter the shared body to insert keywords.
 
    Derived from the actual subject, mechanism and application. `#EtharaAI` when appropriate — it
    counts toward the total and is not required on every post. Placed together on the final line,
@@ -135,12 +154,18 @@ Output passes to `brand-voice` for compliance review.
    every generation and every rewrite.
 
    - **LinkedIn** — more developed explanation and professional implications.
-   - **Instagram** — tighter opening and faster pacing, retaining short-line substance.
+   - **Instagram** — **the exact corresponding LinkedIn hook, full body and CTA, reused verbatim**,
+     then the Instagram footer from rule 8. This is the one mandatory cross-platform reuse: preserve
+     wording, punctuation, order and authored line breaks. Do not shorten it, re-pace it, write a
+     punchier rewrite, or add Instagram-only prose or a second CTA such as "link in bio". Where
+     Instagram alone is requested and no LinkedIn caption exists, draft a LinkedIn-style base under
+     this skill first and reuse its prose; do not claim that base was approved.
    - **Facebook** — accessible language and practical context.
    - **X** — most compressed; a thread when the idea requires the space, with the hashtags on the
      final post.
 
-   The factual thesis stays identical across platforms; its expression changes. **Moving a post to
+   The factual thesis stays identical across platforms; its expression changes — except for the
+   LinkedIn/Instagram pair, whose prose is identical by rule. **Moving a post to
    another platform re-writes it**: changing the platform in the review panel regenerates the draft
    and the creative, because copy carried across unchanged is copy written for somewhere else.
 
@@ -254,6 +279,9 @@ The Caption Writing skill **must not**:
   result from the company's positioning line.
 - Use generic engagement bait as the close.
 - Use a fixed reusable hashtag set instead of topic-derived tags.
+- Rewrite, shorten or replace the paired Instagram hook, body or CTA.
+- Output Instagram without exactly 5 hashtags and a final bracketed line of 7–8 keywords.
+- Add the bracketed keyword footer to LinkedIn, Facebook or X.
 - Reuse one caption across platforms, or produce variants that change the factual thesis.
 - Produce options differing only by synonym, or with similarity above `0.70`.
 - Replace the `brand-voice` compliance layer.
@@ -274,7 +302,12 @@ The Caption Writing skill **must not**:
 - The body uses short connected thoughts — no dense paragraphs, arbitrary fragments or filler.
 - The language mode is honoured without changing the thesis or dropping qualifications.
 - The final prose line is one relevant question or one concluding thought.
-- There are **5–7 unique, relevant hashtags** on a separate final line.
+- LinkedIn, Facebook and X carry **5–7 unique, relevant hashtags** on a separate final line.
+- Instagram carries **exactly 5** unique hashtags on one line after the close, followed by a final
+  square-bracketed line of **7 or 8** unique comma-separated keywords with no `#` symbols.
+- The Instagram hook, complete body and CTA **exactly match** the corresponding LinkedIn option.
+  Compare the prose before the footer; a paraphrase is a failure, not a variant.
+- Any attribution line sits with the prose, above the footer — the keyword line is last.
 - Claims match the cited `key_points`; research sources are retained; hypotheticals are clearly framed.
 - No invented Ethara products, results, clients or capabilities, and no forced brand connection.
 - Platform treatments and option angles are distinct, except for an explicitly configured cross-post.
@@ -292,3 +325,5 @@ The Caption Writing skill **must not**:
 | Fewer than 5 topic-derived hashtags are available | Derive from the mechanism and application before falling back; never pad with generic tags |
 | The evidence cannot support the length target | Publish shorter. The target yields to the evidence, never the reverse |
 | A reference caption uses Unicode bold | Follow the rule, not the reference. Write plain text |
+| Shared prose will not fit Instagram with its footer | Flag the conflict for review. Never truncate, and never edit only Instagram |
+| Fewer than 7 distinct keywords can be derived | Draw from the mechanism, evaluation method and application before falling back; never pad with near-duplicates |

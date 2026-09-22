@@ -49,9 +49,10 @@ import {
   apifySearch,
   captureChainFor,
   captureFor,
-  crawl4aiSearch,
+  parallelResearch,
   mapWithConcurrency,
-  platformLaneDowngradeReason,
+  platformLaneUnavailableReason,
+  openWebLaneUnavailableReason,
   type CaptureAttempt,
   type RawPost,
 } from '../../integrations'
@@ -380,34 +381,39 @@ registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) 
   const failIfNoSource = ctx.bool('failIfNoSource', false)
 
   const apifyReady = apifySearch.isConfigured()
-  const crawlerReady = crawl4aiSearch.isConfigured()
-  // Either source alone can carry a run: Apify covers the four platform lanes,
-  // crawl4ai covers the open web and stands in for a platform lane without a
-  // token. Only losing both leaves nothing to capture.
-  const configured = apifyReady || crawlerReady
+  const openWebReady = parallelResearch.isConfigured()
+  /*
+   * ONE SOURCE PER LANE, SO EITHER LANE ALONE STILL CARRIES A RUN.
+   *
+   * Apify owns the four platform lanes and Parallel owns the open web. Neither
+   * substitutes for the other: an actor states reaction counts and a cited page
+   * does not, so a platform lane without its token does not run rather than
+   * running with weaker numbers under the same name. Losing both leaves nothing
+   * to capture, which is the only case that makes the whole run fixture-mode.
+   */
+  const configured = apifyReady || openWebReady
   const mode: 'live' | 'fixture' = configured ? 'live' : 'fixture'
   const rows = await listSources(ctx.workspaceId)
 
-  // A source's reachability now depends on which lane it belongs to, because
-  // the two implementations have different credentials. A platform source is
-  // reachable if EITHER can serve it — Apify properly, crawl4ai downgraded.
+  // Reachability is per lane, because the two lanes have different credentials
+  // and now fail independently.
   const sources: SourceConnection[] = rows
     .filter((s) => s.enabled)
     .map((s) => {
       const isOpenWeb = s.kind === 'web'
-      const reachable = isOpenWeb ? crawlerReady : configured
-      const via = isOpenWeb || !apifyReady ? crawl4aiSearch.label : apifySearch.label
+      const reachable = isOpenWeb ? openWebReady : apifyReady
+      const via = isOpenWeb ? parallelResearch.label : apifySearch.label
       const reason = reachable
         ? `Reachable via ${via}`
         : isOpenWeb
-          ? crawl4aiSearch.unavailableReason()
-          : `${apifySearch.unavailableReason()}, and ${crawl4aiSearch.unavailableReason()}`
+          ? parallelResearch.unavailableReason()
+          : apifySearch.unavailableReason()
       return { name: s.name, kind: s.kind, sourceType: s.source_type, reachable, reason }
     })
 
   const unreachable = [
     ...(apifyReady ? [] : [apifySearch.label]),
-    ...(crawlerReady ? [] : [crawl4aiSearch.label]),
+    ...(openWebReady ? [] : [parallelResearch.label]),
   ]
 
   /**
@@ -449,15 +455,18 @@ registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) 
       )
     } else {
       // Named at connect time rather than discovered later from missing counts.
-      await notify(platformLaneDowngradeReason())
+      // Both lanes report independently now: they have different sources and
+      // fail for different reasons, so one message cannot describe both.
+      await notify(platformLaneUnavailableReason())
+      await notify(openWebLaneUnavailableReason())
     }
-    if (crawlerReady) {
+    if (openWebReady) {
       ctx.log(
-        `crawl4ai reachable · ${config.crawl4ai.searchEngines.join(', ')} · ` +
-          `up to ${config.crawl4ai.maxPagesPerKeyword} pages per keyword on the open web`,
+        `${parallelResearch.label} reachable · the open-web lane reads cited pages, ` +
+          'which state no engagement figures',
       )
     } else {
-      await notify(`The open-web lane cannot run — ${crawl4aiSearch.unavailableReason()}.`)
+      await notify(`The open-web lane cannot run — ${parallelResearch.unavailableReason()}.`)
     }
   }
 
@@ -536,7 +545,7 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   const keywords = payload.keywords ?? []
   if (keywords.length === 0) throw new Error('No keywords resolved — nothing to fetch.')
 
-  if (!apifySearch.isConfigured() && !crawl4aiSearch.isConfigured()) {
+  if (!apifySearch.isConfigured() && !parallelResearch.isConfigured()) {
     throw new Error(
       'Cannot capture — neither source is configured. Set APIFY_API_TOKEN for the ' +
         'platform lanes or CRAWL4AI_PYTHON for the open web. There is no corpus to fall back to.',
@@ -645,7 +654,7 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
             // the same thing on every lane and the source decides what it can
             // honestly serve.
             maxItems,
-            maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+            maxCharsPerPage: config.parallel.maxCharsPerPage,
             datePosted,
             sortBy,
           })
@@ -1083,7 +1092,7 @@ registerSkill<PipelinePayload>('scraping.hashtag.expand', async (payload, ctx) =
         keyword: query,
         ...(tagLane === undefined ? {} : { platform: tagLane }),
         maxItems: itemsPerHashtag,
-        maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+        maxCharsPerPage: config.parallel.maxCharsPerPage,
         datePosted: 'past-month',
         sortBy: 'date',
       })
@@ -1211,7 +1220,7 @@ registerSkill<PipelinePayload>('scraping.competitor.track', async (_payload, ctx
         keyword: competitor.name,
         platform: 'linkedin',
         maxItems: postsPer,
-        maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
+        maxCharsPerPage: config.parallel.maxCharsPerPage,
         datePosted: 'past-month',
         sortBy: 'date',
       })

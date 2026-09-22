@@ -11,6 +11,7 @@
  * recorded — not quietly written with a shrug.
  */
 
+import { SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
 import type { Confidence } from '../../../../shared/agent-contract'
 import { BRAND_RULE_TAG, similarity } from '../../../../shared/brand-voice'
 import {
@@ -25,15 +26,11 @@ import {
   type KnowledgeEntryRow,
 } from '../../db/repo'
 import {
-  AdapterError,
-  crawl4aiSearch,
   mapWithConcurrency,
   parallelResearch,
   RESEARCH_DOMAIN,
   withFallback,
-  type ResearchFinding,
 } from '../../integrations'
-import { config } from '../../config'
 import {
   clamp,
   clampChars,
@@ -112,43 +109,6 @@ registerSkill<KnowledgePayload>('knowledge.research.search', async (payload, ctx
   const targets = payload.targets ?? []
   if (targets.length === 0) return { raw: [], researchSource: 'fixture' as const }
 
-  /**
-   * Tier 2 of the research chain. When Parallel cannot answer, crawl4ai reads
-   * the open web for the tag itself — real, citable pages instead of nothing.
-   *
-   * Every page captured for one hashtag becomes ONE finding rather than one
-   * each, because the pages ARE the citations: `knowledge.research.extract`
-   * discards any entry citing fewer than `minSources` independent URLs, and a
-   * per-page finding could never clear that bar however many pages were read.
-   * Grouping them makes the citation count mean what the rule assumes it means.
-   */
-  async function webResearch(tag: string, displayTag: string): Promise<ResearchFinding[]> {
-    const rows = await crawl4aiSearch.run({
-      // `#RewardModeling` is a tag, not a query. Split on the camel-case seams
-      // so the engine sees the words a person would have typed.
-      keyword: displayTag.replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim(),
-      maxItems: Math.min(maxResults, config.crawl4ai.maxPagesPerKeyword),
-      maxCharsPerPage: config.crawl4ai.maxCharsPerPage,
-    })
-    if (rows.length === 0) return []
-    return [
-      {
-        hashtag: tag,
-        title: `Open-web reading on ${displayTag}`,
-        // The bodies stay whole: the extract step is what trims and dedupes,
-        // and trimming twice would cut a claim away from the sentence that
-        // qualifies it.
-        content: rows.map((r) => r.text).join('\n\n'),
-        category: 'Research',
-        citations: rows.map((r) => ({
-          title: r.authorHeadline || r.sourceName,
-          url: r.url,
-          publishedAt: r.postedAt.slice(0, 10),
-        })),
-      },
-    ]
-  }
-
   const maxParallel = Math.max(1, ctx.num('maxParallel', 4))
   const windowDays = ctx.num('windowDays', 14)
   const processor = ctx.str('processor', 'base')
@@ -157,8 +117,6 @@ registerSkill<KnowledgePayload>('knowledge.research.search', async (payload, ctx
 
   const reasons: string[] = []
   let anyLive = false
-  /** True once the open-web tier produced a citable reading for any hashtag. */
-  let webServed = false
 
   const perTag = await mapWithConcurrency(targets, maxParallel, async (target) => {
     ctx.emit('activity', `Researching #${target.displayTag}`, {
@@ -191,21 +149,17 @@ registerSkill<KnowledgePayload>('knowledge.research.search', async (payload, ctx
         maxResults,
       },
       async () => {
-        // A failure HERE is recorded and returns nothing. There is no third
-        // tier: an uncited claim never enters the Knowledge Base, so "no
-        // findings" is the correct answer, not a substituted one.
-        try {
-          const findings = await webResearch(target.tag, target.displayTag)
-          if (findings.length > 0) webServed = true
-          return findings
-        } catch (error) {
-          const reason =
-            error instanceof AdapterError
-              ? error.toReason()
-              : `crawl4ai failed — ${error instanceof Error ? error.message : String(error)}`
-          if (!reasons.includes(reason)) reasons.push(reason)
-          return []
-        }
+        /*
+         * THERE IS NO SECOND TIER, AND THAT IS THE CORRECT BEHAVIOUR.
+         *
+         * A crawler used to sit behind Parallel here, reading the open web when
+         * Parallel could not answer. It is gone: the open web is Parallel's lane
+         * now, so a Parallel failure has nothing honest behind it. An uncited
+         * claim never enters the Knowledge Base, so "no findings" IS the answer
+         * rather than a gap to be filled — the reason is recorded by the handler
+         * below and reported to the operator.
+         */
+        return []
       },
       (reason) => {
         if (!reasons.includes(reason)) reasons.push(reason)
@@ -225,25 +179,22 @@ registerSkill<KnowledgePayload>('knowledge.research.search', async (payload, ctx
   })
 
   const raw = perTag.flat()
-  // A crawled page IS a live reading of the web, so a run served by tier 2 is
-  // stamped live. `'fixture'` survives only as the storage value for "neither
-  // tier answered", which now means the run found nothing rather than that it
-  // invented something.
-  const researchSource: 'live' | 'fixture' = anyLive || webServed ? 'live' : 'fixture'
+  // `'fixture'` survives only as the storage value for "Parallel did not
+  // answer", which means the run found nothing rather than that it invented
+  // something. There is no second tier to stamp.
+  const researchSource: 'live' | 'fixture' = anyLive ? 'live' : 'fixture'
 
   if (reasons.length > 0) {
     ctx.emit(
       'activity',
-      webServed
-        ? `Parallel did not serve every hashtag — ${reasons[0]}. Read the open web with ${crawl4aiSearch.label} instead.`
-        : `Research found nothing citable — ${reasons[0]}`,
-      { status: 'warn', reason: reasons[0], via: webServed ? crawl4aiSearch.id : 'none' },
+      `Research found nothing citable — ${reasons[0]}`,
+      { status: 'warn', reason: reasons[0], via: 'none' },
     )
   }
 
   ctx.log(
     `${raw.length} raw finding(s) across ${targets.length} hashtag(s) via ` +
-      (anyLive ? parallelResearch.label : webServed ? crawl4aiSearch.label : 'no reachable source'),
+      (anyLive ? parallelResearch.label : 'no reachable source'),
   )
 
   return {
@@ -444,6 +395,17 @@ export interface RetrieveOptions {
    * the rules govern the writing rather than supplying its evidence.
    */
   includeRules?: boolean
+  /**
+   * Include the scraped `Signals` records. Off by default, for the same reason
+   * the rules are: a signal entry is bookkeeping, not a fact about the world.
+   * `recordScrapedTopicsAsKnowledge` writes one per capture listing the topics,
+   * hashtags and page URLs a run saw, so left in the pool they crowd out the
+   * research entries — they match every keyword query, because the keyword is
+   * literally their title — and then supply a raw social URL as a caption's
+   * "Source:". They remain on the Knowledge Base screen, which reads
+   * `listKnowledge` directly; they simply do not ground or cite a claim.
+   */
+  includeSignals?: boolean
   query: string
   maxResults: number
   includeInactive: boolean
@@ -477,6 +439,10 @@ export async function retrieveKnowledge(
   })
 
   const scored = rows
+    // Dropped BEFORE scoring, not after: the `maxResults` budget is spent on what
+    // survives here, and filtering downstream would leave a caption with the
+    // slots consumed by signal records and nothing citable left.
+    .filter((row) => opts.includeSignals === true || row.category !== SIGNALS_CATEGORY)
     .map((row) => ({ ...row, score: scoreEntryAgainstQuery(row, opts.query) }))
     .filter((row) => {
       if (opts.minConfidence !== undefined && confidenceRank(row.confidence) < opts.minConfidence) {

@@ -84,6 +84,8 @@ REGISTRY: dict[str, list[Knob]] = {
              description="How many visual dimensions the two options must actually differ on, counted across composition, focal subject, palette and viewpoint. Skill rule 7: a wording change is not a second visual direction, so this is measured between the two briefs, never asserted."),
         Knob(key="logo_clear_space_ratio", label="Logo clear space", default=1.0, minimum=0.25, maximum=3.0,
              description="Clear space the logomark must hold on every side, as a multiple of its own radius. Skill rule 14: a mark that cannot hold its clear space is reported, never shrunk or cropped to make it fit."),
+        Knob(key="max_correction_attempts", label="Automatic correction attempts", default=2, minimum=0, maximum=5,
+             description="Skill rule 15: how many automatic correction passes a candidate may take when a validation check fails, before the remaining issue is returned for human review rather than marked ready. Zero sends the first failure straight to review."),
         ],
     "calendar_agent": [
         Knob(key="top_per_platform", label="Calendar slots per platform", default=5, minimum=1, maximum=30,

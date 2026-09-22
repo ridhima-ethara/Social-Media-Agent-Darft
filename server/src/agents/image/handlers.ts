@@ -147,9 +147,27 @@ function backgroundPromptFor(concept: ImageConcept, topic: string, styleClause =
     'benchmark-bars': 'abstract vertical luminous bars of varying height in violet tones, no text',
     'data-lattice': 'a fine three-dimensional lattice of violet points receding into darkness, no text',
   }
-  return [`${base[concept]}, editorial, high contrast, cinematic, subject matter: ${topic}`, styleClause]
-    .filter(Boolean)
-    .join(' ')
+
+  /*
+   * A REFERENCE REPLACES THE GENERIC DESCRIPTION; IT DOES NOT ARGUE WITH IT.
+   *
+   * These two strings describe the same slot — what the background depicts — so
+   * appending one to the other asked for two different subjects at once. A real
+   * prompt read "abstract vertical luminous bars … no text" and then "one
+   * dominant 3D isometric server-hall hero", and the painter obeyed neither:
+   * every creative came back generic, which is exactly the complaint.
+   *
+   * The reference is the better of the two when it exists. It was written from a
+   * finished Ethara creative, so it carries the real palette, lighting and
+   * material, where `base` is a one-line placeholder. So the reference becomes
+   * the art direction and the generic line steps aside — the topic and the
+   * editorial framing still travel, because those are not in conflict.
+   */
+  if (styleClause !== '') {
+    return `${styleClause} Editorial, high contrast, cinematic. Subject matter: ${topic}.`
+  }
+
+  return `${base[concept]}, editorial, high contrast, cinematic, subject matter: ${topic}`
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

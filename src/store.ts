@@ -1653,6 +1653,17 @@ export const useStore = create<Store>((set, get) => ({
         if (result.demoted) {
           get().toast(`'${result.demoted.title}' moved to More suggestions to make room.`, 'neutral')
         }
+        /*
+         * A PROMOTED SUGGESTION HAS TO BE WRITTEN.
+         *
+         * The queue tells the operator that SpongeBob drafts a post once it
+         * holds a slot, and nothing did: promotion set `calendar_slot` and
+         * left `status` at `suggested`. The server only moves an idea to
+         * `drafted` when a caption is generated, so the post sat placed and
+         * unwritten. Drafting it here keeps the promise the queue makes, and
+         * it is what moves the card out of the queue for good.
+         */
+        if (idea.status === 'suggested') await get().regenerateDraft(ideaId)
         await get().refreshState()
         return
       } catch (error) {
@@ -1662,6 +1673,7 @@ export const useStore = create<Store>((set, get) => ({
       }
     }
 
+    if (idea.status === 'suggested') void get().regenerateDraft(ideaId)
     if (demoted) get().toast(`'${demoted.title}' moved to More suggestions to make room.`, 'neutral')
     else get().toast(`'${idea.title}' promoted to the calendar.`, 'good')
   },
@@ -1705,6 +1717,17 @@ export const useStore = create<Store>((set, get) => ({
         if (result.demoted) {
           get().toast(`'${result.demoted.title}' moved to More suggestions to make room.`, 'neutral')
         }
+        /*
+         * A PROMOTED SUGGESTION HAS TO BE WRITTEN.
+         *
+         * The queue tells the operator that SpongeBob drafts a post once it
+         * holds a slot, and nothing did: promotion set `calendar_slot` and
+         * left `status` at `suggested`. The server only moves an idea to
+         * `drafted` when a caption is generated, so the post sat placed and
+         * unwritten. Drafting it here keeps the promise the queue makes, and
+         * it is what moves the card out of the queue for good.
+         */
+        if (idea.status === 'suggested') await get().regenerateDraft(ideaId)
         await get().refreshState()
         return
       } catch (error) {
@@ -1714,6 +1737,7 @@ export const useStore = create<Store>((set, get) => ({
       }
     }
 
+    if (idea.status === 'suggested') void get().regenerateDraft(ideaId)
     if (demoted) get().toast(`'${demoted.title}' moved to More suggestions to make room.`, 'neutral')
     else get().toast(`'${idea.title}' scheduled on the calendar.`, 'good')
   },
@@ -2102,7 +2126,7 @@ export const useStore = create<Store>((set, get) => ({
       keyword: typeof d.keyword === 'string' ? d.keyword : '',
       platform: typeof d.platform === 'string' ? d.platform : 'open-web',
       // Whichever source the run named. Two sources answer now — an Apify actor
-      // on a platform lane, crawl4ai on the open web — so naming one of them by
+      // on a platform lane, Parallel on the open web — so naming one of them by
       // default would attribute a row to an implementation that may not have
       // produced it.
       source:

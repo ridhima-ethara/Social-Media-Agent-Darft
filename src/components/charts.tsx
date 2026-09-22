@@ -152,14 +152,25 @@ export interface SeriesSpec {
   key: string
   name: string
   colour: string
+  /** Series sharing a stackId are drawn stacked, for a composition. */
+  stackId?: string
 }
+
+/*
+ * A MISSING READING IS `null` HERE, NEVER `0`.
+ *
+ * Recharts draws nothing for a null and skips it in the tooltip, which is
+ * exactly right: a post whose impressions were never reported must not be
+ * drawn as a bar of height zero beside one that genuinely reached nobody.
+ */
+export type ChartRow = Record<string, string | number | null>
 
 export function TrendLine({
   data,
   series,
   xKey = 'label',
 }: {
-  data: Array<Record<string, string | number>>
+  data: ChartRow[]
   series: SeriesSpec[]
   xKey?: string
 }) {
@@ -194,7 +205,7 @@ export function TrendArea({
   series,
   xKey = 'label',
 }: {
-  data: Array<Record<string, string | number>>
+  data: ChartRow[]
   series: SeriesSpec[]
   xKey?: string
 }) {
@@ -236,7 +247,7 @@ export function BarsChart({
   series,
   xKey = 'label',
 }: {
-  data: Array<Record<string, string | number>>
+  data: ChartRow[]
   series: SeriesSpec[]
   xKey?: string
 }) {
@@ -249,7 +260,15 @@ export function BarsChart({
         <YAxis stroke={chrome.axis} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={fmt} />
         <Tooltip content={<ChartTooltip />} cursor={{ fill: chrome.wash }} />
         {series.map((s) => (
-          <Bar key={s.key} dataKey={s.key} name={s.name} fill={s.colour} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          <Bar
+            key={s.key}
+            dataKey={s.key}
+            name={s.name}
+            fill={s.colour}
+            stackId={s.stackId}
+            radius={s.stackId === undefined ? [4, 4, 0, 0] : undefined}
+            isAnimationActive={false}
+          />
         ))}
       </BarChart>
     </ResponsiveContainer>

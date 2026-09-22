@@ -26,8 +26,89 @@ platform.
 from __future__ import annotations
 
 import base64
+import json
 import re
+from pathlib import Path
 from typing import Any
+
+# ── Brand reference images ────────────────────────────────────────────────────
+# The operator's visual guidance lives in `public/brand/references/`, described
+# in `references.json`. Skill rule 10: those descriptions steer the background
+# prompt so a generated creative follows the house look. imagery.py is at
+# <repo>/backend/tools/, so the manifest is two parents up then into public/.
+_REFERENCES_MANIFEST = (
+    Path(__file__).resolve().parent.parent.parent
+    / "public" / "brand" / "references" / "references.json"
+)
+
+
+def _reference_style_clause(concept: str) -> str:
+    """
+    The art direction for one concept, from ONE reference, text clauses stripped.
+
+    Two faults are corrected here, the same two the Node tier had.
+
+    It used to JOIN every applicable reference. With most entries applying to all
+    concepts that asked the painter for two different hero subjects at once — a
+    server hall and a monolith — which is a contradiction rather than a style, and
+    the painter resolved it by ignoring both.
+
+    And the descriptions are written from finished creatives, so they name
+    headlines and callout labels. Those belong to the brand layer, which is
+    composited locally as vectors; asking a diffusion model for lettering is
+    forbidden outright. Passing them through produced a prompt that argued with
+    its own "no text" instruction.
+
+    So: one reference, preferring an entry tagged for this concept, chosen
+    deterministically so a run stays replayable; and only the clauses describing
+    light, material, palette and composition survive.
+    """
+    try:
+        raw = _REFERENCES_MANIFEST.read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+        entries = parsed.get("references", []) if isinstance(parsed, dict) else []
+    except (OSError, ValueError):
+        return ""
+
+    applicable = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("active") is False:
+            continue
+        concepts = entry.get("concepts") or []
+        if concepts and concept not in concepts:
+            continue
+        if str(entry.get("style", "")).strip():
+            applicable.append(entry)
+
+    if not applicable:
+        return ""
+
+    tagged = [e for e in applicable if concept in (e.get("concepts") or [])]
+    pool = tagged or applicable
+
+    seed = 0
+    for ch in concept:
+        seed = (seed * 31 + ord(ch)) & 0xFFFFFFFF
+    chosen = pool[seed % len(pool)]
+
+    # Clauses naming text are dropped; the brand layer supplies those.
+    text_clause = re.compile(
+        r"\b(headline|heading|label(s|led)?|caption|callout|dot leaders?|"
+        r"lettering|typography|wordmark|logo(mark)?|text)\b",
+        re.I,
+    )
+    kept = [
+        part.strip()
+        for part in str(chosen.get("style", "")).split(",")
+        if part.strip() and not text_clause.search(part)
+    ]
+    if not kept:
+        return ""
+
+    return (
+        " Match this art direction: " + ", ".join(kept) + "."
+        " Render the background only \u2014 no lettering, no labels, no logo of any kind."
+    )
 
 # The brand palette, mirroring `BRAND.visual.family` in shared/brand-voice.ts
 # and skill rule 9. These four are the only accents that may appear.
@@ -554,6 +635,7 @@ def compose_prompt(
     spec = CONCEPT_BY_ID.get(concept, CONCEPTS[0])
     canvas, _ = resolve_placement(platform, placement)
     forbidden = ", ".join(label.lower() for label, _ in FORBIDDEN_IMAGERY)
+    reference_style = _reference_style_clause(spec["id"])
 
     return {
         "prompt": (
@@ -563,6 +645,7 @@ def compose_prompt(
             "generous negative space, restrained engineered composition. "
             "No text, no letters, no numerals, no logos, no charts with readable values, no people. "
             f"Composition leaves the left two-thirds calm for an overlaid headline. {canvas['aspect']}."
+            f"{reference_style}"
         ),
         "negative_prompt": (
             "text, letters, words, numbers, logo, watermark, chart labels, faces, hands, "

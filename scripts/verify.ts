@@ -333,7 +333,7 @@ for (const path of required) {
 
 const PAGES = [
   'LoginPage', 'Dashboard', 'ContentIntelligence', 'CalendarPage', 'PublishedPosts',
-  'LeadershipReview', 'AgentActivity', 'AgentStudio', 'RunConsole', 'SettingsPage',
+  'LeadershipReview', 'AgentActivity', 'AgentStudio', 'SettingsPage',
   'AssistantConsole', 'KnowledgeBase', 'ReviewPanel', 'PipelineTheater',
 ]
 const pageDir = join(ROOT, 'src/pages')

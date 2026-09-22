@@ -149,7 +149,7 @@ export function recentEvents(count = REPLAY_SIZE): PipelineEvent[] {
 }
 
 /**
- * An activity line — the human-readable stream the Dashboard and Run Console
+ * An activity line — the human-readable stream the Dashboard and Agent Activity
  * render. Persisting it is the caller's job; this only notifies.
  */
 export function publishActivity(

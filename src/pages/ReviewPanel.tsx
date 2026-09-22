@@ -1,24 +1,24 @@
 /**
  * THE REVIEW PANEL
  *
- * A full-screen `Dialog`, three columns, the outer two sticky and
- * independently scrollable so the composer never leaves view. This is where a
- * human shapes what the agents wrote.
+ * A full-screen `Dialog`, three columns: why the post exists, the editor, and
+ * the live preview with the agent under it. The outer two scroll on their own
+ * so the composer never leaves view. This is where a human shapes what the
+ * agents wrote.
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, ArrowRight, Check, ChevronLeft, ExternalLink, FileText, Paperclip, RefreshCw, Send, Sparkles, X } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronLeft, ChevronRight, Clock, ExternalLink, FileText, Paperclip, RefreshCw, Send, Shuffle, Sparkles, X } from 'lucide-react'
 import { useStore } from '../store'
 
-/* The post column is draggable from its left edge. The bounds keep it useful at
-   both ends: a narrower column stops showing a post at a believable width, and a
-   wider one starves the editor it sits beside. The width outlives the dialog. */
-const POST_MIN = 260
-const POST_MAX = 720
-const POST_DEFAULT = 316
-const POST_KEY = 'ethara.review.postWidth'
-/* The agent rail is a fixed reading width; only the post is sized by hand. */
-const AGENT_WIDTH = 392
+/* The right column — the live preview with the agent under it — is draggable
+   from its left edge. The bounds keep it useful at both ends: narrower stops
+   showing a post at a believable width, wider starves the editor beside it.
+   The width outlives the dialog. */
+const ASIDE_MIN = 300
+const ASIDE_MAX = 720
+const ASIDE_DEFAULT = 392
+const ASIDE_KEY = 'ethara.review.asideWidth'
 import { ModelMenu } from '../components/model-menu'
 import { DEFAULT_CROP, PREVIEW_CROPS, PlatformPreview, type PreviewCrop } from '../components/previews'
 import { AssistantCore } from '../components/assistant/core'
@@ -71,19 +71,28 @@ const IMAGE_ACTIONS = [
   { label: 'Add depth', instruction: 'Add depth with a layered gradient field' },
 ]
 
+/*
+ * The starter instructions, as a short chip and the sentence actually sent.
+ * The chips used to BE the sentences, and four of them stacked one per line
+ * filled the agent panel with more text than the post it was editing.
+ */
 const CAPTION_PROMPTS = [
-  'Make it shorter and more CTO-focused',
-  'Lead with the number instead of the framing',
-  'Remove the second paragraph',
-  'Rewrite the close so it points at the blog',
+  { label: 'Shorter, for CTOs', instruction: 'Make it shorter and more CTO-focused' },
+  { label: 'Lead with the number', instruction: 'Lead with the number instead of the framing' },
+  { label: 'Cut the second para', instruction: 'Remove the second paragraph' },
+  { label: 'Close on the blog', instruction: 'Rewrite the close so it points at the blog' },
 ]
 
-const IMAGE_PROMPTS = [
-  'Make the background darker',
-  'Use the deep end of the accent family',
-  'Simplify — the headline is getting lost',
-  'Re-render at higher contrast',
-]
+/* The design's tones: approved reads blue, published green, drafted amber. */
+const STATUS_INK: Partial<Record<Idea['status'], string>> = {
+  approved: 'var(--color-accent-bright)',
+  scheduled: 'var(--color-accent-bright)',
+  published: 'var(--color-good-ink)',
+  drafted: 'var(--color-warn)',
+  in_review: 'var(--color-serious)',
+  pending_leadership: 'var(--color-serious)',
+  rejected: 'var(--color-critical-ink)',
+}
 
 /** One step on the revision spine: what was asked, and what it changed. */
 interface Revision {
@@ -201,7 +210,6 @@ export function ReviewPanel() {
 
   const [target, setTarget] = useState<'caption' | 'image'>('caption')
   const [body, setBody] = useState('')
-  const [imagePrompt, setImagePrompt] = useState('')
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [chatValue, setChatValue] = useState('')
   const [thinking, setThinking] = useState<string | null>(null)
@@ -225,32 +233,32 @@ export function ReviewPanel() {
   /** The left column, folded sideways. Open by default: it answers "why". */
   const [whyOpen, setWhyOpen] = useState(true)
 
-  /* ── the draggable post column ── */
-  const [postWidth, setPostWidth] = useState(() => {
-    if (typeof window === 'undefined') return POST_DEFAULT
-    const stored = Number(window.localStorage.getItem(POST_KEY))
-    return Number.isFinite(stored) && stored >= POST_MIN && stored <= POST_MAX ? stored : POST_DEFAULT
+  /* ── the draggable right column ── */
+  const [asideWidth, setAsideWidth] = useState(() => {
+    if (typeof window === 'undefined') return ASIDE_DEFAULT
+    const stored = Number(window.localStorage.getItem(ASIDE_KEY))
+    return Number.isFinite(stored) && stored >= ASIDE_MIN && stored <= ASIDE_MAX ? stored : ASIDE_DEFAULT
   })
   const [resizing, setResizing] = useState(false)
   const resizeFrom = useRef<{ x: number; width: number } | null>(null)
-  const clampPost = (width: number) => Math.min(POST_MAX, Math.max(POST_MIN, Math.round(width)))
+  const clampAside = (width: number) => Math.min(ASIDE_MAX, Math.max(ASIDE_MIN, Math.round(width)))
 
   useEffect(() => {
     /* Storage throws in private mode; a preference is not worth a crash. */
-    try { window.localStorage.setItem(POST_KEY, String(postWidth)) } catch { /* ignored */ }
-  }, [postWidth])
+    try { window.localStorage.setItem(ASIDE_KEY, String(asideWidth)) } catch { /* ignored */ }
+  }, [asideWidth])
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
-    resizeFrom.current = { x: event.clientX, width: postWidth }
+    resizeFrom.current = { x: event.clientX, width: asideWidth }
     setResizing(true)
   }
   const moveResize = (event: React.PointerEvent<HTMLDivElement>) => {
     const from = resizeFrom.current
     if (!from) return
-    /* The handle is on the post column's left edge, so dragging left widens it. */
-    setPostWidth(clampPost(from.width - (event.clientX - from.x)))
+    /* The handle is on the column's left edge, so dragging left widens it. */
+    setAsideWidth(clampAside(from.width - (event.clientX - from.x)))
   }
   const endResize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!resizeFrom.current) return
@@ -261,7 +269,7 @@ export function ReviewPanel() {
   const keyResize = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
-    setPostWidth((width) => clampPost(width + (event.key === 'ArrowLeft' ? 24 : -24)))
+    setAsideWidth((width) => clampAside(width + (event.key === 'ArrowLeft' ? 24 : -24)))
   }
   const [restorePoint, setRestorePoint] = useState<string | null>(null)
 
@@ -317,10 +325,6 @@ export function ReviewPanel() {
       ]
     })
   }, [draft?.body, draft?.revision])
-
-  useEffect(() => {
-    setImagePrompt(asset?.concept ? `${asset.concept} · ${idea?.source_topic ?? ''}` : '')
-  }, [asset?.concept, idea?.source_topic])
 
   /*
    * NEVER FAIL SILENTLY.
@@ -476,7 +480,17 @@ export function ReviewPanel() {
               </span>
               {idea.analysis?.format ? <><span>·</span><span>{String(idea.analysis.format).toUpperCase()}</span></> : null}
               <span>·</span><span>CONF {idea.confidence}</span>
-              <span>·</span><span className="text-ink-2">{idea.status.replace(/_/g, ' ').toUpperCase()}</span>
+              <span>·</span>
+              <span
+                className="rounded-full border px-2 py-px text-[9px] font-semibold tracking-[0.12em]"
+                style={{
+                  color: STATUS_INK[idea.status] ?? 'var(--color-ink-2)',
+                  borderColor: `color-mix(in srgb, ${STATUS_INK[idea.status] ?? 'var(--color-ink-3)'} 35%, transparent)`,
+                  background: `color-mix(in srgb, ${STATUS_INK[idea.status] ?? 'var(--color-ink-3)'} 10%, transparent)`,
+                }}
+              >
+                {idea.status.replace(/_/g, ' ').toUpperCase()}
+              </span>
             </div>
           </div>
 
@@ -513,40 +527,89 @@ export function ReviewPanel() {
             ("WHY WEDN…") and still took the width. */}
         <aside
           className="relative flex min-h-0 flex-col border-r border-line bg-surface-2 transition-[width] duration-[var(--dur-base)] ease-[var(--ease-out-soft)] lg:overflow-hidden"
-          style={{ width: whyOpen ? 236 : 40 }}
+          style={{ width: whyOpen ? 236 : 52 }}
           aria-label="Why this post exists"
         >
-          <button
-            type="button"
-            onClick={() => setWhyOpen((v) => !v)}
-            aria-expanded={whyOpen}
-            title={whyOpen ? 'Collapse this column' : 'Expand this column'}
-            className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2.5 text-ink-3 transition-colors hover:text-ink"
-          >
-            <ChevronLeft
-              size={12}
-              aria-hidden="true"
-              className="shrink-0"
-              style={{ transform: whyOpen ? 'none' : 'rotate(180deg)', transition: 'transform var(--dur-base) var(--ease-out-soft)' }}
-            />
-            {whyOpen ? <span className="mono truncate text-[9px] uppercase tracking-[0.12em]">Why</span> : null}
-          </button>
-
-          {/* Collapsed, the column says what it is, read bottom-up. */}
-          {whyOpen ? null : (
-            <span
-              className="mono flex flex-1 items-center justify-center whitespace-nowrap text-[9px] uppercase tracking-[0.18em] text-ink-3"
-              style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
-              aria-hidden="true"
+          {whyOpen ? (
+            <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
+              <span className="h-[14px] w-[2px] shrink-0 rounded-full bg-magenta" aria-hidden="true" />
+              <span className="mono min-w-0 flex-1 truncate text-[9px] uppercase tracking-[0.14em] text-ink-2">
+                Why this post exists
+              </span>
+              <button
+                type="button"
+                onClick={() => setWhyOpen(false)}
+                aria-expanded
+                title="Collapse this column"
+                aria-label="Collapse this column"
+                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[7px] border border-line-strong text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+              >
+                <ChevronLeft size={12} aria-hidden="true" />
+              </button>
+            </header>
+          ) : (
+            /*
+             * COLLAPSED, THE RAIL STILL SAYS WHAT IT HOLDS.
+             *
+             * It was a bare strip with one chevron and a line of vertical text,
+             * which reads as a border rather than a control. Now the whole
+             * column is the button, and the four glyphs name what is behind it
+             * — the scores, the captured page, the slot, the other platforms —
+             * so the rail advertises its contents instead of hiding them.
+             */
+            <button
+              type="button"
+              onClick={() => setWhyOpen(true)}
+              aria-expanded={false}
+              title="Show why this post exists"
+              aria-label="Show why this post exists"
+              className="group relative flex h-full w-full flex-col items-center gap-3 overflow-hidden py-3 outline-none"
             >
-              Why this post exists
-            </span>
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100 group-focus-visible:opacity-100"
+                style={{ background: 'linear-gradient(180deg, var(--color-hud-glow), transparent 55%)' }}
+              />
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 right-0 w-px"
+                style={{ background: 'linear-gradient(180deg, transparent, var(--color-magenta), transparent)', opacity: 0.45 }}
+              />
+
+              <span className="relative flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[8px] border border-line-strong text-ink-3 transition-colors duration-[var(--dur-fast)] group-hover:border-accent group-hover:text-accent-bright group-focus-visible:border-accent">
+                <ChevronRight size={12} aria-hidden="true" />
+              </span>
+
+              <span
+                className="mono relative flex flex-1 items-center justify-center whitespace-nowrap text-[9px] uppercase tracking-[0.2em] text-ink-3 transition-colors duration-[var(--dur-fast)] group-hover:text-ink-2"
+                style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
+              >
+                Why this post exists
+              </span>
+
+              {/* What the column holds, one glyph each. */}
+              <span className="relative flex shrink-0 flex-col items-center gap-1.5" aria-hidden="true">
+                {[
+                  { icon: Sparkles, label: 'Brand and trend scores' },
+                  { icon: ExternalLink, label: 'The captured page' },
+                  { icon: Clock, label: 'Why this slot' },
+                  { icon: Shuffle, label: 'Other platforms' },
+                ].map((item) => (
+                  <span
+                    key={item.label}
+                    title={item.label}
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-[7px] border border-line text-ink-3 transition-colors duration-[var(--dur-fast)] group-hover:border-magenta/35 group-hover:text-magenta-ink"
+                  >
+                    <item.icon size={11} />
+                  </span>
+                ))}
+              </span>
+            </button>
           )}
 
           <div className="min-h-0 flex-1 overflow-y-auto" style={{ display: whyOpen ? undefined : 'none' }}>
           <div className="border-b border-line px-3.5 py-3">
-            <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">WHY THIS POST EXISTS</p>
-            <p className="mt-1.5 text-[12px] leading-relaxed text-ink-2">
+            <p className="text-[12px] leading-relaxed text-ink-2">
               {idea.hashtag_display ? <>Captured under <span className="mono text-[11px] text-accent-bright">#{idea.hashtag_display}</span>. </> : null}
               {idea.source_topic ? <>Topic <span className="text-ink">{idea.source_topic}</span>. </> : null}
               {idea.analysis?.angle ? <>Angle: {String(idea.analysis.angle)}.</> : null}
@@ -623,8 +686,8 @@ export function ReviewPanel() {
           </div>
         </aside>
 
-        {/* ── CENTRE · edit against the preview ─────────────────────────
-            Takes whatever the rail gives back. */}
+        {/* ── CENTRE · the editor ──────────────────────────────────────
+            Takes whatever the two rails give back. */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-2.5">
             <div className="flex gap-0.5 rounded-md border border-line-strong p-0.5">
@@ -634,8 +697,8 @@ export function ReviewPanel() {
                   type="button"
                   onClick={() => setView(v)}
                   aria-pressed={view === v}
-                  className={`mono rounded-[4px] px-2.5 py-1 text-[10px] uppercase transition-colors ${
-                    view === v ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:text-ink'
+                  className={`mono rounded-[4px] px-2.5 py-1 text-[10px] uppercase tracking-[0.08em] transition-colors ${
+                    view === v ? 'bg-magenta/16 text-ink' : 'text-ink-3 hover:text-ink'
                   }`}
                 >
                   {v}
@@ -643,7 +706,7 @@ export function ReviewPanel() {
               ))}
             </div>
             <span className="mono truncate text-[11px] text-ink-3">
-              {draft ? `SpongeBob · ${draft.model} · rev ${draft.revision}` : 'Writing…'}
+              {draft ? `SpongeBob · rev ${draft.revision}` : 'Writing…'}
             </span>
             <span
               className={`mono ml-auto shrink-0 text-[11px] ${body.length > CAPTION_CAP[idea.platform] ? 'text-critical-ink' : 'text-ink-3'}`}
@@ -653,106 +716,113 @@ export function ReviewPanel() {
             </span>
           </div>
 
-          <div
-            className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_min(var(--post-w),60%)]"
-            style={{ ['--post-w' as string]: `${postWidth}px` }}
-          >
-            {/* the caption */}
-            <div className="flex min-w-0 flex-col overflow-y-auto border-r border-line p-4">
-              <div className="flex shrink-0 flex-wrap gap-1.5">
-                {CAPTION_ACTIONS.map((action) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    onClick={() => { setTarget('caption'); send(action.instruction) }}
-                    className="rounded-full border border-line-strong px-2.5 py-1 text-[11px] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-                  >
-                    {action.label}
-                  </button>
-                ))}
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+            <div className="flex shrink-0 flex-wrap gap-1.5">
+              {CAPTION_ACTIONS.map((action) => (
                 <button
+                  key={action.label}
                   type="button"
-                  onClick={() => void regenerateDraft(idea.id)}
-                  className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-line-strong px-2.5 py-1 text-[11px] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+                  onClick={() => { setTarget('caption'); send(action.instruction) }}
+                  className="rounded-full border border-line-strong px-3 py-1.5 text-[11.5px] text-ink-2 transition-colors hover:border-magenta/50 hover:text-magenta-ink"
                 >
-                  <RefreshCw size={11} aria-hidden="true" /> Regenerate
+                  {action.label}
                 </button>
-              </div>
-
-              {view === 'diff' ? (
-                <DiffView spine={spine} />
-              ) : view === 'preview' ? (
-                <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
-                  <div className="mx-auto max-w-[520px]">
-                    <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} crop={crop} />
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <textarea
-                    value={body}
-                    onChange={(event) => setBody(event.target.value)}
-                    onBlur={() => { updateDraft(idea.id, body); setSavedAt(Date.now()) }}
-                    aria-label="Caption"
-                    className="mt-3 min-h-0 w-full flex-1 resize-none rounded-[9px] border border-line-strong bg-surface px-4 py-3 text-[13px] leading-[1.75] text-ink outline-none transition-colors focus:border-accent"
-                  />
-                  {/* A finding is raised beside the text it applies to, not buried. */}
-                  {spine.filter((r) => r.finding).slice(-1).map((r) => (
-                    <div key={r.id} className="mt-2.5 flex shrink-0 items-center gap-2.5 rounded-lg border border-hud-strong bg-accent/10 px-3 py-2">
-                      <Sparkles size={13} className="shrink-0 text-accent-bright" aria-hidden="true" />
-                      <span className="flex-1 text-[11.5px] leading-relaxed text-ink-2">{r.finding}</span>
-                      <button type="button" onClick={() => setView('diff')} className="mono shrink-0 text-[11px] text-ink-3 transition-colors hover:text-accent-bright">
-                        SEE DIFF
-                      </button>
-                    </div>
-                  ))}
-                </>
-              )}
+              ))}
+              <button
+                type="button"
+                onClick={() => void regenerateDraft(idea.id)}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-[9px] border border-line-strong px-3 py-1.5 text-[11.5px] font-semibold text-ink transition-colors hover:border-accent"
+              >
+                <RefreshCw size={11} aria-hidden="true" /> Regenerate
+              </button>
             </div>
 
-            {/* the creative, always on screen */}
-            <div className="relative flex min-w-0 flex-col overflow-y-auto bg-surface-2 p-3.5">
-              {/* Drag this left edge to resize the post. Arrow keys do the same
-                  for anyone who cannot drag, which is why this is a focusable
-                  separator rather than a bare div with a cursor. */}
-              <div
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize the post column"
-                aria-valuenow={postWidth}
-                aria-valuemin={POST_MIN}
-                aria-valuemax={POST_MAX}
-                tabIndex={0}
-                onPointerDown={startResize}
-                onPointerMove={moveResize}
-                onPointerUp={endResize}
-                onPointerCancel={endResize}
-                onKeyDown={keyResize}
-                title="Drag to resize the post · arrow keys also work"
-                className="group absolute inset-y-0 left-0 z-20 hidden w-2 cursor-col-resize outline-none xl:block"
-              >
-                <span
-                  className={`absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 transition-colors ${
-                    resizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent group-focus-visible:bg-accent'
-                  }`}
-                  aria-hidden="true"
-                />
+            {view === 'diff' ? (
+              <DiffView spine={spine} />
+            ) : view === 'preview' ? (
+              <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+                <div className="mx-auto max-w-[520px]">
+                  <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} crop={crop} />
+                </div>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">LIVE PREVIEW</p>
-                <span className="mono text-[10.5px] tracking-[0.1em] text-ink-3">· FEED</span>
+            ) : (
+              <>
+                <textarea
+                  value={body}
+                  onChange={(event) => setBody(event.target.value)}
+                  onBlur={() => { updateDraft(idea.id, body); setSavedAt(Date.now()) }}
+                  aria-label="Caption"
+                  className="mt-4 min-h-[320px] w-full flex-1 resize-none rounded-[12px] border border-line bg-page px-6 py-5 text-[14px] leading-[1.65] text-ink outline-none transition-colors focus:border-accent"
+                />
+                {/* A finding is raised beside the text it applies to, not buried. */}
+                {spine.filter((r) => r.finding).slice(-1).map((r) => (
+                  <div key={r.id} className="mt-2.5 flex shrink-0 items-center gap-2.5 rounded-lg border border-hud-strong bg-accent/10 px-3 py-2">
+                    <Sparkles size={13} className="shrink-0 text-accent-bright" aria-hidden="true" />
+                    <span className="flex-1 text-[11.5px] leading-relaxed text-ink-2">{r.finding}</span>
+                    <button type="button" onClick={() => setView('diff')} className="mono shrink-0 text-[11px] text-ink-3 transition-colors hover:text-accent-bright">
+                      SEE DIFF
+                    </button>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* ── RIGHT · the live preview, then the agent under it ──────────
+            One column, as the design draws it: what the post will look like
+            sits above the agent that changes it. The column scrolls as a
+            whole; the resize grip stays put on its left edge. */}
+        <aside
+          className="relative flex min-h-0 shrink-0 flex-col border-l border-line bg-surface-2 lg:w-[var(--aside-w)]"
+          style={{ ['--aside-w' as string]: `${asideWidth}px` }}
+          aria-label="Preview and agent"
+        >
+          {/* Drag this left edge to resize the column. Arrow keys do the same
+              for anyone who cannot drag, which is why this is a focusable
+              separator rather than a bare div with a cursor. */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize the preview column"
+            aria-valuenow={asideWidth}
+            aria-valuemin={ASIDE_MIN}
+            aria-valuemax={ASIDE_MAX}
+            tabIndex={0}
+            onPointerDown={startResize}
+            onPointerMove={moveResize}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+            onKeyDown={keyResize}
+            title="Drag to resize the column · arrow keys also work"
+            className="group absolute inset-y-0 left-0 z-20 hidden w-2 cursor-col-resize outline-none lg:block"
+          >
+            <span
+              className={`absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 transition-colors ${
+                resizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent group-focus-visible:bg-accent'
+              }`}
+              aria-hidden="true"
+            />
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3.5">
+            {/* ── the live preview ── */}
+            <section className="flex flex-col gap-3.5 rounded-[16px] border border-line bg-surface p-4" aria-label="Live preview">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="h-[7px] w-[7px] rounded-full bg-good" aria-hidden="true" />
+                <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">LIVE PREVIEW · FEED</p>
                 {/* The crop the feed will show. The canvas is not changed, and
                     neither is the creative — it is fitted to the ratio whole,
                     never sliced to it. */}
-                <div className="ml-auto flex gap-0.5 rounded-md border border-line-strong p-0.5" role="group" aria-label="Preview crop">
+                <div className="ml-auto flex overflow-hidden rounded-[9px] border border-line-strong" role="group" aria-label="Preview crop">
                   {PREVIEW_CROPS.map((option) => (
                     <button
                       key={option}
                       type="button"
                       onClick={() => setCropChoice(option)}
                       aria-pressed={crop === option}
-                      className={`mono rounded-[4px] px-1.5 py-px text-[10.5px] transition-colors ${
-                        crop === option ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:text-ink'
+                      className={`mono px-2.5 py-1 text-[10.5px] transition-colors ${
+                        crop === option ? 'bg-magenta/16 text-ink' : 'text-ink-3 hover:text-ink'
                       }`}
                     >
                       {option}
@@ -760,270 +830,287 @@ export function ReviewPanel() {
                   ))}
                 </div>
               </div>
-              <div className="mt-2.5 shrink-0">
-                <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} crop={crop} />
-              </div>
 
-              <div className="mt-3 flex shrink-0 items-center gap-2">
-                <p className="mono text-[10.5px] tracking-[0.14em] text-ink-3">CREATIVE</p>
-                <span className="mono truncate text-[10.5px] tracking-[0.08em] text-ink-3">
-                  {asset ? `${asset.canvas ?? ''} · ${asset.model ?? 'brand-svg'}` : 'rendering…'}
-                </span>
+              <PlatformPreview platform={idea.platform} body={body} media={asset?.dataUri ?? null} crop={crop} />
+
+              {/* The creative's canvas and model are not printed here: the
+                  picture above already shows what was rendered, and the model
+                  is chosen a few lines down. A creative that FELL BACK still
+                  says so — that is a fact about the image, not a caption. */}
+              <div className="flex flex-wrap items-center gap-2">
                 {asset?.fallbackReason ? (
-                  <span title={asset.fallbackReason} className="mono ml-auto inline-flex shrink-0 items-center gap-1.5 text-[10.5px] tracking-[0.08em] text-serious">
+                  <span title={asset.fallbackReason} className="mono inline-flex shrink-0 items-center gap-1.5 text-[10.5px] tracking-[0.08em] text-serious">
                     <span className="h-1 w-1 rounded-full bg-serious" aria-hidden="true" />
                     SVG FALLBACK
                   </span>
                 ) : null}
-              </div>
-
-              <div className="mt-2 flex shrink-0 gap-1.5">
                 <button
                   type="button"
                   onClick={() => void regenerateImage(idea.id)}
-                  className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-hud-strong bg-accent/12 px-2 py-1.5 text-[11.5px] font-semibold text-accent-bright transition-colors hover:border-accent"
+                  className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-[9px] border border-line-strong px-3 py-1.5 text-[11.5px] font-semibold text-ink transition-colors hover:border-accent"
                 >
-                  <RefreshCw size={12} aria-hidden="true" /> Regenerate
+                  <RefreshCw size={11} aria-hidden="true" /> Regenerate
                 </button>
               </div>
+            </section>
 
-              <div className="mt-1.5 flex shrink-0 flex-wrap gap-1.5">
-                {IMAGE_ACTIONS.map((action) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    onClick={() => { setTarget('image'); send(action.instruction) }}
-                    className="rounded-full border border-line-strong px-2 py-[3px] text-[10.5px] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-                  >
-                    {action.label}
-                  </button>
-                ))}
-              </div>
-
-              <form
-                onSubmit={(event) => { event.preventDefault(); setTarget('image'); send(imagePrompt) }}
-                className="mt-2 flex shrink-0 items-center gap-1.5 rounded-[7px] border border-line-strong bg-surface py-1 pl-2.5 pr-1"
-              >
-                <Sparkles size={12} className="shrink-0 text-accent-bright" aria-hidden="true" />
-                <input
-                  value={imagePrompt}
-                  onChange={(event) => setImagePrompt(event.target.value)}
-                  placeholder="Change the image…"
-                  aria-label="Image instruction"
-                  className="min-w-0 flex-1 border-0 bg-transparent text-[11.5px] text-ink outline-none"
+            {/* ── the agent ── */}
+            <section
+              className="rounded-[17px] p-px"
+              style={{
+                background:
+                  'linear-gradient(165deg, color-mix(in srgb, var(--color-magenta) 55%, transparent), color-mix(in srgb, var(--color-accent) 40%, transparent) 45%, var(--color-line))',
+              }}
+              aria-label={target === 'caption' ? 'SpongeBob, the content agent' : 'Minnie, the image agent'}
+            >
+              <div className="relative flex flex-col gap-3 overflow-hidden rounded-[16px] bg-surface p-3.5">
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute -left-16 -top-16 h-[200px] w-[200px] rounded-full"
+                  style={{ background: 'radial-gradient(circle, var(--color-hud-glow), transparent 70%)' }}
                 />
-                <button type="submit" className="shrink-0 rounded-[5px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-semibold text-on-accent">
-                  Render
-                </button>
-              </form>
 
-            </div>
-          </div>
-        </div>
-
-        {/* ── RIGHT · the agent, and the revision spine ───────────────── */}
-        <aside
-          className="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line bg-surface-2 lg:w-[var(--agent-w)]"
-          style={{ ['--agent-w' as string]: `${AGENT_WIDTH}px` }}
-        >
-          <div className="flex shrink-0 items-center gap-2.5 border-b border-line px-3.5 py-3">
-            <AssistantCore state={thinking ? 'thinking' : 'dormant'} size={22} className="shrink-0" />
-            <div className="min-w-0 flex-1">
-              <p className="text-[12.5px] font-semibold tracking-[-0.01em] text-ink">
-                {target === 'caption' ? 'SpongeBob' : 'Minnie'}
-              </p>
-              <p className="mono truncate text-[10.5px] uppercase tracking-[0.08em] text-ink-3">
-                {target === 'caption' ? `Content Agent · ${draft?.model ?? 'qwen3.5'}` : `Image Agent · ${asset?.model ?? 'brand-svg'}`}
-              </p>
-            </div>
-            <div className="flex shrink-0 gap-0.5 rounded-md border border-line-strong p-0.5">
-              {(['caption', 'image'] as const).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setTarget(t)}
-                  aria-pressed={target === t}
-                  className={`mono rounded-[4px] px-2 py-[3px] text-[11px] uppercase transition-colors ${
-                    target === t ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:text-ink'
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3.5 py-3">
-            {spine.map((rev, i) => (
-              <div key={rev.id} className="flex flex-col gap-2.5" style={{ animation: `eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 60}ms both` }}>
-                {rev.instruction ? (
-                  <div className="flex justify-end">
-                    <p className="max-w-[86%] rounded-[10px] rounded-br-[3px] border border-hud-strong bg-accent/12 px-2.5 py-1.5 text-[11.5px] leading-relaxed text-ink">
-                      {rev.instruction}
+                <div className="relative flex items-center gap-2.5">
+                  <span className="relative shrink-0">
+                    <AssistantCore state={thinking ? 'thinking' : 'dormant'} size={34} />
+                    <span className="absolute bottom-0 right-0 h-[9px] w-[9px] rounded-full border-2 border-surface bg-good" aria-hidden="true" />
+                  </span>
+                  <div className="flex min-w-0 flex-1 items-baseline gap-2">
+                    <p className="shrink-0 text-[13.5px] font-semibold tracking-[-0.01em] text-ink">
+                      {target === 'caption' ? 'SpongeBob' : 'Minnie'}
                     </p>
+                    {/* The role, not the model. Which model wrote it is the
+                        picker's business, a few lines down. */}
+                    <span className="mono min-w-0 truncate text-[8.5px] font-semibold uppercase tracking-[0.12em] text-magenta-ink">
+                      {target === 'caption' ? 'Content agent' : 'Image agent'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* The latest step on the spine, in one line. The whole spine
+                    is below, for anyone who wants to walk it. */}
+                {spine.length > 0 ? (
+                  <div className="relative flex items-center gap-2 text-[10.5px] text-ink-3">
+                    <span className="mono shrink-0 rounded-[6px] border border-magenta/35 px-1.5 py-px text-[9.5px] font-semibold text-magenta-ink">
+                      R{spine[spine.length - 1].revision}
+                    </span>
+                    <span className="min-w-0 truncate" title={spine[spine.length - 1].summary}>{spine[spine.length - 1].summary}</span>
                   </div>
                 ) : null}
-                <div className="flex gap-2.5">
-                  <span className={`mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border text-[10.5px] ${
-                    i === spine.length - 1 ? 'border-accent bg-accent/12 text-accent-bright' : 'border-line-strong text-ink-3'
-                  }`}>
-                    R{rev.revision}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11.5px] leading-relaxed text-ink-2">{rev.summary}</p>
-                    {rev.charDelta !== 0 || rev.paraDelta !== 0 ? (
-                      <div className="mt-1.5 flex flex-wrap gap-1.5">
-                        {rev.charDelta !== 0 ? (
-                          <span className={`mono rounded-[4px] border px-1.5 py-px text-[10.5px] tracking-[0.06em] ${
-                            rev.charDelta < 0 ? 'border-critical/50 text-critical-ink' : 'border-hud-strong text-accent-bright'
+
+                <div className="relative flex overflow-hidden rounded-[10px] border border-line-strong" role="group" aria-label="What an instruction changes">
+                  {(['caption', 'image'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setTarget(t)}
+                      aria-pressed={target === t}
+                      className={`mono flex-1 px-3 py-[5px] text-center text-[9.5px] font-semibold uppercase tracking-[0.1em] transition-colors ${
+                        target === t ? 'bg-magenta/16 text-ink' : 'text-ink-3 hover:text-ink'
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="relative flex flex-wrap gap-1.5">
+                  {(target === 'caption' ? CAPTION_PROMPTS : IMAGE_ACTIONS).map((action) => (
+                    <button
+                      key={action.label}
+                      type="button"
+                      onClick={() => send(action.instruction)}
+                      title={action.instruction}
+                      className="rounded-full border border-line-strong px-2.5 py-1 text-[10.5px] text-ink-2 transition-colors hover:border-magenta/50 hover:text-magenta-ink"
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* ── the revision spine, and the conversation around it ── */}
+                {spine.length > 1 || bubbles.length > 0 || thinking || preference ? (
+                  <div className="relative flex max-h-[300px] flex-col gap-3 overflow-y-auto border-t border-line pt-3.5">
+                    {spine.map((rev, i) => (
+                      <div key={rev.id} className="flex flex-col gap-2.5" style={{ animation: `eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 60}ms both` }}>
+                        {rev.instruction ? (
+                          <div className="flex justify-end">
+                            <p className="max-w-[86%] rounded-[10px] rounded-br-[3px] border border-hud-strong bg-accent/12 px-2.5 py-1.5 text-[11.5px] leading-relaxed text-ink">
+                              {rev.instruction}
+                            </p>
+                          </div>
+                        ) : null}
+                        <div className="flex gap-2.5">
+                          <span className={`mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border text-[10.5px] ${
+                            i === spine.length - 1 ? 'border-magenta/50 bg-magenta/10 text-magenta-ink' : 'border-line-strong text-ink-3'
                           }`}>
-                            {rev.charDelta > 0 ? '+' : ''}{rev.charDelta} CHARS
+                            R{rev.revision}
                           </span>
-                        ) : null}
-                        {rev.paraDelta !== 0 ? (
-                          <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[10.5px] tracking-[0.06em] text-ink-3">
-                            {rev.paraDelta > 0 ? '+' : ''}{rev.paraDelta} PARA
-                          </span>
-                        ) : null}
-                        {i === spine.length - 1 ? (
-                          <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[10.5px] tracking-[0.06em] text-ink-3">CURRENT</span>
-                        ) : null}
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11.5px] leading-relaxed text-ink-2">{rev.summary}</p>
+                            {rev.charDelta !== 0 || rev.paraDelta !== 0 ? (
+                              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                {rev.charDelta !== 0 ? (
+                                  <span className={`mono rounded-[4px] border px-1.5 py-px text-[10.5px] tracking-[0.06em] ${
+                                    rev.charDelta < 0 ? 'border-critical/50 text-critical-ink' : 'border-hud-strong text-accent-bright'
+                                  }`}>
+                                    {rev.charDelta > 0 ? '+' : ''}{rev.charDelta} CHARS
+                                  </span>
+                                ) : null}
+                                {rev.paraDelta !== 0 ? (
+                                  <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[10.5px] tracking-[0.06em] text-ink-3">
+                                    {rev.paraDelta > 0 ? '+' : ''}{rev.paraDelta} PARA
+                                  </span>
+                                ) : null}
+                                {i === spine.length - 1 ? (
+                                  <span className="mono rounded-[4px] border border-line-strong px-1.5 py-px text-[10.5px] tracking-[0.06em] text-ink-3">CURRENT</span>
+                                ) : null}
+                              </div>
+                            ) : null}
+                            {rev.finding ? (
+                              <div className="mt-2 border-l border-serious/60 pl-2.5">
+                                <p className="mono text-[10.5px] tracking-[0.1em] text-serious">FINDING · RAISED, NOT RESOLVED</p>
+                                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-2">{rev.finding}</p>
+                              </div>
+                            ) : null}
+                            {i < spine.length - 1 ? (
+                              <button
+                                type="button"
+                                onClick={() => { setBody(rev.body); updateDraft(idea.id, rev.body); setRestorePoint(rev.id); setSavedAt(Date.now()) }}
+                                className="mono mt-1 text-[11px] text-ink-3 transition-colors hover:text-accent-bright"
+                              >
+                                {restorePoint === rev.id ? 'RESTORED' : 'RESTORE'}
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {bubbles.filter((b) => b.speaker === 'assistant' && !spine.some((r) => r.summary === b.text)).map((bubble) => (
+                      <div key={bubble.id} className="flex gap-2.5" style={{ animation: 'eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
+                        <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border border-line-strong text-[10.5px] text-ink-3">IM</span>
+                        <p className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-ink-2">{bubble.text}</p>
+                      </div>
+                    ))}
+
+                    {thinking ? (
+                      <div className="flex gap-2.5">
+                        <AssistantCore state="thinking" size={18} className="mt-0.5 shrink-0" />
+                        <p className="text-[11.5px] text-ink-3">{thinking}</p>
                       </div>
                     ) : null}
-                    {rev.finding ? (
-                      <div className="mt-2 border-l border-serious/60 pl-2.5">
-                        <p className="mono text-[10.5px] tracking-[0.1em] text-serious">FINDING · RAISED, NOT RESOLVED</p>
-                        <p className="mt-0.5 text-[11px] leading-relaxed text-ink-2">{rev.finding}</p>
+
+                    {preference ? (
+                      <div className="rounded-[9px] border border-hud-strong bg-accent/10 px-3 py-2.5" style={{ animation: 'eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
+                        <p className="text-[11.5px] font-semibold text-ink">Save this as a standing preference?</p>
+                        <p className="mt-0.5 text-[11px] leading-relaxed text-ink-2">{preference.content}</p>
+                        <div className="mt-2.5 flex gap-1.5">
+                          <Btn variant="primary" onClick={() => { void addKnowledge({ ...preference, category: 'User Feedback' }); setPreference(null) }}>
+                            Save to Knowledge Base
+                          </Btn>
+                          <Btn variant="ghost" onClick={() => setPreference(null)}>Just this post</Btn>
+                        </div>
                       </div>
-                    ) : null}
-                    {i < spine.length - 1 ? (
-                      <button
-                        type="button"
-                        onClick={() => { setBody(rev.body); updateDraft(idea.id, rev.body); setRestorePoint(rev.id); setSavedAt(Date.now()) }}
-                        className="mono mt-1 text-[11px] text-ink-3 transition-colors hover:text-accent-bright"
-                      >
-                        {restorePoint === rev.id ? 'RESTORED' : 'RESTORE'}
-                      </button>
                     ) : null}
                   </div>
-                </div>
-              </div>
-            ))}
+                ) : null}
 
-            {bubbles.filter((b) => b.speaker === 'assistant' && !spine.some((r) => r.summary === b.text)).map((bubble) => (
-              <div key={bubble.id} className="flex gap-2.5" style={{ animation: 'eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
-                <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border border-line-strong text-[10.5px] text-ink-3">IM</span>
-                <p className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-ink-2">{bubble.text}</p>
-              </div>
-            ))}
+                {/* ── the instruction ── */}
+                <div className="relative border-t border-line pt-3">
+                  {references.length > 0 ? (
+                    <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Attached references">
+                      {references.map((reference) => (
+                        <li key={reference.id} className="flex max-w-full items-center gap-1.5 rounded-lg border border-line-strong bg-surface-2 px-2 py-1">
+                          {reference.dataUri ? (
+                            <img src={reference.dataUri} alt="" className="h-5 w-5 rounded object-cover" />
+                          ) : (
+                            <FileText size={12} className="shrink-0 text-ink-3" aria-hidden="true" />
+                          )}
+                          <span className="min-w-0">
+                            <span className="block truncate text-[11px] text-ink-2">{reference.name}</span>
+                            {reference.unreadableReason ? (
+                              <span className="block text-[10px] text-warn">Attached by name only — {reference.unreadableReason}.</span>
+                            ) : null}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setReferences((prev) => prev.filter((r) => r.id !== reference.id))}
+                            aria-label={`Remove ${reference.name}`}
+                            className="shrink-0 rounded p-0.5 text-ink-3 transition-colors hover:text-critical-ink"
+                          >
+                            <X size={11} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
 
-            {thinking ? (
-              <div className="flex gap-2.5">
-                <AssistantCore state="thinking" size={18} className="mt-0.5 shrink-0" />
-                <p className="text-[11.5px] text-ink-3">{thinking}</p>
-              </div>
-            ) : null}
-
-            {preference ? (
-              <div className="rounded-[9px] border border-hud-strong bg-accent/10 px-3 py-2.5" style={{ animation: 'eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
-                <p className="text-[11.5px] font-semibold text-ink">Save this as a standing preference?</p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-2">{preference.content}</p>
-                <div className="mt-2.5 flex gap-1.5">
-                  <Btn variant="primary" onClick={() => { void addKnowledge({ ...preference, category: 'User Feedback' }); setPreference(null) }}>
-                    Save to Knowledge Base
-                  </Btn>
-                  <Btn variant="ghost" onClick={() => setPreference(null)}>Just this post</Btn>
-                </div>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="shrink-0 border-t border-line px-3.5 py-3">
-            {references.length > 0 ? (
-              <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Attached references">
-                {references.map((reference) => (
-                  <li key={reference.id} className="flex max-w-full items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-2 py-1">
-                    {reference.dataUri ? (
-                      <img src={reference.dataUri} alt="" className="h-5 w-5 rounded object-cover" />
-                    ) : (
-                      <FileText size={12} className="shrink-0 text-ink-3" aria-hidden="true" />
-                    )}
-                    <span className="min-w-0">
-                      <span className="block truncate text-[11px] text-ink-2">{reference.name}</span>
-                      {reference.unreadableReason ? (
-                        <span className="block text-[10px] text-warn">Attached by name only — {reference.unreadableReason}.</span>
-                      ) : null}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setReferences((prev) => prev.filter((r) => r.id !== reference.id))}
-                      aria-label={`Remove ${reference.name}`}
-                      className="shrink-0 rounded p-0.5 text-ink-3 transition-colors hover:text-critical-ink"
+                  <form onSubmit={(event) => { event.preventDefault(); send(chatValue) }} className="flex items-center gap-2">
+                    <label
+                      title="Attach a reference file for the model"
+                      className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[10px] border border-line-strong text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
                     >
-                      <X size={11} />
+                      <Paperclip size={13} aria-hidden="true" />
+                      <span className="sr-only">Attach a reference file</span>
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/*,text/*,.md,.txt,.csv,.json,.yml,.yaml"
+                        className="hidden"
+                        onChange={(event) => { void attach(event.target.files); event.target.value = '' }}
+                      />
+                    </label>
+                    <input
+                      value={chatValue}
+                      onChange={(event) => setChatValue(event.target.value)}
+                      placeholder={target === 'caption' ? 'Tell SpongeBob what to change…' : 'Tell Minnie what to change…'}
+                      aria-label="Instruction"
+                      className="h-9 min-w-0 flex-1 rounded-[11px] border border-line-strong bg-surface-2 px-3 text-[12px] text-ink outline-none transition-colors focus:border-accent"
+                    />
+                    {/*
+                      THE MODEL SITS BESIDE THE SEND BUTTON, NOT UNDER THE FORM.
+
+                      It used to be a full-width block below the composer, which
+                      put the choice of writer a whole row away from the action it
+                      governs — an operator typed an instruction, pressed send, and
+                      only then noticed which model would answer. Inline and
+                      immediately before the button, it reads as part of the same
+                      decision: what to ask, who answers, go.
+
+                      Fixed width and `shrink-0` so the instruction field keeps the
+                      remaining space, and the menu still opens upward from
+                      `bottom-full` so it never covers the composer.
+                    */}
+                    <div className="w-[176px] shrink-0">
+                      {target === 'caption' ? (
+                        <ModelMenu target="caption" selected={settings.captionModel} onSelect={(modelId) => updateSettings({ captionModel: modelId })} />
+                      ) : (
+                        <ModelMenu
+                          target="image"
+                          selected={settings.imageModel}
+                          onSelect={(modelId) => { updateSettings({ imageModel: modelId }); void regenerateImage(idea.id, idea.platform, modelId) }}
+                        />
+                      )}
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={chatValue.trim().length === 0}
+                      aria-label="Send the instruction"
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-transparent bg-[linear-gradient(135deg,var(--color-magenta),var(--color-accent))] text-on-accent transition-[filter,opacity] hover:brightness-110 disabled:opacity-40"
+                    >
+                      <ArrowRight size={14} aria-hidden="true" />
                     </button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+                  </form>
 
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {(target === 'caption' ? CAPTION_PROMPTS : IMAGE_PROMPTS).slice(0, 2).map((prompt) => (
-                <button
-                  key={prompt}
-                  type="button"
-                  onClick={() => send(prompt)}
-                  className="rounded-full border border-line-strong px-2.5 py-[3px] text-[10.5px] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-                >
-                  {prompt}
-                </button>
-              ))}
-            </div>
+                  {attaching ? <p className="mt-1 text-[10.5px] text-ink-3">Reading the attachment…</p> : null}
 
-            <form onSubmit={(event) => { event.preventDefault(); send(chatValue) }} className="flex items-center gap-[7px]">
-              <label
-                title="Attach a reference file for the model"
-                className="shrink-0 cursor-pointer rounded-[7px] border border-line-strong p-[7px] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-              >
-                <Paperclip size={13} aria-hidden="true" />
-                <span className="sr-only">Attach a reference file</span>
-                <input
-                  type="file"
-                  multiple
-                  accept="image/*,text/*,.md,.txt,.csv,.json,.yml,.yaml"
-                  className="hidden"
-                  onChange={(event) => { void attach(event.target.files); event.target.value = '' }}
-                />
-              </label>
-              <input
-                value={chatValue}
-                onChange={(event) => setChatValue(event.target.value)}
-                placeholder={target === 'caption' ? 'Tell SpongeBob what to change…' : 'Tell Minnie what to change…'}
-                aria-label="Instruction"
-                className="min-w-0 flex-1 rounded-[7px] border border-line-strong bg-surface px-2.5 py-2 text-[11.5px] text-ink outline-none transition-colors focus:border-accent"
-              />
-              <Btn type="submit" variant="primary" disabled={chatValue.trim().length === 0}>
-                <ArrowRight size={12} />
-              </Btn>
-            </form>
-
-            {attaching ? <p className="mt-1 text-[10.5px] text-ink-3">Reading the attachment…</p> : null}
-
-            <div className="mt-2.5">
-              {target === 'caption' ? (
-                <ModelMenu target="caption" selected={settings.captionModel} onSelect={(modelId) => updateSettings({ captionModel: modelId })} />
-              ) : (
-                <ModelMenu
-                  target="image"
-                  selected={settings.imageModel}
-                  onSelect={(modelId) => { updateSettings({ imageModel: modelId }); void regenerateImage(idea.id, idea.platform, modelId) }}
-                />
-              )}
-            </div>
-
-            <p className="mt-2.5 text-[10.5px] leading-relaxed text-ink-3">
-              Either outcome is written to the Knowledge Base so the agents learn from it.
-            </p>
+                  <p className="mt-2 text-[10px] leading-relaxed text-ink-3">
+                    Either outcome is written to the Knowledge Base, so the agents learn from it.
+                  </p>
+                </div>
+              </div>
+            </section>
           </div>
         </aside>
       </div>

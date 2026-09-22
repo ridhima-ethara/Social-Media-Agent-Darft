@@ -21,7 +21,6 @@ import { PublishedPosts } from './pages/PublishedPosts'
 import { LeadershipReview } from './pages/LeadershipReview'
 import { AgentActivity } from './pages/AgentActivity'
 import { AgentStudio } from './pages/AgentStudio'
-import { RunConsole } from './pages/RunConsole'
 import { SettingsPage } from './pages/SettingsPage'
 import { KnowledgeBase, KnowledgeDrawer } from './pages/KnowledgeBase'
 import { ReviewPanel } from './pages/ReviewPanel'
@@ -48,8 +47,6 @@ function CurrentPage() {
       return isLeadership ? <AgentActivity /> : <Dashboard />
     case 'studio':
       return <AgentStudio />
-    case 'console':
-      return <RunConsole />
     case 'knowledge':
       return <KnowledgeBase />
     case 'settings':
@@ -61,6 +58,7 @@ function CurrentPage() {
 
 export default function App() {
   const user = useStore((s) => s.user)
+  const page = useStore((s) => s.page)
   const theme = useStore((s) => s.theme)
   const toasts = useStore((s) => s.toasts)
   const dismissToast = useStore((s) => s.dismissToast)
@@ -99,7 +97,12 @@ export default function App() {
   return (
     <>
       <Shell>
-        <CurrentPage />
+        {/* Keyed on the page so React remounts on every change and the arrival
+            animation replays; without the key, returning to a screen already
+            mounted would simply snap into place. */}
+        <div key={page} className="page-enter flex min-h-0 flex-1 flex-col">
+          <CurrentPage />
+        </div>
       </Shell>
 
       <KnowledgeDrawer />

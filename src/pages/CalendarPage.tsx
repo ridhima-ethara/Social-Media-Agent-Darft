@@ -42,6 +42,9 @@ const COLUMN_WIDTH_KEY = 'ethara.calendar.columnWidth'
 /** Above this width a card stops clamping and shows the whole topic and hook. */
 const WIDE_CARD_AT = 260
 
+/** A day holding this many posts stops offering a "promote one" slot. */
+const DAY_FULL_AT = 3
+
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /* ── Dates: local calendar days, never UTC midnight ─────────────────────── */
@@ -124,11 +127,12 @@ function hookOf(idea: Idea): string {
 
 /* ── Status → tone ──────────────────────────────────────────────────────── */
 
+/* The design's three tones: approved reads blue, published green, drafted amber. */
 const STATUS_INK: Partial<Record<IdeaStatus, string>> = {
-  approved: 'var(--color-good-ink)',
-  scheduled: 'var(--color-good-ink)',
+  approved: 'var(--color-accent-bright)',
+  scheduled: 'var(--color-accent-bright)',
   published: 'var(--color-good-ink)',
-  drafted: 'var(--color-accent-bright)',
+  drafted: 'var(--color-warn)',
   in_review: 'var(--color-serious)',
   pending_leadership: 'var(--color-serious)',
 }
@@ -426,12 +430,24 @@ export function CalendarPage() {
   const weekIsos = useMemo(() => new Set(days.map(isoDate)), [days])
 
   /*
-   * The calendar carries drafted work; the queue carries ideas. A slot alone
-   * is not enough to put a card on the grid — the post must have been written.
+   * THE SLOT DECIDES WHERE A POST IS SHOWN. NOTHING ELSE.
+   *
+   * The grid used to carry only WRITTEN work — `primary && status !== 'suggested'`
+   * — while the queue carried `suggestion || status === 'suggested'`. Those two
+   * tests are not complements, and an idea could satisfy neither: promoting a
+   * suggestion sets its slot to `primary` and leaves its status at `suggested`,
+   * so a card dropped on a day disappeared from the queue's point of view and
+   * never arrived on the grid. Two rows were in exactly that state in the
+   * database when this was found.
+   *
+   * So the slot is now the only question asked, and the two lists are true
+   * complements: a post is on the grid or in the queue, never both and never
+   * neither. A placed post that has not been written yet says so on its face
+   * rather than being hidden — see `unwritten` on the card.
    */
   const live = ideas.filter((i) => i.status !== 'rejected')
-  const primary = live.filter((i) => i.calendar_slot === 'primary' && i.status !== 'suggested')
-  const queued = live.filter((i) => i.calendar_slot === 'suggestion' || i.status === 'suggested')
+  const primary = live.filter((i) => i.calendar_slot === 'primary')
+  const queued = live.filter((i) => i.calendar_slot !== 'primary')
   const weekPrimary = primary.filter((i) => weekIsos.has(i.scheduled_date))
 
   const capacity = PLATFORMS.map((platform) => {
@@ -466,13 +482,74 @@ export function CalendarPage() {
    * could not be reached by scrolling the page.
    */
   return (
-    <div className="-mx-4 -mt-4 -mb-2 flex min-h-0 flex-1 flex-col">
+    /*
+     * THE PAGE GROWS; THE SHELL SCROLLS IT.
+     *
+     * This was `min-h-0 flex-1`, which pins the page to the viewport and makes
+     * every child responsible for its own overflow. The effect was that the
+     * document never grew, so the browser had nothing to scroll and the ranked
+     * queue below the week could only be reached through a nested scroller.
+     *
+     * `<main>` in the shell already carries `overflow-y-auto`, so letting this
+     * column take its natural height is all that is needed: the whole page
+     * scrolls as one document, and the per-platform suggestion columns keep
+     * their own bounded scroll for the long tail.
+     */
+    <div className="-mx-4 -mt-4 -mb-2 flex flex-col">
       {/* ── Command bar ─────────────────────────────────────────────────── */}
       <header className="glass relative z-20 flex min-h-[58px] shrink-0 flex-wrap items-center gap-3.5 border-b border-line px-[18px] py-1.5">
-        <div className="min-w-0">
-          <BackToHub className="!mb-0.5" />
-          <h1 className="whitespace-nowrap text-[20px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
+        <div className="flex min-w-0 items-center gap-2.5">
+          {/* A lit edge beside the title, so the header reads as a command bar
+              rather than a line of text on a dark field. */}
+          <span
+            aria-hidden="true"
+            className="hidden h-[30px] w-[2px] shrink-0 rounded-full sm:block"
+            style={{ background: 'linear-gradient(180deg, var(--color-magenta), var(--color-accent))' }}
+          />
+          <div className="min-w-0">
+            <BackToHub className="!mb-0.5" />
+            <h1 className="whitespace-nowrap text-[20px] font-semibold tracking-[-0.02em] text-ink">Weekly Calendar</h1>
+          </div>
         </div>
+
+        {/*
+         * CAPACITY, WHICH IS WHAT THIS SCREEN IS ABOUT.
+         *
+         * This file opens by saying capacity is the first thing you see — five
+         * pips per platform, filled or free — and nothing drew them. The panel
+         * below counts twenty slots in one number, which cannot say WHICH
+         * platform is full; two of these strips full and two empty reads at a
+         * glance and is the fact that decides what to promote next. Every pip
+         * is one real slot: filled ones are posts placed this week.
+         */}
+        <div className="ml-5 hidden items-center gap-3.5 rounded-[10px] border border-line bg-surface/60 px-3 py-1.5 xl:flex">
+          {capacity.map((c) => (
+            <span
+              key={c.platform}
+              className="flex items-center gap-1.5"
+              title={`${PLATFORM_LABEL[c.platform]}: ${c.placed} of ${cap} placed this week · ${c.waiting} waiting below the cut`}
+            >
+              <PlatformIcon platform={c.platform} size={10} />
+              <span className="flex gap-[3px]" aria-hidden="true">
+                {Array.from({ length: cap }, (_, i) => (
+                  <span
+                    key={i}
+                    className="h-[5px] w-[5px] rounded-full transition-colors duration-[var(--dur-base)]"
+                    style={
+                      i < c.placed
+                        ? { background: PLATFORM_TOKEN[c.platform] }
+                        : { background: 'var(--color-surface-3)', border: '1px solid var(--color-line-strong)' }
+                    }
+                  />
+                ))}
+              </span>
+              <span className="sr-only">
+                {PLATFORM_LABEL[c.platform]}: {c.placed} of {cap} placed, {c.waiting} waiting
+              </span>
+            </span>
+          ))}
+        </div>
+
         <div className="ml-auto flex items-center gap-2">
           <div className="flex items-center overflow-hidden rounded-md border border-line-strong">
             <button type="button" onClick={() => setWeekOffset(weekOffset - 1)} aria-label="Previous week" className="px-[9px] py-[5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink">
@@ -483,6 +560,18 @@ export function CalendarPage() {
               <ChevronRight size={13} />
             </button>
           </div>
+
+          {/* Paging away from this week had no way back but counting clicks. */}
+          {weekOffset !== 0 ? (
+            <button
+              type="button"
+              onClick={() => setWeekOffset(0)}
+              title="Back to the current week"
+              className="mono rounded-[7px] border border-line-strong px-2.5 py-[5px] text-[10px] uppercase tracking-[0.08em] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+            >
+              Today
+            </button>
+          ) : null}
 
           <div className="relative">
             <button
@@ -531,7 +620,7 @@ export function CalendarPage() {
        * width the queue stacks under a full-width week instead: the whole week
        * is visible without scrolling, and the queue is one scroll away.
        */}
-      <div className="flex flex-1 flex-col">
+      <div className="flex flex-col">
         <section className="relative min-w-0 px-[18px] pb-3.5 pt-3.5">
           <div className="glass-panel rounded-[18px] px-4 py-3.5">
           <div className="relative z-10 mb-2.5 flex items-center gap-2.5">
@@ -539,7 +628,7 @@ export function CalendarPage() {
               {totalPlaced} slot{totalPlaced === 1 ? '' : 's'} placed
             </h2>
             <span className="text-[10.5px] text-ink-3">
-              {totalFree} of {cap * PLATFORMS.length} slots free · drag a card to another day, or drag a column edge to resize
+              {totalFree} of {cap * PLATFORMS.length} slots free · promote a suggestion to fill a day, or drag a card to another day
             </span>
             <span className="flex-1" />
             {columnWidth > 0 ? (
@@ -639,12 +728,12 @@ export function CalendarPage() {
                     <span className="text-[13px] font-bold text-ink">{day.getDate()}</span>
                     <span className="flex-1" />
                     {isToday ? (
-                      <span className="mono rounded-[5px] bg-accent px-1.5 py-px text-[7px] uppercase tracking-[0.08em] text-on-accent">today</span>
-                    ) : (
-                      <span className="mono text-[7.5px] uppercase text-ink-3">
-                        {dayIdeas.length === 0 ? '—' : `${dayIdeas.length} post${dayIdeas.length === 1 ? '' : 's'}`}
+                      <span className="mono rounded-full border border-magenta/40 px-2 py-px text-[7px] font-semibold uppercase tracking-[0.12em] text-magenta-ink">today</span>
+                    ) : dayIdeas.length > 0 ? (
+                      <span className="mono text-[7.5px] uppercase tracking-[0.1em] text-ink-3">
+                        {dayIdeas.length} post{dayIdeas.length === 1 ? '' : 's'}
                       </span>
-                    )}
+                    ) : null}
                   </header>
 
                   {dayIdeas.map((idea) => (
@@ -663,15 +752,17 @@ export function CalendarPage() {
                   {/* A day with room. It says where a dragged card would land,
                       and otherwise points at the queue — which is the only way
                       a post actually reaches a slot. */}
-                  <button
-                    type="button"
-                    onClick={() => queueRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                    className={`mono rounded-[9px] border border-dashed py-[7px] text-center text-[7.5px] uppercase tracking-[0.08em] transition-colors duration-[var(--dur-fast)] ${
-                      isDropTarget ? 'border-accent text-accent-bright' : 'border-line-strong text-ink-3 hover:border-accent hover:text-accent-bright'
-                    } ${dayIdeas.length === 0 ? 'py-[22px]' : ''}`}
-                  >
-                    {isDropTarget ? 'move here' : dayIdeas.length === 0 ? 'no posts · promote one' : 'promote one'}
-                  </button>
+                  {dayIdeas.length < DAY_FULL_AT || isDropTarget ? (
+                    <button
+                      type="button"
+                      onClick={() => queueRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                      className={`mono flex items-center justify-center rounded-[10px] border border-dashed px-2 py-[9px] text-center text-[7.5px] uppercase tracking-[0.1em] transition-colors duration-[var(--dur-fast)] ${
+                        isDropTarget ? 'border-accent text-accent-bright' : 'border-line-strong text-ink-3 hover:border-magenta/50 hover:text-magenta-ink'
+                      } ${dayIdeas.length === 0 ? 'min-h-[110px]' : ''}`}
+                    >
+                      {isDropTarget ? 'move here' : dayIdeas.length === 0 ? 'no posts · promote one' : 'promote one'}
+                    </button>
+                  ) : null}
 
                   {/* RESIZE HANDLE — the right edge of every column is a grip,
                       and all seven write the same shared width, so widening one
@@ -745,6 +836,130 @@ export function CalendarPage() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   THE PRESS — one gesture, read the same way on a calendar card and a queue row
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Past this much travel a press is a drag rather than a click. */
+const DRAG_THRESHOLD = 6
+/** A finger must hold still this long first: on touch, the same gesture scrolls. */
+const TOUCH_HOLD_MS = 220
+
+/**
+ * A press that becomes either a click or a drag, never both.
+ *
+ * Pointer-down records the press; movement decides. Six pixels of travel makes
+ * it a drag; a release without that travel opens the post. A finger is held to
+ * a higher bar — 220ms of stillness first — because on a touch screen the same
+ * gesture is how a person scrolls, and scrolling must win.
+ *
+ * THE MOVE AND THE RELEASE ARE HEARD ON THE WINDOW, NOT ON THE CARD.
+ *
+ * They used to be React handlers on the card, which relied on the first move
+ * after the press still landing inside it — pointer capture was only taken once
+ * the drag had already begun. Pointer events arrive every few milliseconds, not
+ * every pixel, so one quick flick off the card jumped the gesture straight past
+ * its own handler: no ghost, no drop target, no error, and a suggestion dragged
+ * onto a day did nothing at all. Measured, a first move of sixteen pixels out of
+ * a queue row skipped it every time. The window always hears the pointer.
+ *
+ * `draggable` is deliberately not used: this file's history records three
+ * attempts built on it, and the lesson was that the HTML5 drag API and a
+ * reliable click on the same element are not compatible.
+ */
+function useCardPress({
+  idea,
+  onDrag,
+  onOpen,
+}: {
+  idea: Idea
+  onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
+  onOpen: () => void
+}): {
+  node: React.MutableRefObject<HTMLElement | null>
+  onPointerDown: (event: React.PointerEvent<HTMLElement>) => void
+} {
+  const node = useRef<HTMLElement | null>(null)
+  const press = useRef<{ id: number; dragging: boolean; timer: number | null } | null>(null)
+  const detach = useRef<(() => void) | null>(null)
+
+  // A card unmounted mid-press — promoted, withdrawn, or the week paged — must
+  // not leave its listeners behind on the window.
+  useEffect(() => () => detach.current?.(), [])
+
+  const onPointerDown = (event: React.PointerEvent<HTMLElement>): void => {
+    if (event.button !== 0) return
+    detach.current?.()
+
+    const startX = event.clientX
+    const startY = event.clientY
+    press.current = { id: event.pointerId, dragging: false, timer: null }
+
+    const begin = (x: number, y: number): void => {
+      const p = press.current
+      const el = node.current
+      if (!p || !el || p.dragging) return
+      p.dragging = true
+      if (p.timer !== null) {
+        window.clearTimeout(p.timer)
+        p.timer = null
+      }
+      onDrag(idea, 'start', { x, y }, el.getBoundingClientRect())
+    }
+    const stop = (): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+      detach.current = null
+    }
+    const move = (e: PointerEvent): void => {
+      const p = press.current
+      if (!p || e.pointerId !== p.id) return
+      if (p.dragging) {
+        onDrag(idea, 'move', { x: e.clientX, y: e.clientY })
+        return
+      }
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD) return
+      if (e.pointerType === 'touch') {
+        // Moved before the hold completed: this is a scroll, and scrolling wins.
+        if (p.timer !== null) window.clearTimeout(p.timer)
+        press.current = null
+        stop()
+        return
+      }
+      begin(e.clientX, e.clientY)
+    }
+    const up = (e: PointerEvent): void => {
+      const p = press.current
+      if (!p || e.pointerId !== p.id) return
+      press.current = null
+      stop()
+      if (p.timer !== null) window.clearTimeout(p.timer)
+      if (p.dragging) onDrag(idea, 'end', { x: e.clientX, y: e.clientY })
+      else onOpen()
+    }
+    const cancel = (): void => {
+      const p = press.current
+      press.current = null
+      stop()
+      if (!p) return
+      if (p.timer !== null) window.clearTimeout(p.timer)
+      if (p.dragging) onDrag(idea, 'cancel', { x: 0, y: 0 })
+    }
+
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+    detach.current = stop
+
+    if (event.pointerType === 'touch') {
+      press.current.timer = window.setTimeout(() => begin(startX, startY), TOUCH_HOLD_MS)
+    }
+  }
+
+  return { node, onPointerDown }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    THE CARD — a title, with a small creative under it
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -765,113 +980,24 @@ function SlotCard({
   onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
   onWithdraw: () => void
 }) {
-  const ink = STATUS_INK[idea.status] ?? 'var(--color-ink-3)'
-  const chip = STATUS_CHIP[idea.status] ?? idea.status.toUpperCase()
+  /*
+   * A placed post the Content Agent has not written yet. It is shown — hiding
+   * it is what made a dropped card vanish — but it must never read as ready to
+   * publish, so it carries its own chip and a dashed edge instead of a status.
+   */
+  const unwritten = idea.status === 'suggested' && !idea.draft?.body
+  const ink = unwritten ? 'var(--color-warn)' : (STATUS_INK[idea.status] ?? 'var(--color-ink-3)')
+  const chip = unwritten ? 'NO CAPTION YET' : (STATUS_CHIP[idea.status] ?? idea.status.toUpperCase())
   const colour = PLATFORM_TOKEN[idea.platform]
   const topic = topicOf(idea)
   const hook = hookOf(idea)
   const angle = typeof idea.analysis.angle === 'string' ? idea.analysis.angle : null
+  /* The chip names the subject only when one was recorded; a platform label
+     standing in for a topic is not a topic. */
+  const topicChip = (idea.source_topic ?? idea.hashtag_display)?.replace(/^#/, '') ?? null
 
-  /*
-   * PRESS, THEN EITHER A CLICK OR A DRAG — NEVER BOTH.
-   *
-   * The press is recorded on pointer-down and decided on movement: six pixels
-   * of travel makes it a drag, and the card takes pointer capture so the
-   * gesture keeps reporting even when the pointer leaves it. A press that
-   * ends without that travel is a click, and opens the card. A finger is
-   * held to a higher bar — 220ms of stillness first — because on a touch
-   * screen the same gesture is how a person scrolls, and scrolling must win.
-   */
-  const node = useRef<HTMLElement | null>(null)
-  const press = useRef<{ id: number; x: number; y: number; dragging: boolean; timer: number | null } | null>(null)
+  const { node, onPointerDown } = useCardPress({ idea, onDrag, onOpen })
 
-  const begin = (x: number, y: number): void => {
-    const p = press.current
-    const el = node.current
-    if (!p || !el || p.dragging) return
-    p.dragging = true
-    if (p.timer !== null) {
-      window.clearTimeout(p.timer)
-      p.timer = null
-    }
-    try {
-      el.setPointerCapture(p.id)
-    } catch {
-      // The pointer is already gone; the drag simply will not start.
-    }
-    onDrag(idea, 'start', { x, y }, el.getBoundingClientRect())
-  }
-  const onPointerDown = (event: React.PointerEvent<HTMLElement>): void => {
-    if (event.button !== 0) return
-    press.current = { id: event.pointerId, x: event.clientX, y: event.clientY, dragging: false, timer: null }
-    if (event.pointerType === 'touch') {
-      const { clientX, clientY } = event
-      press.current.timer = window.setTimeout(() => begin(clientX, clientY), 220)
-    }
-  }
-  const onPointerMove = (event: React.PointerEvent<HTMLElement>): void => {
-    const p = press.current
-    if (!p) return
-    if (p.dragging) {
-      onDrag(idea, 'move', { x: event.clientX, y: event.clientY })
-      return
-    }
-    if (Math.hypot(event.clientX - p.x, event.clientY - p.y) < 6) return
-    if (event.pointerType === 'touch') {
-      // Moved before the hold completed: this is a scroll, not a drag.
-      if (p.timer !== null) window.clearTimeout(p.timer)
-      press.current = null
-      return
-    }
-    begin(event.clientX, event.clientY)
-  }
-  const onPointerUp = (event: React.PointerEvent<HTMLElement>): void => {
-    const p = press.current
-    press.current = null
-    if (!p) return
-    if (p.timer !== null) window.clearTimeout(p.timer)
-    if (p.dragging) onDrag(idea, 'end', { x: event.clientX, y: event.clientY })
-    else onOpen()
-  }
-  const onPointerCancel = (): void => {
-    const p = press.current
-    press.current = null
-    if (!p) return
-    if (p.timer !== null) window.clearTimeout(p.timer)
-    if (p.dragging) onDrag(idea, 'cancel', { x: 0, y: 0 })
-  }
-
-  /*
-   * OPENING A CARD THAT IS ALSO DRAGGABLE.
-   *
-   * `draggable` + `onClick` looks right and fails in practice: the browser starts
-   * a drag on a movement of one or two pixels, and a drag SUPPRESSES the click.
-   * On a trackpad that is most attempts, so the card simply did not open and
-   * there was nothing to debug — no error, no event.
-   *
-   * So the intent is measured rather than inferred. Pointer-down records where it
-   * began; pointer-up opens the card only if the pointer barely moved. A real
-   * drag moves further than the threshold and never opens anything.
-   */
-  /*
-   * OPENING A CARD: A PLAIN CLICK, AND NOTHING CLEVER.
-   *
-   * This went through three failed mechanisms, and the history matters because
-   * each one looked correct:
-   *
-   *   1. `draggable` + `onClick` — the browser starts a drag on a 1–2px movement
-   *      and a drag DISCARDS the click. Most trackpad attempts did nothing.
-   *   2. Pointer-down/up with a distance threshold — better, until you notice
-   *      that `draggable` also fires `pointercancel` when the drag begins. The
-   *      cancel handler cleared the press origin, so `pointerup` found nothing
-   *      and refused to open. That made it worse than (1).
-   *
-   * The lesson is that `draggable` and a reliable click on the SAME element are
-   * not compatible. Opening a post to edit it is the primary action; dragging to
-   * reschedule is a convenience. So the element is no longer draggable and the
-   * click is an ordinary one, which is the only mechanism here that has ever been
-   * reliable. Rescheduling stays available by asking Ethara to move a post.
-   */
   return (
     <article
       ref={node}
@@ -879,9 +1005,6 @@ function SlotCard({
       tabIndex={0}
       aria-label={`Open “${idea.title}” for editing. Drag to another day to reschedule it.`}
       onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerCancel}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -891,7 +1014,7 @@ function SlotCard({
       className={`group relative flex cursor-grab select-none flex-col overflow-hidden rounded-[11px] border bg-surface-2/60 px-2.5 py-2.5 transition-[border-color,translate,box-shadow,opacity] duration-[var(--dur-base)] active:cursor-grabbing ${
         dragging
           ? 'border-dashed border-accent/50 opacity-35'
-          : 'border-line hover:!translate-y-[-2px] hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]'
+          : `${unwritten ? 'border-dashed border-warn/45' : 'border-line'} hover:!translate-y-[-2px] hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]`
       } ${landed ? 'anim-pop-in' : ''}`}
       style={{ touchAction: 'manipulation' }}
     >
@@ -931,9 +1054,19 @@ function SlotCard({
         </span>
       </div>
 
+      {/* what the post is about — the design's pink topic chip */}
+      {topicChip ? (
+        <span
+          className={`mt-[7px] max-w-full self-start rounded-full border border-magenta/30 bg-magenta/8 px-2 py-[2px] text-[8.5px] font-semibold tracking-[0.04em] text-magenta-ink ${wide ? '' : 'truncate'}`}
+          title={topicChip}
+        >
+          #{topicChip}
+        </span>
+      ) : null}
+
       {/* The hook. Clamped to two lines at the default width; a widened column
           drops the clamp so the whole opening line reads without opening the card. */}
-      <p className={`mt-[7px] text-[11px] font-medium leading-[1.35] text-ink ${wide ? '' : 'line-clamp-2'}`} title={hook}>
+      <p className={`mt-[7px] text-[12px] font-semibold leading-[1.4] text-ink ${wide ? '' : 'line-clamp-2'}`} title={hook}>
         {hook}
         {idea.is_new_trend ? <span className="mono ml-1.5 text-[8px] text-magenta">NEW</span> : null}
       </p>
@@ -951,7 +1084,12 @@ function SlotCard({
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   THE QUEUE — every idea below the cut, with the rank it holds
+   THE QUEUE — every idea below the cut, one column per platform
+   ───────────────────────────────────────────────────────────────────────────
+   The design draws the four platforms side by side, each headed by how many
+   ideas are waiting on it, each row carrying the rank it holds there. A
+   platform with nothing waiting keeps its column and says so — a missing
+   column would read as a platform the agents forgot.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function Queue({
@@ -976,22 +1114,6 @@ function Queue({
   const openReview = useStore((s) => s.openReview)
   const [armed, setArmed] = useState<string | null>(null)
 
-  /** Which platform the suggestions list is narrowed to, or null for all. */
-  const [suggestionFilter, setSuggestionFilter] = useState<Platform | null>(null)
-
-  /*
-   * One ranked line per idea, strongest rank first — narrowed to one platform
-   * when a chip is active.
-   *
-   * The filter applies to the LIST, not to `queued`: the chips themselves must
-   * keep showing every platform's counts, or selecting one would hide the way
-   * back to the others.
-   */
-  const ranked = [...queued]
-    .filter((i) => suggestionFilter === null || i.platform === suggestionFilter)
-    .sort(
-      (a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence,
-    )
   /* What each platform has free, and what a promotion there would displace. */
   const seats = new Map(
     capacity.map((c) => {
@@ -1007,145 +1129,108 @@ function Queue({
       ] as const
     }),
   )
+
+  /** A platform's waiting ideas, strongest rank first. */
+  const waitingOn = (platform: Platform): Idea[] =>
+    queued
+      .filter((i) => i.platform === platform)
+      .sort((a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence)
+
   return (
-    <section ref={queueRef} className="flex w-full shrink-0 flex-col border-t border-line bg-surface-2" aria-label="Ranked queue">
-      <header className="flex flex-wrap items-center gap-2.5 px-[18px] pb-2 pt-3.5">
-        <h2 className="text-[12.5px] font-bold text-ink">More suggestions</h2>
-        <span className="text-[10px] text-ink-3">
+    <section ref={queueRef} className="flex w-full shrink-0 flex-col px-[18px] pb-7 pt-3" aria-label="Ranked queue">
+      <header className="flex flex-wrap items-baseline gap-2.5 pb-3">
+        <h2 className="text-[15px] font-semibold tracking-[-0.015em] text-ink">More suggestions</h2>
+        <span className="text-[10.5px] text-ink-3">
           {queued.length === 0
             ? 'everything the agents formed is on the calendar'
-            : suggestionFilter !== null
-              ? `${ranked.length} ${PLATFORM_LABEL[suggestionFilter]} suggestion${ranked.length === 1 ? '' : 's'} · click the chip again to show all`
-              : `${queued.length} ranked below the cut · drag one onto a day, or promote it`}
+            : `${queued.length} ranked below the cut · promote one onto a day, or drag it there`}
         </span>
-        <span className="flex-1" />
-        {/*
-          THE NUMBER MUST BE THE ONE THE CONTROL ACTS ON.
-          These chips filter the SUGGESTIONS list, but they were rendering
-          `free` — how many calendar slots were open — under a "slots free"
-          label. Instagram then read 5 while having nothing queued, so clicking
-          it filtered to an empty list, and the tooltip said "nothing waiting"
-          directly beneath the 5. Two true numbers, one of them answering a
-          question nobody asked here.
-        */}
-        <span className="mono text-[7.5px] uppercase tracking-[0.06em] text-ink-3">waiting</span>
+      </header>
+
+      <div className="grid items-start gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
         {capacity.map((c) => {
-          const isActive = suggestionFilter === c.platform
-          const waiting = queued.filter((i) => i.platform === c.platform).length
+          const rows = waitingOn(c.platform)
+          const colour = PLATFORM_TOKEN[c.platform]
+          const seat = seats.get(c.platform)
           return (
-            <button
+            <div
               key={c.platform}
-              type="button"
-              /*
-               * A FILTER, NOT A READOUT.
-               *
-               * These already carried the one piece of information needed to
-               * decide which platform to look at, so making them the control
-               * that narrows the list removes a separate filter row. Clicking an
-               * active chip clears it — a filter with no visible way back out
-               * traps the operator in a subset of their own queue.
-               */
-              onClick={() => setSuggestionFilter(isActive ? null : c.platform)}
-              aria-pressed={isActive}
-              title={
-                waiting === 0
-                  ? `${PLATFORM_LABEL[c.platform]}: nothing waiting · ${c.free} of ${cap} slots free`
-                  : isActive
-                    ? `Showing ${PLATFORM_LABEL[c.platform]} only — click to show every platform`
-                    : `Show only ${PLATFORM_LABEL[c.platform]} — ${waiting} waiting · ${c.free} of ${cap} slots free`
-              }
-              className={`mono inline-flex items-center gap-1 rounded-[5px] px-1.5 py-px text-[8px] transition-[box-shadow,opacity] duration-200 hover:opacity-100 ${
-                // A chip for a platform with nothing queued would filter to an
-                // empty list, so it is dimmed rather than presented as useful.
-                waiting === 0 ? 'opacity-45' : 'cursor-pointer'
-              }`}
-              style={{
-                color: PLATFORM_TOKEN[c.platform],
-                background: `color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} ${isActive ? 26 : 13}%, transparent)`,
-                border: `1px solid color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} ${isActive ? 70 : 32}%, transparent)`,
-                boxShadow: isActive
-                  ? `0 0 0 1px color-mix(in srgb, ${PLATFORM_TOKEN[c.platform]} 45%, transparent)`
-                  : undefined,
-              }}
+              aria-label={`${PLATFORM_LABEL[c.platform]} suggestions`}
+              className="glass-panel flex min-w-0 flex-col gap-3 rounded-[14px] p-4"
             >
-              <PlatformIcon platform={c.platform} size={8} />
-              {waiting}
-            </button>
+              <div className="flex items-center gap-2.5">
+                <span
+                  className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px]"
+                  style={{ background: `color-mix(in srgb, ${colour} 16%, transparent)`, border: `1px solid color-mix(in srgb, ${colour} 40%, transparent)` }}
+                >
+                  <PlatformIcon platform={c.platform} size={11} />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">{PLATFORM_LABEL[c.platform]}</span>
+                <span
+                  className="mono shrink-0 rounded-full border border-line-strong px-2 py-px text-[8.5px] tracking-[0.04em] text-ink-3"
+                  title={`${c.free} of ${cap} ${PLATFORM_LABEL[c.platform]} slots free this week`}
+                >
+                  {rows.length} waiting
+                </span>
+              </div>
+
+              {rows.length === 0 ? (
+                <div className="rounded-[10px] border border-dashed border-line-strong px-3 py-5 text-center text-[10.5px] text-ink-3">
+                  No suggestions waiting
+                </div>
+              ) : (
+                /*
+                 * FIVE IN VIEW, THE REST BEHIND A SCROLL.
+                 *
+                 * Every waiting idea used to render in the column, so a platform
+                 * holding thirty of them produced a single column thousands of
+                 * pixels tall and pushed everything below the fold off the page.
+                 * The ranking is the point of this list — the strongest few are
+                 * what an operator acts on — so the column is sized to about five
+                 * rows and the remainder stays reachable by scrolling rather than
+                 * being hidden or truncated away.
+                 *
+                 * `overscroll-contain` keeps a wheel gesture that reaches the end
+                 * of one platform's list from scrolling the page behind it, and
+                 * `pr-1` leaves room for the scrollbar so a row's buttons do not
+                 * sit under it.
+                 */
+                <div
+                  className="flex max-h-[34rem] flex-col gap-3 overflow-y-auto overscroll-contain pr-1"
+                  aria-label={`${PLATFORM_LABEL[c.platform]} ranked suggestions, scrollable`}
+                >
+                {rows.map((idea, i) => {
+                  const isArmed = armed === idea.id
+                  return (
+                    <QueueRow
+                      key={idea.id}
+                      idea={idea}
+                      index={i}
+                      isArmed={isArmed}
+                      free={seat?.free ?? 0}
+                      weakestTitle={seat?.weakest?.title ?? null}
+                      cap={cap}
+                      dragging={draggingId === idea.id}
+                      onDrag={onDrag}
+                      onOpen={() => openReview(idea.id)}
+                      onPromote={() => {
+                        if (!isArmed) { setArmed(idea.id); return }
+                        setArmed(null)
+                        void promoteIdea(idea.id)
+                      }}
+                      onWithdraw={() => {
+                        if (isArmed) { setArmed(null); return }
+                        void deleteIdea(idea.id)
+                      }}
+                    />
+                  )
+                })}
+                </div>
+              )}
+            </div>
           )
         })}
-      </header>
-      {ranked.length === 0 ? (
-        <div className="px-[18px] pb-5">
-          {suggestionFilter === null ? (
-            <>
-              <p className="text-[13px] font-medium text-ink">Nothing below the cut</p>
-              <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">Every idea the agents formed is on the calendar. Run discovery and Dora will rank more.</p>
-            </>
-          ) : (
-            /* A filtered-empty list is a different fact from an empty queue, and
-               saying so is what tells the operator to clear the filter rather
-               than run discovery again. */
-            <>
-              <p className="text-[13px] font-medium text-ink">Nothing waiting for {PLATFORM_LABEL[suggestionFilter]}</p>
-              <button
-                type="button"
-                onClick={() => setSuggestionFilter(null)}
-                className="mt-1 text-[11.5px] leading-relaxed text-accent-bright underline decoration-dotted"
-              >
-                Show every platform
-              </button>
-            </>
-          )}
-        </div>
-      ) : (
-        /*
-         * ONE RANKED LIST, THE WAY THE DESIGN DRAWS IT.
-         *
-         * This was four per-platform columns. The design is a single ranked
-         * line-per-idea list, and it does not lose the platform: each row
-         * carries its own badge, the header counts free slots per platform,
-         * and the footer names the platforms holding nothing. A flat list also
-         * stops the tallest platform dictating the height of three empty
-         * neighbours.
-         */
-        <div className="flex flex-col gap-2.5 px-[18px] pb-5">
-          <div className="flex flex-col gap-1.5" role="list" aria-label="Ranked suggestions">
-            {ranked.map((idea, i) => {
-              const isArmed = armed === idea.id
-              const seat = seats.get(idea.platform)
-              const free = seat?.free ?? 0
-              return (
-                <QueueRow
-                  key={idea.id}
-                  idea={idea}
-                  index={i}
-                  isArmed={isArmed}
-                  free={free}
-                  weakestTitle={seat?.weakest?.title ?? null}
-                  cap={cap}
-                  dragging={draggingId === idea.id}
-                  onDrag={onDrag}
-                  onOpen={() => openReview(idea.id)}
-                  onPromote={() => {
-                    if (!isArmed) { setArmed(idea.id); return }
-                    setArmed(null)
-                    void promoteIdea(idea.id)
-                  }}
-                  onWithdraw={() => {
-                    if (isArmed) { setArmed(null); return }
-                    void deleteIdea(idea.id)
-                  }}
-                />
-              )
-            })}
-          </div>
-
-          {/* What the list is not showing, said plainly. */}
-          <footer className="mono flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-[9px] text-[8px] uppercase tracking-[0.06em] text-ink-3">
-            <span>{ranked.length} waiting · every one is listed</span>
-          </footer>
-        </div>
-      )}
+      </div>
     </section>
   )
 }
@@ -1153,14 +1238,11 @@ function Queue({
 /* ═══════════════════════════════════════════════════════════════════════════
    A QUEUE ROW — a ranked suggestion that can be dragged onto a calendar day
    ───────────────────────────────────────────────────────────────────────────
-   Same drag mechanism as the calendar's SlotCard, and for the same reason:
-   the file's history records that the HTML5 `draggable` API and a reliable
-   click on one element are incompatible. So the drag is pointer events by
-   hand — a press that travels more than six pixels becomes a drag; one that
-   does not leaves the row's own buttons (open · promote · withdraw) to handle
-   the click. Those buttons stop pointer propagation so a press on them never
-   starts a drag. Dropping the row on a day PROMOTES it onto the calendar and
-   lands it there, via scheduleIdeaOnDay.
+   The same gesture as the calendar's SlotCard, read by the same hook: a press
+   that travels becomes a drag, one that does not opens the post. Promote and
+   Withdraw stop the pointer at their own edge so a press on them never starts
+   a drag. Dropping the row on a day PROMOTES it onto the calendar and lands it
+   there, via scheduleIdeaOnDay.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function QueueRow({
@@ -1189,126 +1271,67 @@ function QueueRow({
   onWithdraw: () => void
 }) {
   const angle = typeof idea.analysis.angle === 'string' ? idea.analysis.angle : topicOf(idea)
-  const colour = PLATFORM_TOKEN[idea.platform]
 
-  const node = useRef<HTMLElement | null>(null)
-  const press = useRef<{ id: number; x: number; y: number; dragging: boolean; timer: number | null } | null>(null)
+  const { node, onPointerDown } = useCardPress({ idea, onDrag, onOpen })
 
-  const begin = (x: number, y: number): void => {
-    const p = press.current
-    const el = node.current
-    if (!p || !el || p.dragging) return
-    p.dragging = true
-    if (p.timer !== null) {
-      window.clearTimeout(p.timer)
-      p.timer = null
-    }
-    try {
-      el.setPointerCapture(p.id)
-    } catch {
-      // The pointer is already gone; the drag simply will not start.
-    }
-    onDrag(idea, 'start', { x, y }, el.getBoundingClientRect())
-  }
-  const onPointerDown = (event: React.PointerEvent<HTMLElement>): void => {
-    if (event.button !== 0) return
-    press.current = { id: event.pointerId, x: event.clientX, y: event.clientY, dragging: false, timer: null }
-    if (event.pointerType === 'touch') {
-      const { clientX, clientY } = event
-      press.current.timer = window.setTimeout(() => begin(clientX, clientY), 220)
-    }
-  }
-  const onPointerMove = (event: React.PointerEvent<HTMLElement>): void => {
-    const p = press.current
-    if (!p) return
-    if (p.dragging) {
-      onDrag(idea, 'move', { x: event.clientX, y: event.clientY })
-      return
-    }
-    if (Math.hypot(event.clientX - p.x, event.clientY - p.y) < 6) return
-    if (event.pointerType === 'touch') {
-      if (p.timer !== null) window.clearTimeout(p.timer)
-      press.current = null
-      return
-    }
-    begin(event.clientX, event.clientY)
-  }
-  const onPointerUp = (event: React.PointerEvent<HTMLElement>): void => {
-    const p = press.current
-    press.current = null
-    if (!p) return
-    if (p.timer !== null) window.clearTimeout(p.timer)
-    if (p.dragging) onDrag(idea, 'end', { x: event.clientX, y: event.clientY })
-  }
-  const onPointerCancel = (): void => {
-    const p = press.current
-    press.current = null
-    if (!p) return
-    if (p.timer !== null) window.clearTimeout(p.timer)
-    if (p.dragging) onDrag(idea, 'cancel', { x: 0, y: 0 })
-  }
-
-  // The row's own controls: a press that lands on one must not begin a drag,
-  // so each stops the pointer at its edge and keeps its ordinary click.
+  /*
+   * THE ROW'S OWN CONTROLS, AND NOTHING ELSE, SWALLOW THE PRESS.
+   *
+   * The title used to be a <button> carrying these same handlers, and that is
+   * the part of a row a person actually grabs. Stopping the pointer there meant
+   * the article never recorded a press, so dragging a suggestion onto a day
+   * silently did nothing — no ghost, no drop, no error. Only Promote and
+   * Withdraw stop the pointer now; everywhere else on the row starts a drag.
+   */
   const stop = {
     onPointerDown: (event: React.PointerEvent) => event.stopPropagation(),
     onPointerUp: (event: React.PointerEvent) => event.stopPropagation(),
+    onKeyDown: (event: React.KeyboardEvent) => event.stopPropagation(),
   }
 
   return (
     <article
       ref={node}
+      role="button"
+      tabIndex={0}
       onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerCancel}
-      aria-label={`${idea.title}. Drag onto a day to schedule it, or use the buttons.`}
-      className={`cursor-grab select-none rounded-[11px] border bg-surface px-2.5 py-[7px] transition-colors duration-200 active:cursor-grabbing ${
-        dragging ? 'border-dashed border-accent/50 opacity-35' : 'border-line hover:border-accent/60'
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        onOpen()
+      }}
+      aria-label={`Open “${idea.title}”. Drag it onto a day to schedule it.`}
+      className={`cursor-grab select-none border-t border-line pt-3 outline-none transition-opacity duration-200 active:cursor-grabbing ${
+        dragging ? 'opacity-35' : 'hover:opacity-90'
       }`}
       style={{ animation: `eth-row-stream 200ms ${EASE} ${index * 40}ms both`, touchAction: 'manipulation' }}
     >
-      <div className="flex items-center gap-2.5">
-        <span className="tabular w-[22px] shrink-0 text-[8.5px] text-ink-3" title="Rank on its platform">
+      <div className="flex items-start gap-2">
+        <span className="tabular mono shrink-0 pt-[2px] text-[10px] font-semibold text-ink-3" title="Rank on its platform">
           #{idea.platform_rank ?? '–'}
         </span>
-
-        <button
-          type="button"
-          {...stop}
-          onClick={onOpen}
-          className="min-w-0 flex-1 text-left"
-          title={idea.title}
-        >
-          <span className="block truncate text-[11px] font-medium text-ink transition-colors hover:text-accent-bright">
+        <span className="min-w-0 flex-1" title={idea.title}>
+          <span className="line-clamp-2 block text-[12px] font-semibold leading-[1.4] text-ink">
             {idea.title}
+            {idea.is_new_trend ? <span className="mono ml-1.5 text-[8px] font-medium text-magenta">NEW</span> : null}
           </span>
-          <span className="mono mt-0.5 block truncate text-[8px] text-ink-3" title={angle}>
+          <span className="mono mt-[3px] block truncate text-[8.5px] text-ink-3" title={angle}>
             <span aria-hidden="true">↳ </span>{angle}
           </span>
-        </button>
-
-        <span
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px]"
-          style={{ background: `color-mix(in srgb, ${colour} 14%, transparent)`, border: `1px solid color-mix(in srgb, ${colour} 35%, transparent)` }}
-          title={PLATFORM_LABEL[idea.platform]}
-        >
-          <PlatformIcon platform={idea.platform} size={9} />
         </span>
-        <span className="sr-only">{PLATFORM_LABEL[idea.platform]}</span>
+      </div>
 
-        <span className="tabular w-[30px] shrink-0 text-right text-[8.5px] text-accent-bright" title="Confidence">
-          {idea.confidence}%
-        </span>
-
+      <div className="mt-2 flex items-center gap-2">
+        <span className="tabular text-[10.5px] font-semibold text-ink-2" title="Confidence">{idea.confidence}%</span>
+        <span className="flex-1" />
         <button
           type="button"
           {...stop}
           onClick={onPromote}
-          className={`shrink-0 rounded-[8px] border px-3 py-1 text-[10px] font-semibold transition-colors duration-[220ms] ${
+          className={`shrink-0 rounded-[8px] border px-3 py-[5px] text-[10.5px] font-semibold transition-colors duration-[220ms] ${
             isArmed
-              ? 'border-accent bg-accent text-on-accent hover:bg-accent-bright'
-              : 'border-hud-strong bg-accent/12 text-accent-bright hover:border-accent'
+              ? 'border-magenta bg-magenta text-on-accent hover:brightness-110'
+              : 'border-magenta/40 text-magenta-ink hover:border-magenta/70 hover:bg-magenta/12'
           }`}
         >
           {isArmed ? 'Confirm' : 'Promote'}
@@ -1317,7 +1340,7 @@ function QueueRow({
           type="button"
           {...stop}
           onClick={onWithdraw}
-          className="shrink-0 rounded-[8px] border border-line-strong px-2.5 py-1 text-[10px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-critical/50 hover:text-critical-ink"
+          className="shrink-0 rounded-[8px] border border-line-strong px-3 py-[5px] text-[10.5px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-line-strong hover:text-ink"
         >
           {isArmed ? 'Cancel' : 'Withdraw'}
         </button>

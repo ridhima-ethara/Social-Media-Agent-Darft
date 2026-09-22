@@ -89,14 +89,76 @@ export function referencesFor(concept: string): ReferenceImage[] {
 }
 
 /**
- * The single style clause to append to a background prompt for a concept.
- * Joins every applicable reference's `style` text. Empty when nothing applies,
- * so the caller appends nothing rather than a dangling connective.
+ * Clauses that describe TEXT, and therefore must never reach the painter.
+ *
+ * The reference descriptions are written from finished creatives, so they name
+ * the things a finished creative has: "bold white display headline upper-left",
+ * "thin callout labels with dot leaders". Those are the brand layer's job — it
+ * composites headline, kicker and logomark locally as vectors, and invariant 21
+ * forbids asking a diffusion model for lettering at all.
+ *
+ * Passing them through produced a prompt that argued with itself: the base said
+ * "no text" and the reference asked for a headline and labelled callouts. A model
+ * given both obeys neither cleanly, which is why the output matched no reference.
+ */
+const TEXT_CLAUSE =
+  /\b(headline|heading|label(s|led)?|caption|callout|dot leaders?|lettering|type|typography|wordmark|logo(mark)?|text)\b/i
+
+/**
+ * Keeps the clauses that describe LIGHT, MATERIAL, PALETTE and COMPOSITION, and
+ * drops the ones describing text. Split on commas because the styles are written
+ * as comma-separated clause lists.
+ */
+function paintableClauses(style: string): string {
+  return style
+    .split(',')
+    .map((clause) => clause.trim())
+    .filter((clause) => clause !== '' && !TEXT_CLAUSE.test(clause))
+    .join(', ')
+}
+
+/**
+ * The style clause for one concept — ONE reference, sanitised.
+ *
+ * WHY ONE AND NOT ALL. This used to join every applicable reference with
+ * semicolons. With most entries tagged for all concepts, a single prompt asked
+ * for "one dominant 3D isometric server-hall hero" AND "a single tall textured
+ * monolith hero" in the same breath. Two hero subjects is not a style, it is a
+ * contradiction, and the painter resolved it by ignoring both.
+ *
+ * So one reference is chosen: a concept-tagged entry first, because that is the
+ * operator saying which look belongs to which treatment, and otherwise a
+ * deterministic pick from the concept name so the same concept always draws the
+ * same reference and a run stays replayable.
+ *
+ * Returns empty when nothing applies or nothing survives sanitising, so the
+ * caller appends nothing rather than a dangling connective.
  */
 export function styleClauseFor(concept: string): string {
-  const styles = referencesFor(concept)
-    .map((r) => r.style.trim())
-    .filter(Boolean)
-  if (styles.length === 0) return ''
-  return `In the style of the brand references: ${styles.join('; ')}.`
+  const applicable = referencesFor(concept)
+  if (applicable.length === 0) return ''
+
+  // An entry that names this concept is a deliberate pairing; prefer it.
+  const tagged = applicable.filter((r) => (r.concepts ?? []).includes(concept))
+  const pool = tagged.length > 0 ? tagged : applicable
+
+  // Deterministic, not random: the same concept must always pick the same one.
+  let seed = 0
+  for (let i = 0; i < concept.length; i += 1) seed = (seed * 31 + concept.charCodeAt(i)) >>> 0
+  const chosen = pool[seed % pool.length]
+  if (!chosen) return ''
+
+  const style = paintableClauses(chosen.style)
+  if (style === '') return ''
+
+  /*
+   * Phrased as the treatment of the background rather than "in the style of",
+   * and it ends by restating the text exclusion. The restatement is deliberate:
+   * it is the last thing in the prompt, and the clause it defends against is the
+   * one the reference descriptions keep reintroducing.
+   */
+  return (
+    `Match this art direction: ${style}. ` +
+    'Render the background only — no lettering, no labels, no logo of any kind.'
+  )
 }

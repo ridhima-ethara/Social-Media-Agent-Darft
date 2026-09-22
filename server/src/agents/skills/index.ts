@@ -218,6 +218,15 @@ export interface Opportunity {
   members: number
   trendScore: number
   brandRelevance: number
+  /**
+   * The MEAN measured brand relevance of the cluster's own pages, 0–100.
+   *
+   * Scored at capture against the brand topic set and the live Knowledge Base,
+   * so it is evidence rather than a re-derivation. Carried here because
+   * `analysis.brand.fit` runs after the cluster has been reduced to a single
+   * opportunity and can no longer see the members it came from.
+   */
+  capturedRelevance: number
   predictedEngagement: number
   engagementLevel: string
   format: ContentFormat
@@ -293,6 +302,8 @@ export interface CaptionPayload extends Record<string, unknown> {
   explanation?: string
   close?: string
   hashtagBlock?: string
+  /** Instagram only: the bracketed 7–8 keyword footer. */
+  keywordBlock?: string
   captionBody?: string
   caption?: string
   variants?: string[]

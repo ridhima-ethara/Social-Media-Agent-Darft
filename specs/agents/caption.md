@@ -44,7 +44,7 @@ Writes the first line — the one thing that decides whether the rest is read �
 |---|---|---|
 | `temperature` | `55` | How much latitude the model has when writing the first line. Lower is flatter and more repeatable; higher varies the phrasing between posts, which is what stops two posts on neighbouring topics reading identically. The brand rules are enforced after generation either way, so this cannot loosen them. |
 | `maxWords` | `18` | The hard ceiling on the first line. Beyond this it stops being a hook and becomes a sentence. |
-| `style` | `Declarative` | Declarative states the finding. Contrarian pushes against consensus. Question invites, and underperforms for this audience. |
+| `style` | `Provocative` | Provocative is the default because the caption specification asks the first line to create tension — a real limitation, trade-off or overlooked consequence the post then examines — and its whole example bank is written that way ("Stop calling it reliable because it worked once."). Question asks the one thing the post answers and is equally supported; the body must begin answering it immediately. Contrarian names the consensus and rejects it. Declarative states the finding flatly, which is the safest and the least arresting. Observation reports a specific change. Every style is held to the same evidence: tension has to come from something real, never from manufactured urgency. |
 | `banClickbait` | `true` | Blocks "you won’t believe", numbered listicle openers and curiosity-gap constructions. |
 
 ### `generation.caption.problem`
@@ -84,7 +84,8 @@ Derives the topical hashtag block from the post’s own subject, never from a re
 
 | Knob | Default | Description |
 |---|---|---|
-| `count` | `6` | How many hashtags to derive. The caption specification requires 5 to 7 topic-derived tags on every option, so the floor binds as hard as the ceiling — a value outside that band is clamped into it. |
+| `count` | `6` | How many hashtags to derive for LinkedIn, Facebook and X. The caption specification requires 5 to 7 topic-derived tags on those options, so the floor binds as hard as the ceiling — a value outside that band is clamped into it. Instagram is not governed by this: the specification fixes it at exactly five, followed by the bracketed keyword line, so this knob does not apply there. |
+| `instagramKeywordCount` | `7` | How many keywords close an Instagram caption, in one pair of square brackets below the five hashtags. The specification allows 7 or 8; a multiword phrase counts as one entry. They carry no hash symbols and are derived per topic, because a reusable block is forbidden. Not added to LinkedIn, Facebook or X. |
 | `useSourceHashtag` | `true` | On, the hashtag that surfaced this trend is always one of the tags, which keeps lineage visible on the post itself. |
 
 ### `generation.caption.adapt`
@@ -94,7 +95,7 @@ Reshapes the caption for its platform — length, line breaks and density — wi
 | Knob | Default | Description |
 |---|---|---|
 | `linkedinMaxChars` | `2400` | Where the LinkedIn caption is cut. The platform truncates around 1,300 with a "see more", so the opening matters most. |
-| `instagramMaxChars` | `1600` | Where the Instagram caption is cut. |
+| `instagramMaxChars` | `2200` | Instagram’s own caption cap. Set to the platform maximum on purpose: the specification makes the Instagram prose an exact copy of the LinkedIn hook, body and CTA, so a lower value here would truncate the shared text and the pair would disagree about what the post says. Once the five hashtags and the keyword line are added, an overrun is reported for a human to resolve rather than cut. |
 | `xMaxChars` | `280` | Where the X post is cut. At 280 the nine-stage structure compresses to hook, evidence and implication. |
 | `facebookMaxChars` | `2000` | Where a Facebook caption is cut. Facebook permits far more, but engagement on long-form research posts falls off well before that. |
 | `preserveLineBreaks` | `true` | On, the paragraph rhythm survives adaptation, which materially affects LinkedIn readability. |

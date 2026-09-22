@@ -22,6 +22,7 @@ import type {
   SkillRunStatus,
   ValidationVerdict,
 } from '../../../shared/agent-contract'
+import { SIGNALS_CATEGORY } from '../../../shared/agent-contract'
 import { config } from '../config'
 import {
   embedMany,
@@ -758,17 +759,46 @@ export async function updateIdea(
 }
 
 /** Primary ideas on one platform, weakest rank last — used by the promote rule. */
+/**
+ * The posts holding a calendar slot on one platform — the set the per-platform
+ * cap is counted against.
+ *
+ * TWO THINGS THIS DELIBERATELY EXCLUDES.
+ *
+ * A PUBLISHED post is not occupying a future slot; it has already gone out. It
+ * was counted here, so the cap shrank every time something was published, and a
+ * workspace that had published five LinkedIn posts could never schedule another
+ * one — every promotion silently demoted a planned post to make room for
+ * itself. A withdrawn post is not occupying one either.
+ *
+ * And the cap is PER WEEK, not for all time. `topPerPlatform` is documented as
+ * the number of calendar slots per platform, on a calendar that shows a week,
+ * and the web app counts it that way: it reports "N of 20 slots free" from the
+ * week on screen. The server counted every primary ever, so the two disagreed
+ * and the server quietly won. Pass `weekOf` to count the week a date falls in.
+ */
 export async function primaryIdeasForPlatform(
   workspaceId: string,
   platform: Platform,
+  weekOf?: string | null,
 ): Promise<IdeaRow[]> {
+  const week = weekOf == null ? null : mondayOf(weekOf)
   return query<IdeaRow>(
     `SELECT ci.*, NULL::text AS hashtag_display
        FROM content_ideas ci
       WHERE ci.workspace_id = $1 AND ci.platform = $2 AND ci.calendar_slot = 'primary'
+        AND ci.status NOT IN ('published', 'rejected')
+        AND ($3::date IS NULL OR ci.scheduled_date BETWEEN $3::date AND $3::date + 6)
       ORDER BY ci.platform_rank NULLS LAST`,
-    [workspaceId, platform],
+    [workspaceId, platform, week],
   )
+}
+
+/** The Monday of the ISO week containing `date`, as a bare `YYYY-MM-DD`. */
+function mondayOf(date: string): string {
+  const d = new Date(`${date.slice(0, 10)}T12:00:00`)
+  d.setDate(d.getDate() + (d.getDay() === 0 ? -6 : 1 - d.getDay()))
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 export interface DraftRow {
@@ -2164,10 +2194,10 @@ export async function recordScrapedTopicsAsKnowledge(
     // Merge into the existing signal entry for this keyword if one is live.
     const existing = await queryOne<{ id: string }>(
       `SELECT id FROM knowledge_entries
-        WHERE workspace_id = $1 AND origin = 'learned' AND category = 'Signals'
+        WHERE workspace_id = $1 AND origin = 'learned' AND category = $3
           AND title = $2 AND active = true
         LIMIT 1`,
-      [workspaceId, title],
+      [workspaceId, title, SIGNALS_CATEGORY],
     )
 
     if (existing) {
@@ -2177,7 +2207,7 @@ export async function recordScrapedTopicsAsKnowledge(
       const inserted = await insertKnowledgeEntry({
         workspaceId,
         title,
-        category: 'Signals',
+        category: SIGNALS_CATEGORY,
         content,
         source: 'Scrape',
         sources,

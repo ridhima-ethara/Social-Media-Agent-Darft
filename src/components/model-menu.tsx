@@ -97,9 +97,26 @@ export function ModelMenu({
       </button>
 
       {open ? (
+        /*
+         * SCROLLABLE, AND BOUNDED.
+         *
+         * This was `overflow-hidden` with no height cap, which is two problems
+         * wearing one class. The panel grew to whatever its entries needed —
+         * five image models with a licence pill, a summary and possibly an
+         * unreachability note each — and because it opens upward from
+         * `bottom-full` the excess ran off the top of the composer and was
+         * clipped. `overflow-hidden` then guaranteed no scrollbar, so the
+         * entries above the cut were unreachable rather than merely offscreen.
+         *
+         * `max-h-[320px]` with `overflow-y-auto` matches the select in
+         * `ui.tsx`, so both menus in the product behave the same way and pick up
+         * the themed thin scrollbar and `scrollbar-gutter: stable` from
+         * `index.css`. `overscroll-contain` keeps a wheel gesture that reaches
+         * the end of the list from scrolling the review panel behind it.
+         */
         <div
           role="menu"
-          className="anim-pop-in card absolute bottom-full left-0 z-40 mb-1.5 w-full overflow-hidden p-1 shadow-xl"
+          className="anim-pop-in card absolute bottom-full left-0 z-40 mb-1.5 max-h-[320px] w-full overflow-y-auto overscroll-contain p-1 shadow-xl"
         >
           {entries.map((entry) => {
             const state = reach(entry)

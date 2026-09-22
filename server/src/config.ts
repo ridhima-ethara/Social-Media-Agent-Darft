@@ -240,6 +240,17 @@ export const config = {
 
   /* ── Knowledge · Parallel Web Systems ───────────────────────────────────── */
   parallel: {
+    /**
+     * Characters kept per captured page on the open-web lane.
+     *
+     * Lived on the crawl4ai config until the crawler was removed. It is a
+     * property of the LANE, not of whichever client reads it: one verbose page
+     * must not crowd the rest of a keyword's budget out of the payload handed to
+     * the validator.
+     */
+    get maxCharsPerPage(): number {
+      return int('OPEN_WEB_MAX_CHARS_PER_PAGE', 6000)
+    },
     get apiKey(): string {
       return str('PARALLEL_API_KEY')
     },
@@ -557,13 +568,13 @@ export const config = {
   /* ── Scraping · Apify ───────────────────────────────────────────────────── */
   apify: {
     /**
-     * Hosted capture for the four platform lanes. Unlike crawl4ai — which reads
-     * whatever a search engine indexed and therefore cannot state a reaction
-     * count — an actor reads the platform itself and returns real engagement.
+     * Hosted capture for the four platform lanes, and the only source for them.
+     * An actor reads the platform itself and returns real engagement; nothing
+     * else can state a reaction count, which is why there is no fallback.
      * That is the whole reason this adapter exists: three of the four trend
      * components are engagement maths, and they are inert without it.
      *
-     * The open web has no actor and stays on crawl4ai. See `capture.ts`.
+     * The open web has no actor and is served by Parallel. See `capture.ts`.
      */
     get token(): string {
       return str('APIFY_API_TOKEN')
@@ -605,45 +616,6 @@ export const config = {
     },
     get configured(): boolean {
       return has('APIFY_API_TOKEN')
-    },
-  },
-
-  /* ── Scraping · crawl4ai ────────────────────────────────────────────────── */
-  crawl4ai: {
-    /**
-     * crawl4ai runs as a Python sidecar rather than a service, because the
-     * browser it drives is a local process, not an endpoint. The script is
-     * addressed by interpreter + path for the same reason the agent bridge is
-     * (`api.ts`): the process boundary is the interface.
-     */
-    get python(): string {
-      return str('CRAWL4AI_PYTHON')
-    },
-    /** Where a keyword search starts. Comma-separated, resolved at call time. */
-    get searchEngines(): string[] {
-      return str('CRAWL4AI_SEARCH_ENGINES', 'duckduckgo,bing')
-        .split(',')
-        .map((s) => s.trim().toLowerCase())
-        .filter((s) => s !== '')
-    },
-    get maxPagesPerKeyword(): number {
-      return int('CRAWL4AI_MAX_PAGES_PER_KEYWORD', 8)
-    },
-    get maxCharsPerPage(): number {
-      return int('CRAWL4AI_MAX_CHARS_PER_PAGE', 6000)
-    },
-    get timeoutMs(): number {
-      return int('CRAWL4AI_TIMEOUT_MS', 180000)
-    },
-    /** Politeness. A scraper that hammers a host is a scraper that gets blocked. */
-    get delayMs(): number {
-      return int('CRAWL4AI_DELAY_MS', 400)
-    },
-    get headless(): boolean {
-      return flag('CRAWL4AI_HEADLESS', true)
-    },
-    get configured(): boolean {
-      return has('CRAWL4AI_PYTHON')
     },
   },
 
@@ -689,8 +661,7 @@ export function integrationStatuses(): {
   ollama: IntegrationStatus & { textModel: string; imageModel: string }
   embeddings: IntegrationStatus & { model: string; dimensions: number }
   mflux: IntegrationStatus & { model: string }
-  crawl4ai: IntegrationStatus
-  apify: IntegrationStatus & { platformLanes: 'apify' | 'crawl4ai' }
+  apify: IntegrationStatus & { platformLanes: 'apify' | 'unavailable' }
   zImage: IntegrationStatus
   text: IntegrationStatus & {
     provider: TextProvider
@@ -771,14 +742,13 @@ export function integrationStatuses(): {
       ...statusFor(config.mflux.configured, 'MFLUX_PYTHON'),
       model: config.mflux.model,
     },
-    crawl4ai: statusFor(config.crawl4ai.configured, 'CRAWL4AI_PYTHON'),
     apify: {
       ...statusFor(config.apify.configured, 'APIFY_API_TOKEN'),
       // Which implementation the four platform lanes will actually bind, for
       // the same reason `text.resolved` is reported: an operator should not
       // have to work out the precedence, and "why does this post have no
       // reaction count" is answered here rather than on the card.
-      platformLanes: config.apify.configured ? 'apify' : 'crawl4ai',
+      platformLanes: config.apify.configured ? 'apify' : 'unavailable',
     },
     zImage: statusFor(config.zImage.configured, 'Z_IMAGE_ENDPOINT'),
     text: {
@@ -842,8 +812,7 @@ export function describeConfiguration(): string[] {
     `text        ${s.text.resolved}${s.text.resolved === 'template' ? '' : ` · ${s.text.resolved === 'ollama' ? config.ollama.textModel : config.gcp.textModel}`}`,
     `ollama      ${s.ollama.configured ? `live · ${config.ollama.baseUrl}` : 'not configured'}`,
     `mflux       ${s.mflux.configured ? `live · ${s.mflux.model}` : 'not configured'}`,
-    `crawl4ai    ${s.crawl4ai.configured ? 'live' : 'NOT CONFIGURED — the open-web lane cannot be scraped'}`,
-    `apify       ${s.apify.configured ? 'live · platform lanes carry engagement' : 'not configured — platform lanes fall back to crawl4ai, without engagement figures'}`,
+    `apify       ${s.apify.configured ? 'live · the four platform lanes carry engagement' : 'NOT CONFIGURED — the four platform lanes cannot run; no substitute is attempted'}`,
     `parallel    ${s.parallel.configured ? 'live' : 'not configured'}`,
     `gcp         ${s.gcp.configured ? 'live' : 'template writer'}`,
     `z-image     ${s.zImage.configured ? 'live' : 'not configured'}`,

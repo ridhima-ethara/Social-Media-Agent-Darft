@@ -20,7 +20,6 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 
@@ -295,69 +294,44 @@ async function main(): Promise<void> {
   /* ── 5 · CAPTURE ────────────────────────────────────────────────────────── */
   section('Capture')
 
-  if (!config.apify.configured && !config.crawl4ai.configured) {
+  if (!config.apify.configured && !config.parallel.configured) {
     blocked(
       'no capture source is configured',
-      'Neither APIFY_API_TOKEN nor CRAWL4AI_PYTHON is set, so a discovery run captures ' +
-        'nothing at all — there is no fixture behind either.',
-      'set CRAWL4AI_PYTHON=backend/.venv/bin/python for the open web, ' +
-        'or APIFY_API_TOKEN for the platform lanes',
+      'Neither APIFY_API_TOKEN nor PARALLEL_API_KEY is set, so a discovery run captures ' +
+        'nothing at all — there is no fixture behind either lane.',
+      'set APIFY_API_TOKEN for the four platform lanes, and PARALLEL_API_KEY for the open web',
     )
   } else {
-    if (config.apify.configured) ok('Apify', 'platform lanes read the platforms themselves')
-    else
-      degraded(
-        'no Apify token — the trend score runs on 25% of its intended signal',
-        'APIFY_API_TOKEN is not set, so all four platform lanes fall back to crawl4ai, which ' +
-          'reads search-indexed pages and states NO engagement figures. Those rows carry ' +
-          '`metricsAvailable: false`, and the Validation Agent then drops engagement (35%), ' +
-          'velocity (20%) and growth (20%) from the trend-score divisor — leaving volume (25%) ' +
-          'as the only weight it can compute. The ranking is still honest and says so on every ' +
-          'keyword, but it rests on findability alone rather than on performance.\n      ' +
-          'fix: put APIFY_API_TOKEN in server/secrets.env (gitignored). Get it from the Apify ' +
-          'console → Settings → API & Integrations → Personal API tokens.',
+    if (config.apify.configured) {
+      ok('Apify', 'the four platform lanes read the platforms themselves, with engagement')
+    } else {
+      /*
+       * No longer a degradation — it is a lane that does not run.
+       *
+       * This used to report the lanes falling back to the crawler, which made a
+       * volume-only score sound like a lesser version of the same measurement.
+       * With no fallback the honest report is that the platform lanes produce
+       * nothing, and the open web is all that remains.
+       */
+      blocked(
+        'no Apify token — the four platform lanes cannot run',
+        'APIFY_API_TOKEN is not set. The platform lanes read LinkedIn, Instagram, X and ' +
+          'Facebook directly, and nothing else can state a reaction count, so no substitute ' +
+          'is attempted. Without it a run captures the open web only, and the trend score ' +
+          'has no engagement, velocity or growth to compute.',
+        'put APIFY_API_TOKEN in server/secrets.env (gitignored). Apify console → Settings → ' +
+          'API & Integrations → Personal API tokens',
       )
+    }
 
-    if (config.crawl4ai.configured) {
-      const python = config.crawl4ai.python
-      if (!existsSync(python)) {
-        blocked(
-          'CRAWL4AI_PYTHON points at an interpreter that does not exist',
-          `CRAWL4AI_PYTHON=${python}`,
-          'correct the key, or unset it to disable the open-web lane',
-        )
-      } else {
-        try {
-          execFileSync(python, ['-c', 'import crawl4ai'], {
-            timeout: 30_000,
-            stdio: 'ignore',
-          })
-          ok('crawl4ai', python)
-          try {
-            execFileSync(python, ['-c', 'from playwright.sync_api import sync_playwright'], {
-              timeout: 30_000,
-              stdio: 'ignore',
-            })
-            ok('playwright', 'importable')
-          } catch {
-            blocked(
-              'crawl4ai is installed but Playwright is not importable',
-              'crawl4ai drives a headless browser; without Playwright every crawl fails.',
-              `${python} -m playwright install chromium`,
-            )
-          }
-        } catch {
-          blocked(
-            'CRAWL4AI_PYTHON exists but cannot import crawl4ai',
-            `${python} has no crawl4ai module.`,
-            `${python} -m pip install -r backend/requirements.txt`,
-          )
-        }
-      }
+    if (config.parallel.configured) {
+      ok('Parallel', 'the open-web lane reads cited pages, which state no engagement')
     } else {
       degraded(
-        'no CRAWL4AI_PYTHON',
-        'The open-web lane cannot run, and a platform lane has nothing to fall back to.',
+        'no PARALLEL_API_KEY — the open-web lane cannot run',
+        'The four platform lanes are unaffected. Research for the Knowledge Base also ' +
+          'depends on this key, and without it a build finds nothing citable rather than ' +
+          'substituting a weaker source.',
       )
     }
   }

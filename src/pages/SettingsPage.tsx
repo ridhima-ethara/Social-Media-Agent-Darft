@@ -19,17 +19,19 @@ import { Select, Badge, Btn, FacebookGlyph, InstagramGlyph, LinkedinGlyph, XGlyp
 /**
  * How each lane is read, under each of the two capture sources.
  *
- * The four platform lanes are read by an Apify actor when a token is present
- * and by a `site:` search when it is not, and the difference is not cosmetic:
- * an actor states reaction counts and a search-indexed page does not. The open
- * web has no actor at all, so it is crawl4ai either way.
+ * The four platform lanes are read by an Apify actor, and only by an Apify
+ * actor: it reads the platform itself and states real reaction counts, and
+ * nothing else can. There is no fallback, so a lane without the token does not
+ * run rather than running with weaker numbers under the same name. The open web
+ * has no actor and is read by Parallel, which returns cited pages and therefore
+ * states no engagement either.
  */
 const CAPTURE_LANES = [
-  { label: 'LinkedIn', apify: 'Apify actor · post search', crawler: 'site:linkedin.com' },
-  { label: 'Instagram', apify: 'Apify actor · hashtag search', crawler: 'site:instagram.com' },
-  { label: 'X', apify: 'Apify actor · post search', crawler: 'site:x.com OR site:twitter.com' },
-  { label: 'Facebook', apify: 'Apify actor · post search', crawler: 'site:facebook.com' },
-  { label: 'Open web', apify: null, crawler: 'unscoped — platform domains excluded' },
+  { label: 'LinkedIn', apify: 'Apify actor · post search', crawler: 'lane does not run without the token' },
+  { label: 'Instagram', apify: 'Apify actor · hashtag search', crawler: 'lane does not run without the token' },
+  { label: 'X', apify: 'Apify actor · post search', crawler: 'lane does not run without the token' },
+  { label: 'Facebook', apify: 'Apify actor · post search', crawler: 'lane does not run without the token' },
+  { label: 'Open web', apify: null, crawler: 'Parallel · cited pages, no engagement figures' },
 ]
 
 /**
@@ -40,8 +42,7 @@ const CAPTURE_LANES = [
  */
 const SERVICES = [
   { id: 'apify', label: 'Apify · platform capture (LinkedIn, Instagram, X, Facebook)', env: 'APIFY_API_TOKEN' },
-  { id: 'crawl4ai', label: 'crawl4ai · open-web capture and platform fallback', env: 'CRAWL4AI_PYTHON' },
-  { id: 'parallel', label: 'Parallel Web Systems · deep research', env: 'PARALLEL_API_KEY' },
+  { id: 'parallel', label: 'Parallel Web Systems · open-web capture and deep research', env: 'PARALLEL_API_KEY' },
   { id: 'gcp', label: 'Google Cloud · Gemini and Imagen', env: 'GCP_API_KEY' },
   { id: 'ollama', label: 'Ollama · local Qwen3 and FLUX.2 Klein', env: 'OLLAMA_BASE_URL' },
 ]
@@ -61,7 +62,7 @@ export function SettingsPage() {
    * Resolves a service to the running server's own report.
    *
    * Adapters are named `<service>.<capability>` — `apify.search`,
-   * `crawl4ai.search`, `gcp.text` — so an exact-id lookup silently missed every
+   * `parallel.search`, `gcp.text` — so an exact-id lookup silently missed every
    * one of them and every badge on this screen read "not configured" no matter
    * what was in the environment. Matching the segment before the dot as well
    * means the screen shows what the server actually reported, which is the only
@@ -215,21 +216,23 @@ export function SettingsPage() {
                   ? 'Configured · platform lanes carry engagement'
                   : `Not configured — ${statusOf('apify').reason}`}
               </Badge>
-              <span className="ml-1 text-[11.5px] text-ink-3">crawl4ai</span>
-              <Badge tone={statusOf('crawl4ai').configured ? 'good' : 'warn'}>
-                {statusOf('crawl4ai').configured
-                  ? 'Configured · open web'
-                  : `Not configured — ${statusOf('crawl4ai').reason}`}
+              <span className="ml-1 text-[11.5px] text-ink-3">Parallel</span>
+              <Badge tone={statusOf('parallel').configured ? 'good' : 'warn'}>
+                {statusOf('parallel').configured
+                  ? 'Configured · open web and research'
+                  : `Not configured — ${statusOf('parallel').reason}`}
               </Badge>
             </div>
 
             <p className="mt-1.5 text-[11px] leading-relaxed text-ink-3">
-              Every keyword is captured once per lane. The four platform lanes prefer an Apify actor,
-              which reads the platform itself and states real reaction counts; without a token they
-              fall back to a <code className="mono">site:</code> search, which states none — so those
-              posts are excluded from the engagement, velocity and growth parts of the trend score
-              rather than counted as zero. The open web has no actor and is always crawl4ai. A lane
-              that returns nothing is reported, never filled in.
+              Every keyword is captured once per lane. The four platform lanes are read by an Apify
+              actor, which reads the platform itself and states real reaction counts. There is no
+              fallback behind it: nothing else can state a reaction count, so a lane without the
+              token does not run rather than returning weaker numbers under the same name. The open
+              web has no actor and is read by Parallel, which returns cited pages and states no
+              engagement — those rows are excluded from the engagement, velocity and growth parts of
+              the trend score rather than counted as zero. A lane that returns nothing is reported,
+              never filled in.
             </p>
 
             <div className="mt-2 space-y-1.5">

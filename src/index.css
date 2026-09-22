@@ -177,6 +177,24 @@ body {
 }
 
 /*
+ * …BUT ONLY WHERE A PERSON CAN ACTUALLY SCROLL.
+ *
+ * A box that merely CLIPS is still a scroll container in CSS terms, even though
+ * nobody can scroll it. Left containing, it became a wheel trap: the gesture
+ * latched onto the nearest scroll container — a rounded, clipping card under
+ * the pointer — found nothing to move, and `contain` forbade it from chaining
+ * up to the pane that could. Measured in the post editor, a wheel over the live
+ * preview or over a chip moved nothing at all, while the same wheel over the
+ * few pixels of padding BETWEEN those cards scrolled the column normally. Every
+ * rounded card in the product had the same dead spot.
+ *
+ * Clipping boxes therefore chain; real panes still contain.
+ */
+[class*='overflow-hidden'] {
+  overscroll-behavior: auto;
+}
+
+/*
  * Programmatic scrolling — `scrollIntoView` on a new feed row, the assistant
  * transcript following its own output — eases instead of jumping. Only
  * script-driven scrolls are affected; a wheel or trackpad gesture is never
@@ -333,6 +351,34 @@ textarea,
     inset 0 1px 0 color-mix(in srgb, var(--color-ink) 5%, transparent),
     0 1px 2px color-mix(in srgb, var(--color-page) 55%, transparent),
     0 12px 32px -24px color-mix(in srgb, var(--color-page) 90%, transparent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOVING BETWEEN SCREENS
+   ───────────────────────────────────────────────────────────────────────────
+   There is no router here: `setPage` swaps one component for another, and the
+   swap was instantaneous — a full screen of content replaced between two
+   frames, which reads as a flicker rather than as navigation. A short rise and
+   fade gives the change a direction, so the eye follows it instead of being
+   startled by it. It runs once on arrival, never on the content inside, so
+   nothing that updates in place animates with it.
+
+   `prefers-reduced-motion` cuts it to 1ms along with everything else, below.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.page-enter {
+  animation: page-enter var(--dur-base) var(--ease-out-soft) both;
 }
 
 /* ── Dragging a card ────────────────────────────────────────────────────── */

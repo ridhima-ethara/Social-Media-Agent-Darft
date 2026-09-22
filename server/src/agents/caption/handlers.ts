@@ -8,11 +8,14 @@
 import {
   BRAND,
   deriveHashtags,
+  deriveKeywords,
   enforceBrandVoice,
   platformVoiceInstruction,
   topicInProse,
 } from '../../../../shared/brand-voice'
+import { closeReference, hookReference } from '../../../../shared/caption-examples'
 import type { Platform } from '../../../../shared/agent-contract'
+import { SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
 import {
   temperatureFromPercent,
   textChain,
@@ -21,7 +24,7 @@ import {
   writeTemplateCaption,
 } from '../../integrations'
 import { listKnowledge } from '../../db/repo'
-import { clampChars, clampWords, PLATFORM_LABEL, similarity } from '../corpus'
+import { clampChars, clampWords, PLATFORM_LABEL, seededFor, similarity } from '../corpus'
 import { withCaptionSpec } from '../skills/skill-spec'
 import { registerSkill } from '../runtime'
 import { retrieveKnowledge, toGroundingEntry } from '../knowledge/handlers'
@@ -84,7 +87,22 @@ registerSkill<CaptionPayload>('generation.caption.voice', async (payload, ctx) =
     ...(minEntryConfidence > 0 ? { minConfidence: minEntryConfidence } : {}),
   })
 
-  const grounding: GroundingEntry[] = rows.map(toGroundingEntry)
+  /*
+   * SCRAPED SIGNAL RECORDS ARE NOT EVIDENCE.
+   *
+   * `recordScrapedTopicsAsKnowledge` writes a `Signal · <keyword>` entry per
+   * capture so an operator can see what was scraped. Those entries are
+   * bookkeeping: their content reads "Scraped signal for X. Topics: … Seen on 5
+   * pages this scrape." Left in the grounding pool they do two kinds of damage —
+   * the writer treats them as a finding it may assert, and `firstFigure()` will
+   * happily lift that "5" into a caption as though it were a measured result.
+   *
+   * They stay in the Knowledge Base and stay visible on its own screen. They
+   * simply do not ground a claim, and they are not citable (see `sourceLink`).
+   */
+  const grounding: GroundingEntry[] = rows
+    .map(toGroundingEntry)
+    .filter((entry) => entry.category !== SIGNALS_CATEGORY)
 
   if (grounding.length === 0 && requireGrounding) {
     throw new Error(
@@ -137,6 +155,13 @@ registerSkill<CaptionPayload>('generation.caption.voice', async (payload, ctx) =
  * problem first", verbatim, on every topic and every platform, because that
  * sentence was hard-coded. A reader seeing two of our posts saw the same post.
  */
+/**
+ * Instagram's hashtag count is a fixed number in the caption skill, not a range:
+ * exactly five, followed by the bracketed keyword line. Declared here so the
+ * skill handler and the acceptance check read the same value.
+ */
+const INSTAGRAM_HASHTAGS = 5
+
 const HUMAN_VOICE = [
   'Write as one practitioner talking to another. Short sentences. Concrete nouns.',
   'Vary the opening: never begin with "Most teams", "In today\u2019s", "As AI evolves", "Let\u2019s dive in", or any sentence that could open a post on a different subject.',
@@ -171,9 +196,17 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
    * the templates below remain as the labelled fallback.
    */
   const styleBrief: Record<string, string> = {
-    Declarative: 'State the claim flatly, as a fact you are prepared to defend.',
-    Question: 'Ask the one question the post answers. It must end with a question mark.',
+    Provocative:
+      'Name the uncomfortable thing directly. State a real limitation, trade-off or ' +
+      'overlooked consequence that the body then examines. Address the reader\u2019s own ' +
+      'situation where it is honest to \u2014 "your agent", "your benchmark" \u2014 and let the ' +
+      'line sting without exaggerating. A short second clause that turns the knife is ' +
+      'allowed: "A flawless demo can hide a fragile agent."',
+    Question:
+      'Ask the one question the post answers, about this specific subject. It must end ' +
+      'with a question mark, and the body must begin answering it immediately.',
     Contrarian: 'Name the common belief and say plainly that it is wrong.',
+    Declarative: 'State the claim flatly, as a fact you are prepared to defend.',
     Observation: 'Report the specific change you have observed, with its subject named.',
   }
 
@@ -188,16 +221,41 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
     .join('\n\n')
   const systemInstruction = withCaptionSpec(systemInstructionRaw)
 
+  /*
+   * The reference bank, rotated per idea.
+   *
+   * Without it every hook converged on the same two or three shapes, because the
+   * only guidance was the style brief and that is a sentence long. The examples
+   * demonstrate register; the rotation keyed on the idea keeps two posts from
+   * being shown the same four lines. Neither may be copied — the prompt says so
+   * twice, and `hookReference` says it again in its closing instruction.
+   */
+  const reference = hookReference(topic, payload.ideaId ?? subject)
+
   const prompt = [
     `Write ONLY the first line of a ${PLATFORM_LABEL[payload.platform]} post about ${topic}.`,
     `The post's subject, for your reference only — do not reuse its wording: "${subject}"`,
     `Angle: ${payload.angle}`,
     styleBrief[style] ?? styleBrief.Declarative,
+    '',
+    reference,
+    '',
     `At most ${maxWords} words. One line. No hashtags, no emoji, no quotation marks around it.`,
     'It must make a claim rather than tease one. Do not end with a colon.',
+    // The specification's hook test, stated as a requirement rather than left to
+    // the examples to imply. A line that could open a post on a different subject
+    // is the single most common failure, so it is named explicitly.
+    'It must create tension from something real in the evidence \u2014 a limitation, a ' +
+      'trade-off, an overlooked consequence, or an assumption the post will challenge. ' +
+      'A line that could open almost any AI post is a failure: name or clearly signal ' +
+      'THIS subject. Do not manufacture urgency, fear, or an unsupported figure.',
   ].join('\n')
 
   const patterns: Record<string, () => string> = {
+    // The template fallback for the default style. Phrased as a tension rather
+    // than a restatement, so an unreachable model still yields a usable hook.
+    Provocative: () =>
+      `${subject.replace(/\.$/, '')} \u2014 and the score will not tell you.`,
     Declarative: () => subject.replace(/\.$/, ''),
     Question: () => `What actually changes when ${topic.toLowerCase()} stops being a research problem?`,
     Contrarian: () => `${subject.replace(/\.$/, '')} \u2014 and the usual explanation for it is wrong.`,
@@ -538,10 +596,28 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
     `The post's hook was: "${payload.hook ?? ''}"`,
     `Its problem section said: "${(payload.problem ?? '').slice(0, 400)}"`,
     wantsQuestion
-      ? 'It must be a single question that a practitioner in this field can actually answer from their own experience. End with a question mark. Do not ask for likes, comments, follows or shares.'
+      ? [
+          'It must be a single question a practitioner can answer from their own work.',
+          // The specification's close test. A close that merely gestures at the
+          // topic is the other half of the "every post reads the same" problem:
+          // the hook was generic and the question was generic, so the post had
+          // no edge at either end.
+          'Make it specific to THIS post\u2019s mechanism \u2014 name the thing at stake: the',
+          'failure that would go unseen, the measurement that is missing, the',
+          'trade-off they would have to accept. It must return to the issue the hook',
+          'raised, not restate the topic. A question that could close almost any AI',
+          'post is a failure.',
+          'End with a question mark. One question, not several. Never ask for likes,',
+          'comments, follows or shares, and never ask for confidential information.',
+        ].join(' ')
       : closeStyle === 'Forward look'
-        ? 'State what changes next, in one or two sentences.'
-        : 'State the implication for someone shipping this, in one or two sentences.',
+        ? 'State what changes next, in one or two sentences. Name the specific thing that changes, not a general direction.'
+        : 'State the implication for someone shipping this, in one or two sentences. Name what they should now measure, change or stop assuming.',
+    '',
+    // Rotated per idea, and it carries the hook so the pairing discipline is
+    // visible: a close has to answer the question its own opening raised.
+    closeReference(payload.sourceTopic, payload.ideaId ?? payload.title, payload.hook ?? ''),
+    '',
     'No hashtags, no emoji, no heading, no quotation marks around it.',
   ].join('\n')
 
@@ -607,10 +683,21 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
 registerSkill<CaptionPayload>('generation.caption.hashtags', (payload, ctx) => {
   const requested = ctx.num('count', 6)
   const useSourceHashtag = ctx.bool('useSourceHashtag', true)
+  const keywordCount = ctx.num('instagramKeywordCount', 7)
 
-  // The brand range is the ceiling and the floor. The knob narrows within it;
-  // it cannot escape it.
-  const count = Math.min(Math.max(requested, BRAND.hashtags.min), BRAND.hashtags.max)
+  /*
+   * INSTAGRAM TAKES EXACTLY FIVE. EVERY OTHER PLATFORM TAKES THE BRAND RANGE.
+   *
+   * The caption skill fixes Instagram at five hashtags followed by a bracketed
+   * keyword line, and leaves LinkedIn, Facebook and X on the 5–7 range. The
+   * count knob used to apply to all four, so Instagram shipped six tags and no
+   * keyword line — which fails the skill's own acceptance check for the one
+   * platform that has a hard number.
+   */
+  const isInstagram = payload.platform === 'instagram'
+  const count = isInstagram
+    ? INSTAGRAM_HASHTAGS
+    : Math.min(Math.max(requested, BRAND.hashtags.min), BRAND.hashtags.max)
 
   /*
    * `deriveHashtags` returns bare names. They must carry the hash here, because
@@ -628,10 +715,27 @@ registerSkill<CaptionPayload>('generation.caption.hashtags', (payload, ctx) => {
       if (tags.length > count) tags.length = count
     }
   }
+  // Exactly, not at most: a five-tag rule that ships four is still a failure.
+  if (isInstagram && tags.length > INSTAGRAM_HASHTAGS) tags.length = INSTAGRAM_HASHTAGS
 
   ctx.log(`${tags.length} hashtag(s): ${tags.join(' ')}`)
 
-  return { hashtagBlock: tags.join(' ') }
+  /*
+   * The keyword footer is built here beside the hashtags because they are one
+   * footer, but it is APPLIED after the brand enforcer in `adapt` — the enforcer
+   * lifts every `#tag` out of the body and re-appends the block at the end, so a
+   * keyword line added before it would end up above the hashtags and invert the
+   * order the skill specifies.
+   */
+  if (!isInstagram) return { hashtagBlock: tags.join(' ') }
+
+  const keywords = deriveKeywords(`${payload.sourceTopic} ${payload.title}`, keywordCount)
+  ctx.log(`${keywords.length} Instagram keyword(s): ${keywords.join(', ')}`)
+
+  return {
+    hashtagBlock: tags.join(' '),
+    keywordBlock: keywords.length > 0 ? `[${keywords.join(', ')}]` : '',
+  }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -744,8 +848,41 @@ registerSkill<CaptionPayload>('generation.caption.adapt', (payload, ctx) => {
     )
   }
 
+  /*
+   * THE KEYWORD LINE GOES ON AFTER THE ENFORCER, NOT BEFORE IT.
+   *
+   * `enforceBrandVoice` lifts every `#tag` out of the text and re-appends the
+   * hashtag block as the final line. Anything added before it therefore ends up
+   * ABOVE the hashtags, and the skill's required order is hashtags then
+   * keywords. So the bracketed line is appended here, last, where nothing
+   * reorders it.
+   *
+   * It is metadata, not prose, so it sits outside the brand pass by design: it
+   * carries no hashes for rule 11 to clamp and no sentences for the voice rules
+   * to judge.
+   */
+  let text = enforced.text
+  const keywordBlock = typeof payload.keywordBlock === 'string' ? payload.keywordBlock.trim() : ''
+  if (payload.platform === 'instagram' && keywordBlock !== '') {
+    text = `${text}\n\n${keywordBlock}`
+    const overrun = text.length - limit
+    if (overrun > 0) {
+      /*
+       * Reported, never silently cut. The skill is explicit: if the shared prose
+       * cannot fit Instagram with its required footer, flag the conflict for a
+       * human rather than truncating the caption or quietly editing only
+       * Instagram — the pair would then disagree about what the post says.
+       */
+      ctx.emit(
+        'activity',
+        `The Instagram caption is ${overrun} character(s) over the ${limit}-character limit once its 5 hashtags and keyword line are added. The prose is shared with LinkedIn, so it was left intact — shorten it on both, or raise the limit in Agent Studio.`,
+        { status: 'warn' },
+      )
+    }
+  }
+
   return {
-    caption: enforced.text,
+    caption: text,
     captionBody: body.trim(),
     brandNotes: enforced.notes,
   }
@@ -804,10 +941,59 @@ registerSkill<CaptionPayload>('generation.caption.sourceLink', (payload, ctx) =>
 
   const placement = ctx.str('placement', 'End of post')
   const grounding = payload.grounding ?? []
-  const source = grounding.flatMap((g) => g.sources)[0]
+
+  /*
+   * WHICH SOURCE GETS CITED, AND WHY IT IS NOT SIMPLY THE FIRST ONE.
+   *
+   * This was `grounding.flatMap((g) => g.sources)[0]` — the first citation of
+   * the highest-ranked entry, every time. Two faults compounded.
+   *
+   *   The `Signals` entries are not citable. `recordScrapedTopicsAsKnowledge`
+   *   writes one per capture, citing the URL of every page it captured, so the
+   *   pool was dominated by raw social posts. A Facebook post is a record of
+   *   WHAT WE SCRAPED, not evidence for a research claim, and presenting one as
+   *   "Source:" under a caption about agent evaluation is fabricated
+   *   attribution. Same distinction the duplicate check draws.
+   *
+   *   `[0]` never varies. Captions on one topic retrieve the same entry, so
+   *   twelve of fourteen posts across a fortnight carried the identical URL.
+   *   A citation that is the same on every post is decoration, not evidence.
+   *
+   * So: drop the signal records, dedupe by URL, and prefer the source whose own
+   * title actually overlaps this post's subject. Where nothing overlaps — the
+   * common case, since a citation title rarely echoes a headline — rotate
+   * deterministically on the idea id, which spreads the pool across the calendar
+   * and still yields the same citation for the same post on every re-run.
+   */
+  const citable = grounding.filter((entry) => entry.category !== SIGNALS_CATEGORY)
+
+  const byUrl = new Map<string, { title: string; url: string; publishedAt?: string }>()
+  for (const candidate of citable.flatMap((entry) => entry.sources ?? [])) {
+    if (candidate?.url && !byUrl.has(candidate.url)) byUrl.set(candidate.url, candidate)
+  }
+  const pool = [...byUrl.values()]
+
+  const subject = `${payload.title} ${payload.sourceTopic} ${payload.angle ?? ''}`
+  const ranked = pool
+    .map((candidate) => ({ candidate, score: similarity(subject, candidate.title) }))
+    .sort((a, b) => b.score - a.score)
+
+  // A real topical match wins. Otherwise the pool is walked by a seed taken from
+  // the idea, so two posts grounded in the same entry cite different pages.
+  const best = ranked[0]
+  const source =
+    best && best.score > 0
+      ? best.candidate
+      : pool.length > 0
+        ? pool[Math.floor(seededFor(payload.ideaId, 6151)() * pool.length) % pool.length]
+        : undefined
 
   if (!source) {
-    ctx.log('No cited source on the grounding entries, so no citation was attached')
+    ctx.log(
+      citable.length === 0 && grounding.length > 0
+        ? 'The only matching entries were scraped signal records, which are not citable sources, so no citation was attached'
+        : 'No cited source on the grounding entries, so no citation was attached',
+    )
     return { citation: '' }
   }
 
@@ -815,7 +1001,30 @@ registerSkill<CaptionPayload>('generation.caption.sourceLink', (payload, ctx) =>
   let caption = payload.caption ?? ''
 
   if (placement === 'End of post') {
-    caption = `${caption}\n\n${citation}`
+    /*
+     * "END OF POST" MEANS END OF THE PROSE, NOT AFTER THE FOOTER.
+     *
+     * This skill runs after `adapt`, so by now the caption already carries its
+     * footer: the hashtag line, and on Instagram a bracketed keyword line below
+     * it. Appending the citation to the whole string put `Source: …` underneath
+     * both, which breaks the order the caption skill fixes — hashtags, then
+     * keywords, and the keyword line last. It also read as though the keywords
+     * were part of the attribution.
+     *
+     * Attribution belongs to the body, so the trailing footer blocks are lifted
+     * off, the citation is added to the prose, and the footer is put back in the
+     * order it was already in.
+     */
+    const blocks = caption.split(/\n{2,}/)
+    const isFooter = (block: string): boolean =>
+      /^#[\p{L}\p{N}_]/u.test(block.trim()) || /^\[[^\]]*\]$/.test(block.trim())
+
+    const footer: string[] = []
+    while (blocks.length > 0 && isFooter(blocks[blocks.length - 1] as string)) {
+      footer.unshift(blocks.pop() as string)
+    }
+
+    caption = [...blocks, citation, ...footer].join('\n\n')
   } else if (placement === 'Inline') {
     // Inline means after the evidence paragraph, not glued to the hook.
     const paragraphs = caption.split(/\n{2,}/)

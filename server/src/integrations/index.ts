@@ -65,7 +65,6 @@ export {
   type OllamaTextInput,
 } from './ollama'
 
-export { crawl4aiSearch, type Crawl4aiSearchInput } from './crawl4ai'
 
 export {
   embeddingAdapter,
@@ -82,7 +81,8 @@ export { apifySearch, rawPostEngagement } from './apify'
 export {
   captureChainFor,
   captureFor,
-  platformLaneDowngradeReason,
+  platformLaneUnavailableReason,
+  openWebLaneUnavailableReason,
   type CaptureAttempt,
   type CaptureInput,
   type CaptureSource,
@@ -91,7 +91,6 @@ export {
 
 import { describeAdapter, type AdapterReport } from './adapter'
 import { apifySearch } from './apify'
-import { crawl4aiSearch } from './crawl4ai'
 import { gcpImage, gcpText } from './gcp-llm'
 import { ollamaImage, ollamaText } from './ollama'
 import { parallelResearch } from './parallel'
@@ -100,7 +99,6 @@ import { parallelResearch } from './parallel'
 export function allAdapters() {
   return [
     apifySearch,
-    crawl4aiSearch,
     parallelResearch,
     gcpText,
     gcpImage,
