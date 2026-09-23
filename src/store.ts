@@ -13,7 +13,7 @@ import { AGENTS, AGENT_BY_ID, SKILL_BY_ID } from '@shared/agent-registry'
 import { BRAND_TOPICS, checkBrandCompliance } from '@shared/brand-voice'
 import { addressOperator } from '@shared/assistant-persona'
 import { TOOL_BY_ID } from '@shared/tool-registry'
-import { API_BASE, api, detectApi, runAgentPipeline, subscribeToEvents, signIn, signOut, SignInRefused } from './lib/api'
+import { API_BASE, api, currentSession, detectApi, runAgentPipeline, subscribeToEvents, signIn, signOut, SignInRefused } from './lib/api'
 import { applyInstruction as applyInstructionLocally, writeCaption } from './lib/ai'
 import { renderBrandSvg } from './lib/image-gen'
 import {
@@ -203,6 +203,39 @@ function runReport(run: AgentRunState): [string, Toast['tone'], string?] {
   ]
 }
 
+/*
+ * THE PAGE A TAB WAS ON, SO A REFRESH STAYS THERE.
+ *
+ * Per tab (sessionStorage), not per browser: two tabs on two screens each keep
+ * their own. Storage can be unavailable (private mode, blocked site data), so
+ * every access is guarded and the fallback is simply the hub.
+ */
+const PAGE_KEY = 'ethara.page'
+
+function rememberPage(page: PageId): void {
+  try {
+    sessionStorage.setItem(PAGE_KEY, page)
+  } catch {
+    // Not remembered; a refresh lands on the hub.
+  }
+}
+
+function rememberedPage(): PageId | null {
+  try {
+    return (sessionStorage.getItem(PAGE_KEY) as PageId | null) ?? null
+  } catch {
+    return null
+  }
+}
+
+function forgetPage(): void {
+  try {
+    sessionStorage.removeItem(PAGE_KEY)
+  } catch {
+    // Nothing to forget.
+  }
+}
+
 const USERS: Record<OperatorRole, User> = {
   marketing: {
     name: 'Ridhima',
@@ -293,10 +326,27 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   /* ── Shell ─────────────────────────────────────────────────────────────── */
   page: PageId
   user: User | null
+  /**
+   * True from page load until the server has said whether a session exists.
+   * The app shows nothing in that window rather than the sign-in screen, which
+   * would otherwise flash on every refresh of a signed-in tab.
+   */
+  restoringSession: boolean
+  /**
+   * Signs back in from the session cookie the server set, if it is still valid.
+   * Called once on load. A refresh used to always land on the sign-in screen:
+   * the cookie survived, but nothing ever asked the server about it.
+   */
+  restoreSession: () => Promise<void>
   theme: Theme
   bootOpen: boolean
   knowledgeOpen: boolean
   reviewIdeaId: string | null
+  /**
+   * A post the Weekly Calendar should bring into view, highlight, and then open
+   * for editing — set by Leadership's "Edit post", consumed by the calendar.
+   */
+  calendarSpotlight: string | null
   theaterOpen: boolean
   sidebarCollapsed: boolean
 
@@ -327,6 +377,18 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   openKnowledge: () => void
   closeKnowledge: () => void
   openReview: (id: string) => void
+  /**
+   * Leadership's "Edit post": goes to the Weekly Calendar, on the post's week,
+   * and hands the calendar a spotlight. The calendar scrolls the card into
+   * view and highlights it, THEN opens the editor — opening the full-screen
+   * editor straight away covered the calendar, so the redirect never looked
+   * like one. One state change, not `setPage` then `openReview`: `setPage`
+   * clears the open editor, and inside a View Transition it applies after the
+   * caller returns.
+   */
+  editOnCalendar: (id: string) => void
+  /** Clears the spotlight once the calendar has shown it. */
+  clearCalendarSpotlight: () => void
   closeReview: () => void
   openTheater: () => void
   closeTheater: () => void
@@ -375,7 +437,12 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   uploadCorpusFiles: (files: File[]) => Promise<void>
 
   ensureDraft: (ideaId: string, platform?: Platform) => Promise<void>
-  regenerateDraft: (ideaId: string, platform?: Platform) => Promise<void>
+  /**
+   * `withImage: false` rewrites the caption only — the caption tab's Regenerate.
+   * Omitted, the server re-renders the creative too, which a first draft or a
+   * platform switch needs.
+   */
+  regenerateDraft: (ideaId: string, platform?: Platform, opts?: { withImage?: boolean }) => Promise<void>
 
   /* ── Short-form: scripts, hooks and the learned voice (ADR-007) ─────────── */
   /**
@@ -625,10 +692,12 @@ export const useStore = create<Store>((set, get) => ({
 
   page: 'dashboard',
   user: null,
+  restoringSession: true,
   theme: readTheme(),
   bootOpen: false,
   knowledgeOpen: false,
   reviewIdeaId: null,
+  calendarSpotlight: null,
   theaterOpen: false,
   // Collapsed by default on a narrow screen: at 390px the open sidebar took
   // sixty percent of the width and left the metric strip two words wide.
@@ -674,6 +743,7 @@ export const useStore = create<Store>((set, get) => ({
   /* ── SHELL ─────────────────────────────────────────────────────────────── */
 
   setPage: (page) => {
+    rememberPage(page)
     const apply = (): void => set({ page, reviewIdeaId: null })
     /*
      * A screen change is a View Transition where the browser offers one: the
@@ -718,10 +788,23 @@ export const useStore = create<Store>((set, get) => ({
     void get().connectToRuntime()
   },
 
+  restoreSession: async () => {
+    const session = await currentSession()
+    const role = session?.role
+    if (role === 'marketing' || role === 'leadership') {
+      // Back where this tab was, when it remembers a page; the hub otherwise.
+      set({ user: USERS[role], page: rememberedPage() ?? 'dashboard', restoringSession: false })
+      void get().connectToRuntime()
+      return
+    }
+    set({ restoringSession: false })
+  },
+
   logout: () => {
     // Best effort: the cookie is the server's to clear, and a failure here
     // only means it expires on its own.
     void signOut().catch(() => undefined)
+    forgetPage()
     stopSpeaking()
     set({
       user: null,
@@ -749,7 +832,21 @@ export const useStore = create<Store>((set, get) => ({
   openKnowledge: () => set({ knowledgeOpen: true }),
   closeKnowledge: () => set({ knowledgeOpen: false }),
   openReview: (id) => set({ reviewIdeaId: id }),
+
+  editOnCalendar: (id) => {
+    rememberPage('calendar')
+    const apply = (): void => set({ page: 'calendar', reviewIdeaId: null, calendarSpotlight: id })
+    if (get().page === 'calendar') return apply()
+    const doc = document as Document & { startViewTransition?: (update: () => void) => unknown }
+    if (typeof doc.startViewTransition === 'function' && !prefersReducedMotion()) {
+      doc.startViewTransition(() => flushSync(apply))
+      return
+    }
+    apply()
+  },
   closeReview: () => set({ reviewIdeaId: null, publishPhase: null }),
+
+  clearCalendarSpotlight: () => set({ calendarSpotlight: null }),
   openTheater: () => set({ theaterOpen: true }),
   closeTheater: () => set({ theaterOpen: false }),
 
@@ -1429,27 +1526,42 @@ export const useStore = create<Store>((set, get) => ({
     await get().regenerateDraft(ideaId, target)
   },
 
-  regenerateDraft: async (ideaId, platform) => {
+  regenerateDraft: async (ideaId, platform, opts = {}) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
     const target = platform ?? idea.platform
     get().setAgent('caption', { status: 'running', current_task: `Writing for ${target}` })
 
-    // Write locally first so the composer is never empty, then swap in the
-    // server's version if the runtime is reachable.
-    const local = writeCaption({ idea, platform: target, knowledge: get().knowledge })
-    set({
-      drafts: { ...get().drafts, [`${ideaId}|${target}`]: local },
-      ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, draft: local, status: nextStatus(i.status) } : i)),
-    })
+    /*
+     * THE LOCAL WRITER IS A STAND-IN, NOT A PREVIEW.
+     *
+     * This used to write the template caption first, connected or not, "so the
+     * composer is never empty". With the API up, that replaced a real caption
+     * with scraped-metadata template text the moment Regenerate was pressed —
+     * and when the server call was slow or cut off, the template text is what
+     * stayed. Connected, the current caption now stays on screen until the
+     * server's answers; the stand-in is written only offline, or when there is
+     * no caption at all.
+     */
+    const connected = get().apiMode === 'connected'
+    if (!connected || !get().drafts[`${ideaId}|${target}`]) {
+      const local = writeCaption({ idea, platform: target, knowledge: get().knowledge })
+      set({
+        drafts: { ...get().drafts, [`${ideaId}|${target}`]: local },
+        ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, draft: local, status: nextStatus(i.status) } : i)),
+      })
+    }
 
     if (get().apiMode === 'connected') {
       try {
-        const result = await api.generateDraft(ideaId, { platform: target })
+        const result = await api.generateDraft(ideaId, {
+          platform: target,
+          ...(opts.withImage === undefined ? {} : { withImage: opts.withImage }),
+        })
         if (result.draft) {
           set({
             drafts: { ...get().drafts, [`${ideaId}|${target}`]: result.draft },
-            ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, draft: result.draft ?? null } : i)),
+            ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, draft: result.draft ?? null, status: nextStatus(i.status) } : i)),
           })
         }
         if (result.media) {
@@ -1666,21 +1778,25 @@ export const useStore = create<Store>((set, get) => ({
     const target = platform ?? idea.platform
     get().setAgent('image', { status: 'running', current_task: `Rendering ${target}` })
 
-    const local = renderBrandSvg({
-      platform: target,
-      headline: idea.title,
-      kicker: idea.source_topic ?? undefined,
-      concept: String(idea.analysis?.format ?? 'Thought Leadership'),
-      fallbackReason:
-        get().apiMode === 'connected'
+    // As with the caption: connected, the current creative stays until the
+    // server's render replaces it, so a slow or failed render never leaves a
+    // stand-in where a real image was.
+    const connected = get().apiMode === 'connected'
+    if (!connected || !get().media[`${ideaId}|${target}`]) {
+      const local = renderBrandSvg({
+        platform: target,
+        headline: idea.title,
+        kicker: idea.source_topic ?? undefined,
+        concept: String(idea.analysis?.format ?? 'Thought Leadership'),
+        fallbackReason: connected
           ? undefined
           : 'Standalone — rendered locally with the brand renderer. No image model was contacted.',
-    })
-
-    set({
-      media: { ...get().media, [`${ideaId}|${target}`]: local },
-      ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, media: local } : i)),
-    })
+      })
+      set({
+        media: { ...get().media, [`${ideaId}|${target}`]: local },
+        ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, media: local } : i)),
+      })
+    }
 
     if (get().apiMode === 'connected') {
       try {
@@ -1692,8 +1808,12 @@ export const useStore = create<Store>((set, get) => ({
           media: { ...get().media, [`${ideaId}|${target}`]: media },
           ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, media } : i)),
         })
-      } catch {
-        // The local render stands and already carries its own reason.
+      } catch (error) {
+        // Said out loud: a silent catch here is what made the button look dead.
+        get().toast(
+          error instanceof Error ? `The image was not re-rendered — ${error.message}` : 'The image was not re-rendered.',
+          'warn',
+        )
       }
     }
 
@@ -2665,6 +2785,18 @@ export const useStore = create<Store>((set, get) => ({
           const nextPlan = { ...plan, steps }
           set({ assistant: { ...get().assistant, activePlan: nextPlan, coreState: 'working' } })
           patchResponse({ plan: nextPlan, steps })
+          /*
+           * RECONCILE THE MOMENT A WRITE LANDS, NOT WHEN THE REPLY ENDS.
+           *
+           * The refetch below the stream only runs once the whole reply has
+           * closed — after the model has finished narrating what it did, which
+           * on a local model is a minute or more. The calendar sat unchanged all
+           * that time and looked as if the move had not happened. A completed
+           * step that changed something is the server's own signal that state
+           * moved, so the screen follows it immediately.
+           */
+          const landed = steps.find((s) => s.idx === frame.step.idx)
+          if (landed?.status === 'completed' && landed.risk !== 'safe') void get().refreshState()
           if (frame.step.entity) {
             const entity = frame.step.entity as { type?: string; id?: string; title?: string }
             if (entity.id) {
@@ -2805,6 +2937,11 @@ export const useStore = create<Store>((set, get) => ({
                 }),
               },
             })
+            // Same rule as a live command: a confirmed write reconciles when it
+            // lands, not when the narration after it finishes.
+            const plan = get().assistant.turns.find((t) => t.id === responseTurn.id)?.plan
+            const landed = plan?.steps.find((s) => s.idx === frame.step.idx)
+            if (landed?.status === 'completed' && landed.risk !== 'safe') void get().refreshState()
           }
         },
       )

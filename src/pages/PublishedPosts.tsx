@@ -7,8 +7,9 @@
  */
 
 import { Suspense, lazy, useMemo, useState } from 'react'
-import { Sparkles } from 'lucide-react'
+import { ExternalLink, Sparkles } from 'lucide-react'
 import { useStore } from '../store'
+import { usePostLinks } from '../lib/post-links'
 import { PageHeader } from '../components/layout'
 import { DownloadMenu } from '../components/download-menu'
 import { exportPerPost, exportSinglePost } from '../lib/export'
@@ -43,7 +44,12 @@ export function PublishedPosts() {
   const [view, setView] = useState<'records' | 'charts'>('records')
   const [detail, setDetail] = useState<PublishedPost | null>(null)
 
+
   const rows = published.filter((post) => post.platform === platform)
+
+  // Each listed post's page on the platform — see `usePostLinks`.
+  const linkFor = usePostLinks([...rows, detail])
+  const link = linkFor(detail)
 
   /*
    * THE CHART SERIES ARE BUILT FROM REPORTED READINGS ONLY.
@@ -307,8 +313,23 @@ export function PublishedPosts() {
                     className="cursor-pointer border-b border-line/60 transition-colors last:border-0 hover:bg-surface-2"
                   >
                     <td className="max-w-[300px] truncate px-4 py-2 font-medium text-ink">{post.title}</td>
-                    <td className="px-3 py-2">
-                      <PlatformIcon platform={post.platform} size={13} />
+                    <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
+                      {linkFor(post).url ? (
+                        <a
+                          href={linkFor(post).url ?? undefined}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          title={`Open this post on ${PLATFORM_LABEL[post.platform]}`}
+                          aria-label={`Open “${post.title}” on ${PLATFORM_LABEL[post.platform]}`}
+                          className="inline-flex rounded-md p-1 transition-colors hover:bg-surface-3 hover:text-accent-bright"
+                        >
+                          <PlatformIcon platform={post.platform} size={13} />
+                        </a>
+                      ) : (
+                        <span className="inline-flex p-1" title={linkFor(post).reason ?? undefined}>
+                          <PlatformIcon platform={post.platform} size={13} />
+                        </span>
+                      )}
                     </td>
                     <td className="tabular px-3 py-2 text-ink-3">{formatDate(post.published_at)}</td>
                     <td className="tabular px-3 py-2 text-ink-2">{post.reach === null ? '—' : fmt(post.reach)}</td>
@@ -373,7 +394,31 @@ export function PublishedPosts() {
         onClose={() => setDetail(null)}
         wide
         title={detail?.title ?? ''}
-        subtitle={detail ? `${PLATFORM_LABEL[detail.platform]} · published ${formatDate(detail.published_at, true)}` : ''}
+        subtitle={
+          detail ? (
+            <>
+              {/* The platform name is the way to the post itself, once the
+                  platform has returned its address. */}
+              {link.url ? (
+                <a
+                  href={link.url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  title={`Open this post on ${PLATFORM_LABEL[detail.platform]}`}
+                  className="inline-flex items-center gap-1 text-ink-2 underline decoration-line-strong decoration-dotted underline-offset-[3px] transition-colors hover:text-accent-bright hover:decoration-accent"
+                >
+                  {PLATFORM_LABEL[detail.platform]}
+                  <ExternalLink size={10} aria-hidden="true" />
+                </a>
+              ) : (
+                PLATFORM_LABEL[detail.platform]
+              )}
+              {` · published ${formatDate(detail.published_at, true)}`}
+            </>
+          ) : (
+            ''
+          )
+        }
       >
         {detail ? (
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_296px]">
@@ -421,13 +466,39 @@ export function PublishedPosts() {
                 names failed to load. The receipt below says what is actually
                 known about how this post went out.
               */}
+              {/* One row, one baseline: the status, the platform, and — pushed
+                  to the far edge — the way to the post itself. */}
               <div className="flex flex-wrap items-center gap-2">
                 <Badge tone={detail.publish_mode === 'demo' ? 'warn' : 'good'}>
                   {detail.publish_mode === 'demo' ? 'Published in demo mode' : 'Published live'}
                 </Badge>
-                <span className="mono text-[10.5px] uppercase tracking-[0.1em] text-ink-3">
-                  {PLATFORM_LABEL[detail.platform]}
-                </span>
+                {link.url ? (
+                  <a
+                    href={link.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="mono text-[10.5px] uppercase tracking-[0.1em] text-ink-3 underline decoration-line-strong decoration-dotted underline-offset-[3px] transition-colors hover:text-accent-bright hover:decoration-accent"
+                  >
+                    {PLATFORM_LABEL[detail.platform]}
+                  </a>
+                ) : (
+                  <span className="mono text-[10.5px] uppercase tracking-[0.1em] text-ink-3">
+                    {PLATFORM_LABEL[detail.platform]}
+                  </span>
+                )}
+                {link.url ? (
+                  <a
+                    href={link.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="ml-auto inline-flex items-center gap-1.5 rounded-[8px] border border-line-strong px-2.5 py-1 text-[11.5px] font-medium text-ink transition-colors hover:border-accent hover:text-accent-bright"
+                  >
+                    View on {PLATFORM_LABEL[detail.platform]}
+                    <ExternalLink size={11} aria-hidden="true" />
+                  </a>
+                ) : link.loading ? (
+                  <span className="ml-auto text-[11px] text-ink-3">Finding the post…</span>
+                ) : null}
               </div>
 
               <dl className="flex flex-col gap-1.5 border-t border-line pt-3 text-[11.5px]">
@@ -440,8 +511,21 @@ export function PublishedPosts() {
                 {detail.external_id ? (
                   <div className="flex items-baseline justify-between gap-3">
                     <dt className="shrink-0 text-ink-3">Receipt</dt>
-                    <dd className="mono min-w-0 truncate text-right text-ink-2" title={detail.external_id}>
-                      {detail.external_id}
+                    <dd className="mono min-w-0 truncate text-right text-ink-2" title={link.url ?? link.reason ?? detail.external_id}>
+                      {/* The receipt opens the post on the platform once the
+                          platform has returned its address. */}
+                      {link.url ? (
+                        <a
+                          href={link.url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="underline decoration-line-strong decoration-dotted underline-offset-[3px] transition-colors hover:text-accent-bright hover:decoration-accent"
+                        >
+                          {detail.external_id}
+                        </a>
+                      ) : (
+                        detail.external_id
+                      )}
                     </dd>
                   </div>
                 ) : null}

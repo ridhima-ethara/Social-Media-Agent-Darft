@@ -7,8 +7,9 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Check, ShieldCheck, X } from 'lucide-react'
-import { complianceFor, useStore } from '../store'
+import { Check, ExternalLink, Pencil, ShieldCheck, X } from 'lucide-react'
+import { useStore } from '../store'
+import { usePostLinks } from '../lib/post-links'
 import { PageHeader } from '../components/layout'
 import { PlatformPreview } from '../components/previews'
 import {
@@ -45,6 +46,7 @@ export function LeadershipReview() {
   const user = useStore((s) => s.user)
   const publishPhase = useStore((s) => s.publishPhase)
   const leadershipPublish = useStore((s) => s.leadershipPublish)
+  const editOnCalendar = useStore((s) => s.editOnCalendar)
   const leadershipReject = useStore((s) => s.leadershipReject)
   const ensureDraft = useStore((s) => s.ensureDraft)
   const ensureImage = useStore((s) => s.ensureImage)
@@ -72,15 +74,17 @@ export function LeadershipReview() {
   }, [selected?.id, ensureDraft, ensureImage, selected])
 
   const decided = ideas.filter((idea) => idea.leadership_decision !== null)
+  // Each recent decision's published post, so its platform chip can open the
+  // post where it went out. Only the cards on screen are asked about.
+  const published = useStore((s) => s.published)
+  const postFor = (ideaId: string) => published.find((post) => post.idea_id === ideaId && post.status === 'published')
+  const linkFor = usePostLinks(decided.slice(0, 6).map((idea) => postFor(idea.id)))
   const approvedByMe = decided.filter((i) => i.leadership_decision?.decision === 'approved').length
   const rejectedByMe = decided.filter((i) => i.leadership_decision?.decision === 'rejected').length
   const lessons = knowledge.filter((k) => k.category === 'Rejected Post' || k.category === 'Approved Post').length
 
   const draft = selected ? drafts[`${selected.id}|${selected.platform}`] : undefined
   const asset = selected ? media[`${selected.id}|${selected.platform}`] : undefined
-  const compliance = selected && draft
-    ? complianceFor(draft.body, selected.source_topic ?? selected.title, selected.platform, selected.title)
-    : null
 
   return (
     <>
@@ -144,31 +148,13 @@ export function LeadershipReview() {
           {selected ? (
             <div className="grid gap-4 xl:grid-cols-[1fr_300px]">
               <div className="card p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge tone="serious">Awaiting final approval</Badge>
-                  <Badge tone="neutral">{String(selected.analysis?.format ?? 'Post')}</Badge>
-                  <Badge tone="accent">{selected.confidence}% AI confidence</Badge>
-                  {compliance ? (
-                    <Badge tone={compliance.verdict === 'APPROVED' ? 'good' : 'warn'}>
-                      Brand voice: {compliance.verdict}
-                    </Badge>
-                  ) : null}
-                </div>
-
-                {compliance && compliance.violations.length > 0 ? (
-                  <ul className="mt-2 space-y-1">
-                    {compliance.violations.map((violation) => (
-                      <li key={violation.rule} className="text-[11px] leading-relaxed text-serious">
-                        Rule {violation.rule} · {violation.title} — {violation.detail}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-
-                <h2 className="display mt-3 text-xl">{selected.title}</h2>
-                <p className="mt-1 text-[12.5px] leading-relaxed text-ink-3">{selected.description}</p>
-
-                <h3 className="display mt-4 text-[12px]">
+                {/* The decision reads from the post itself, exactly as it will
+                    appear — the creative is inside that preview, not repeated
+                    below it. The status and scoring badges, the brand-voice
+                    findings, and the card title and scraped description above
+                    the preview were removed from this view by request. The
+                    compliance rules still gate publishing server-side. */}
+                <h3 className="display text-[12px]">
                   How it will appear on {PLATFORM_LABEL[selected.platform]}
                 </h3>
                 <div className="mt-2 max-w-lg">
@@ -179,20 +165,6 @@ export function LeadershipReview() {
                   />
                 </div>
 
-                {asset ? (
-                  <div className="mt-4">
-                    <h3 className="display text-[12px]">The generated image</h3>
-                    <p className="mt-0.5 text-[11px] text-ink-3">
-                      {asset.canvas} · {asset.model}
-                      {asset.fallbackReason ? ` · ${asset.fallbackReason}` : ''}
-                    </p>
-                    <img
-                      src={asset.dataUri}
-                      alt={asset.altText ?? ''}
-                      className="mt-2 w-full max-w-lg rounded-lg border border-line"
-                    />
-                  </div>
-                ) : null}
               </div>
 
               {/* ── Context rail ──────────────────────────────────────── */}
@@ -268,6 +240,11 @@ export function LeadershipReview() {
                       <Btn variant="primary" className="w-full" onClick={() => void leadershipPublish(selected.id)}>
                         <Check size={13} /> Approve &amp; publish
                       </Btn>
+                      {/* Changes are made where the post is written: the Weekly
+                          Calendar's editor, opened on this post and its week. */}
+                      <Btn variant="ghost" className="w-full" onClick={() => editOnCalendar(selected.id)}>
+                        <Pencil size={13} /> Edit post
+                      </Btn>
                       <Btn variant="danger" className="w-full" onClick={() => setRejecting(true)}>
                         <X size={13} /> Reject with a reason
                       </Btn>
@@ -310,7 +287,23 @@ export function LeadershipReview() {
                     <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">“{decision.reason}”</p>
                   ) : null}
                   <div className="mt-2 flex items-center gap-2">
-                    <PlatformChip platform={idea.platform} />
+                    {/* The platform chip opens the post where it was published,
+                        once the platform has returned its address. */}
+                    {linkFor(postFor(idea.id)).url ? (
+                      <a
+                        href={linkFor(postFor(idea.id)).url ?? undefined}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        title={`Open this post on ${PLATFORM_LABEL[idea.platform]}`}
+                        aria-label={`Open “${idea.title}” on ${PLATFORM_LABEL[idea.platform]}`}
+                        className="group/chip inline-flex items-center gap-1 rounded-full transition-opacity hover:opacity-80"
+                      >
+                        <PlatformChip platform={idea.platform} />
+                        <ExternalLink size={11} className="text-ink-3 transition-colors group-hover/chip:text-accent-bright" aria-hidden="true" />
+                      </a>
+                    ) : (
+                      <PlatformChip platform={idea.platform} />
+                    )}
                     <span className="text-[10.5px] text-ink-3">{decision.by}</span>
                   </div>
                 </article>

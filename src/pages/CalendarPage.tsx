@@ -11,9 +11,9 @@
  * The assistant lives in a popover under Ask Ethara, scoped to this week.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, X } from 'lucide-react'
-import { useStore } from '../store'
+import { prefersReducedMotion, useStore } from '../store'
 import { CalendarAssistant } from '../components/assistant/calendar-assistant'
 import { PlatformIcon, PLATFORM_LABEL, PLATFORM_TOKEN } from '../components/ui'
 import { BackToHub } from '../components/layout'
@@ -224,6 +224,92 @@ function useWeekSwipe(onChange: (direction: 1 | -1) => void): {
   }
 }
 
+/**
+ * THE WEEK SHOWS A CHANGE HAPPENING, NOT JUST ITS RESULT.
+ *
+ * When state is refetched — the assistant moved a post, a run wrote one, another
+ * operator dragged one — a card that changed day or time used to vanish from
+ * one column and appear in another between two frames, which reads as a
+ * reload rather than a move. This is FLIP: each card's position is remembered
+ * after every commit; when a card's slot changes, it is drawn back at its old
+ * position and animated to its new one, lifting slightly on the way, and lands
+ * with a brief glow. A card that newly arrives on the grid rises into place.
+ *
+ * Positions are kept relative to the grid (plus its scroll), so a page scroll
+ * between two commits does not read as movement. Changing week resets the
+ * memory — a new week's cards are not "arriving". The card being dropped by
+ * hand has its own landing and is skipped. Nothing runs under reduced motion.
+ */
+function useCardFlip(
+  grid: React.RefObject<HTMLDivElement | null>,
+  ideas: Idea[],
+  weekKey: string,
+  skipId: string | null,
+): void {
+  const memory = useRef<{ week: string; cards: Map<string, { x: number; y: number; slot: string }> }>({
+    week: '',
+    cards: new Map(),
+  })
+
+  useLayoutEffect(() => {
+    const container = grid.current
+    if (!container) return
+    const origin = container.getBoundingClientRect()
+    const slotOf = new Map(ideas.map((i) => [i.id, `${i.scheduled_date}|${i.scheduled_time}`]))
+    const before = memory.current
+    const fresh = before.week !== weekKey || before.cards.size === 0
+    const motion = !prefersReducedMotion()
+    const next = new Map<string, { x: number; y: number; slot: string }>()
+
+    container.querySelectorAll<HTMLElement>('[data-flip]').forEach((element) => {
+      const id = element.dataset.flip ?? ''
+      const rect = element.getBoundingClientRect()
+      const x = rect.left - origin.left + container.scrollLeft
+      const y = rect.top - origin.top + container.scrollTop
+      const slot = slotOf.get(id) ?? ''
+      next.set(id, { x, y, slot })
+      if (fresh || !motion || id === skipId) return
+
+      const was = before.cards.get(id)
+      if (was === undefined) {
+        element.animate(
+          [
+            { opacity: 0, transform: 'translateY(10px) scale(0.94)' },
+            { opacity: 1, transform: 'none' },
+          ],
+          { duration: 460, easing: EASE },
+        )
+        return
+      }
+      if (was.slot === slot) return
+      const dx = was.x - x
+      const dy = was.y - y
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return
+
+      element.animate(
+        [
+          { transform: `translate(${dx}px, ${dy}px)`, zIndex: 30 },
+          { transform: `translate(${dx * 0.45}px, ${dy * 0.45 - 16}px) scale(1.04)`, zIndex: 30, offset: 0.45 },
+          { transform: 'none', zIndex: 30 },
+        ],
+        { duration: 760, easing: EASE },
+      )
+      element.animate(
+        [
+          { boxShadow: '0 0 0 0 transparent' },
+          { boxShadow: '0 0 0 2px var(--color-accent), 0 18px 44px -14px var(--color-glow)', offset: 0.62 },
+          { boxShadow: '0 0 0 0 transparent' },
+        ],
+        { duration: 1500, easing: 'ease-out' },
+      )
+    })
+
+    // Re-measured on every commit, so the remembered positions stay true after
+    // a resize or a week swipe; a card only animates when its slot changed.
+    memory.current = { week: weekKey, cards: next }
+  }, [grid, ideas, weekKey, skipId])
+}
+
 export function CalendarPage() {
   const ideas = useStore((s) => s.ideas)
   const cap = useStore((s) => s.settings.topPerPlatform)
@@ -236,6 +322,13 @@ export function CalendarPage() {
    */
   const [weekOffset, setWeekOffset] = useState(() => {
     const today = startOfWeek(new Date()).getTime()
+    // Arriving to edit one post (Leadership's "Edit post"): open on its week,
+    // so the card being edited is on the grid behind its editor.
+    const focus = ideas.find((idea) => idea.id === useStore.getState().calendarSpotlight)
+    if (focus && typeof focus.scheduled_date === 'string') {
+      const week = startOfWeek(new Date(`${String(focus.scheduled_date).slice(0, 10)}T12:00:00`)).getTime()
+      return Math.round((week - today) / (7 * DAY_MS))
+    }
     const upcoming = ideas
       .filter((idea) => idea.calendar_slot === 'primary' && typeof idea.scheduled_date === 'string')
       .map((idea) => startOfWeek(new Date(`${String(idea.scheduled_date).slice(0, 10)}T12:00:00`)).getTime())
@@ -478,6 +571,42 @@ export function CalendarPage() {
   const primary = live.filter((i) => i.calendar_slot === 'primary')
   const queued = live.filter((i) => i.calendar_slot !== 'primary')
   const weekPrimary = primary.filter((i) => weekIsos.has(i.scheduled_date))
+  useCardFlip(gridRef, weekPrimary, isoDate(days[0] as Date), justMoved)
+
+  /*
+   * ARRIVING TO EDIT ONE POST (Leadership's "Edit post").
+   *
+   * The week already opened on the post's week (see `weekOffset`). Here its
+   * card is scrolled into view and pulses, so the redirect reads as one — then
+   * its editor opens over it. Closing the editor leaves the operator on the
+   * calendar, beside the card they came for.
+   */
+  const spotlight = useStore((s) => s.calendarSpotlight)
+  const clearSpotlight = useStore((s) => s.clearCalendarSpotlight)
+  useEffect(() => {
+    if (spotlight === null) return
+    const card = gridRef.current?.querySelector<HTMLElement>(`[data-flip="${CSS.escape(spotlight)}"]`)
+    const motion = !prefersReducedMotion()
+    if (card) {
+      card.scrollIntoView({ behavior: motion ? 'smooth' : 'auto', block: 'center', inline: 'center' })
+      if (motion) {
+        card.animate(
+          [
+            { boxShadow: '0 0 0 0 transparent', transform: 'none' },
+            { boxShadow: '0 0 0 3px var(--color-accent), 0 20px 48px -12px var(--color-glow)', transform: 'scale(1.03)', offset: 0.4 },
+            { boxShadow: '0 0 0 0 transparent', transform: 'none' },
+          ],
+          { duration: 1100, easing: EASE },
+        )
+      }
+    }
+    const id = spotlight
+    const timer = window.setTimeout(() => {
+      clearSpotlight()
+      openReview(id)
+    }, card && motion ? 1100 : 0)
+    return () => window.clearTimeout(timer)
+  }, [spotlight, clearSpotlight, openReview])
 
   const capacity = PLATFORMS.map((platform) => {
     const placed = weekPrimary.filter((i) => i.platform === platform).length
@@ -1027,8 +1156,20 @@ function SlotCard({
    * publish, so it carries its own chip and a dashed edge instead of a status.
    */
   const unwritten = idea.status === 'suggested' && !idea.draft?.body
-  const ink = unwritten ? 'var(--color-warn)' : (STATUS_INK[idea.status] ?? 'var(--color-ink-3)')
-  const chip = unwritten ? 'NO CAPTION YET' : (STATUS_CHIP[idea.status] ?? idea.status.toUpperCase())
+  // This week's unwritten posts are written by the pipeline; later weeks are
+  // placed on purpose and wait their turn, so they say "queued", not "missing" —
+  // in a neutral ink rather than the warning amber.
+  const queued = unwritten && idea.scheduled_date >= isoDate(addDays(startOfWeek(new Date()), 7))
+  const ink = queued
+    ? 'var(--color-ink-3)'
+    : unwritten
+      ? 'var(--color-warn)'
+      : (STATUS_INK[idea.status] ?? 'var(--color-ink-3)')
+  const chip = queued
+    ? 'CAPTION QUEUED'
+    : unwritten
+      ? 'NO CAPTION YET'
+      : (STATUS_CHIP[idea.status] ?? idea.status.toUpperCase())
   const colour = PLATFORM_TOKEN[idea.platform]
   const topic = topicOf(idea)
   const hook = hookOf(idea)
@@ -1042,6 +1183,7 @@ function SlotCard({
   return (
     <article
       ref={node}
+      data-flip={idea.id}
       role="button"
       tabIndex={0}
       aria-label={`Open “${idea.title}” for editing. Drag to another day to reschedule it.`}
@@ -1055,7 +1197,7 @@ function SlotCard({
       className={`group relative flex cursor-grab select-none flex-col overflow-hidden rounded-[11px] border bg-surface-2/60 px-2.5 py-2.5 transition-[border-color,translate,box-shadow,opacity] duration-[var(--dur-base)] active:cursor-grabbing ${
         dragging
           ? 'border-dashed border-accent/50 opacity-35'
-          : `${unwritten ? 'border-dashed border-warn/45' : 'border-line'} hover:!translate-y-[-2px] hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]`
+          : `${queued ? 'border-dashed border-line-strong' : unwritten ? 'border-dashed border-warn/45' : 'border-line'} hover:!translate-y-[-2px] hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]`
       } ${landed ? 'anim-pop-in' : ''}`}
       style={{ touchAction: 'manipulation' }}
     >
@@ -1457,7 +1599,7 @@ function QueueRow({
             </>
           )}
           {idea.status === 'suggested' ? (
-            <div className="mt-1 text-[11px] text-ink-3">no caption yet · SpongeBob drafts it once it holds a slot</div>
+            <div className="mt-1 text-[11px] text-ink-3">no caption yet · written with the pipeline if it lands this week; a later week waits in the caption queue</div>
           ) : null}
         </div>
       ) : null}

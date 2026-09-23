@@ -160,10 +160,26 @@ export function Dashboard() {
     [published],
   )
 
-  /** The strongest drafts, for the card that stands in until something is published. */
-  const topDrafts = useMemo(
-    () => [...ideas].filter((i) => i.status !== 'suggested' && i.status !== 'rejected').sort((a, b) => b.confidence - a.confidence).slice(0, 4),
+  /*
+   * THE SUGGESTIONS CARD SHOWS SUGGESTIONS.
+   *
+   * It listed the strongest drafts — posts already on the calendar — under a
+   * "Suggestions" heading, so the calendar's own posts appeared twice and the
+   * card never showed what More suggestions actually held. It now reads the
+   * same list More suggestions does: ideas ranked below the calendar cut,
+   * strongest rank first. With none waiting it says so.
+   */
+  const suggestions = useMemo(
+    () =>
+      ideas.filter((i) => i.calendar_slot !== 'primary' && i.status !== 'rejected'),
     [ideas],
+  )
+  const topSuggestions = useMemo(
+    () =>
+      [...suggestions]
+        .sort((a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence)
+        .slice(0, 4),
+    [suggestions],
   )
   /*
    * WHAT THE WEEK HOLDS — AND NEVER AN EMPTY LIST BESIDE A COUNT.
@@ -192,14 +208,6 @@ export function Dashboard() {
 
   /** When nothing has been learned yet, the entries the agents lean on most. */
 
-  /** Everything written but not yet out — what the Create station holds. */
-  const drafts = useMemo(
-    () =>
-      [...ideas]
-        .filter((i) => i.status === 'drafted' || i.status === 'in_review' || i.status === 'pending_leadership')
-        .sort((a, b) => `${a.scheduled_date} ${a.scheduled_time}`.localeCompare(`${b.scheduled_date} ${b.scheduled_time}`)),
-    [ideas],
-  )
 
   /* ── Waiting on people ── */
   const awaitingLeadership = useMemo(() => ideas.filter((i) => i.status === 'pending_leadership'), [ideas])
@@ -270,20 +278,21 @@ export function Dashboard() {
             onOpenTheater={() => { setStatusOpen(false); if (user?.role === 'leadership') setPage('orchestration'); else openTheater() }}
             leadership={user?.role === 'leadership'}
           />
-          {user?.role === 'marketing' ? (
-            <Btn
-              variant="primary"
-              disabled={scrapeRun.running}
-              onClick={() => {
-                openTheater()
-                void runScraping()
-              }}
-              className="!py-[6px] !text-[12px] font-semibold"
-            >
-              {scrapeRun.running ? <WorkArc /> : <Play size={12} aria-hidden="true" />}
-              {scrapeRun.running ? 'Running' : 'Run pipeline'}
-            </Btn>
-          ) : null}
+          {/* Both roles run the pipeline, the same way: the run opens in the
+              theater and streams there. The server only asks for a signed-in
+              operator — it never limited this to Marketing; the button did. */}
+          <Btn
+            variant="primary"
+            disabled={scrapeRun.running}
+            onClick={() => {
+              openTheater()
+              void runScraping()
+            }}
+            className="!py-[6px] !text-[12px] font-semibold"
+          >
+            {scrapeRun.running ? <WorkArc /> : <Play size={12} aria-hidden="true" />}
+            {scrapeRun.running ? 'Running' : 'Run pipeline'}
+          </Btn>
         </div>
       </div>
 
@@ -393,19 +402,19 @@ export function Dashboard() {
                   )}
                 </Panel>
               ) : (
-                <Panel title="Suggestions" hint={`${drafts.length} draft${drafts.length === 1 ? '' : 's'}`} onOpen={() => setPage('calendar')} delay={200} grow>
-                {topDrafts.length === 0 ? (
-                  <NotMeasured>Nothing is written yet.</NotMeasured>
+                <Panel title="Suggestions" hint={`${suggestions.length} waiting`} onOpen={() => setPage('calendar')} delay={200} grow>
+                {topSuggestions.length === 0 ? (
+                  <NotMeasured>No suggestions.</NotMeasured>
                 ) : (
                   <ul className="flex flex-col gap-[7px]">
-                    {topDrafts.map((idea) => (
+                    {topSuggestions.map((idea) => (
                       <li key={idea.id}>
                         <Row>
                           <Thumb src={idea.media?.dataUri ?? null} platform={idea.platform} className="h-[30px] w-10 shrink-0" />
                           <span className="min-w-0">
                             <span className="block truncate text-[11.5px] font-medium text-ink">{idea.title}</span>
                             <span className="mono mt-0.5 block truncate text-[8px] uppercase tracking-[0.1em] text-ink-3">
-                              {IDEA_STATUS_LABEL[idea.status] ?? idea.status} · conf {idea.confidence}
+                              {PLATFORM_LABEL[idea.platform]}{idea.platform_rank ? ` · #${idea.platform_rank}` : ''} · conf {idea.confidence}
                             </span>
                           </span>
                         </Row>

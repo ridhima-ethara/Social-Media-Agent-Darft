@@ -16,6 +16,9 @@ import {
 import { insertKnowledgeEntry, listKnowledge, listPosts } from '../../db/repo'
 import { clampChars, clampWords, PLATFORM_LABEL, similarity } from '../corpus'
 import { registerSkill } from '../runtime'
+import { etharaDomainFor, etharaLineProblem, etharaTemplate } from '../ethara-line'
+import { withCaptionSpec } from '../skills/skill-spec'
+import { diffSentences } from '../../../../shared/text-diff'
 import { retrieveKnowledge } from '../knowledge/handlers'
 import type { ReviewPayload } from '../skills/index'
 
@@ -88,6 +91,20 @@ function describeReferences(
    REVIEW 1 · review.instruction.apply
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/** What a revision changed, counted by sentence: "3 sentences reworded, 1 added". */
+function changeSummary(before: string, after: string): string {
+  const rows = diffSentences(before, after)
+  const n = (kind: 'changed' | 'added' | 'removed'): number => rows.filter((r) => r.kind === kind).length
+  const total = n('changed') + n('added') + n('removed')
+  if (total === 0) return 'Revised'
+  const parts = [
+    n('changed') > 0 ? `${n('changed')} reworded` : '',
+    n('added') > 0 ? `${n('added')} added` : '',
+    n('removed') > 0 ? `${n('removed')} removed` : '',
+  ].filter(Boolean)
+  return `${total === 1 ? 'One sentence' : 'Sentences'}: ${parts.join(', ')}`
+}
+
 registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) => {
   const humanOverridesBrand = ctx.bool('humanOverridesBrand', true)
   const maxInstructionChars = ctx.num('maxInstructionChars', 600)
@@ -127,13 +144,49 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
     return { revisedBody: payload.body, appliedNote: 'No instruction given', conflictNotes: [] }
   }
 
+  /*
+   * "MENTION ETHARA" IS ANSWERED FROM THE KNOWLEDGE BASE.
+   *
+   * Asked to mention Ethara, the model wrote what sounded right — "At Ethara,
+   * we design evaluations to quantify this trade-off" — which no entry states.
+   * So the Brand Corpus entry for the post's domain is handed to the model as
+   * the only thing it may say about Ethara, and every Ethara sentence the
+   * revision ADDS is checked against it afterwards (see below).
+   */
+  // Loaded for EVERY rewrite, not only one that names Ethara: the caption skill
+  // says each post carries an Ethara line, so a rewrite may add one unasked,
+  // and an unasked line is exactly as capable of inventing a capability.
+  const asksForEthara = /ethara/i.test(instruction)
+  const etharaEntry = etharaDomainFor(
+    await listKnowledge(ctx.workspaceId, { activeOnly: true, category: 'Brand Corpus', limit: 40 }),
+    `${payload.sourceTopic} ${payload.title} ${payload.body}`,
+  )
+
   const outcome = await withFallback(
     // Whichever text provider the operator chose, or whichever is bound when
     // they expressed no preference. The rewrite does not care which.
     textAdapterFor(payload.captionModel),
     {
-      systemInstruction: [
+      /*
+       * THE REWRITE KNOWS WHAT THE CAPTION IS SUPPOSED TO BE.
+       *
+       * This prompt used to carry the brand voice words and nothing of the
+       * caption skill, so "make it more technical" or "add a CTA" was read with
+       * the model's generic sense of those words rather than the skill's: a
+       * sales CTA the skill forbids, or "technical" as denser prose instead of
+       * the skill's Technical mode. The skill text now leads the prompt, and the
+       * common requests are mapped to what they mean in it.
+       */
+      systemInstruction: withCaptionSpec([
         `You are revising a ${PLATFORM_LABEL[payload.platform]} post for ${BRAND.name}.`,
+        'First work out what the operator actually wants changed, then change exactly that and nothing else. Read the request the way an editor on this team would:',
+        '\u00b7 "more technical" / "technical": the skill\u2019s Technical mode. Name the mechanism with precise terminology, conditions and limitations, keeping the same claim and the same short-line layout.',
+        '\u00b7 "simpler" / "less technical" / "for executives": Normal mode. Plain language, a concrete example, every qualification kept.',
+        '\u00b7 "shorter" / "shorten": cut repetition and the weakest lines, keep the claim, the evidence and the close.',
+        '\u00b7 "expand" / "more detail": add mechanism, an example or an implication that is supported; never pad or repeat.',
+        '\u00b7 "add a CTA" / "call to action": a closing question a practitioner can answer from their own work; never a sales ask, "comment below" or "follow".',
+        '\u00b7 "better hook" / "stronger hook": rewrite only the first line, with tension from a real limitation or trade-off in THIS post.',
+        'Never invent a number, a source, a customer, a result or an Ethara capability. No em dashes, no Markdown, no labels.',
         `Voice: ${BRAND.voiceWords.join(', ')}. Emoji budget ${BRAND.emojiBudget}.`,
         // Carried here too, so a post moved between platforms is rewritten to
         // the new channel rather than relabelled.
@@ -159,8 +212,17 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
         '· Keep the first line as the hook and the last prose line as the close. If the close is a question, it stays a question.',
         '· Keep every trailing footer line exactly as given: the hashtag line, and on Instagram the bracketed keyword line below it. Do not reword, reorder, renumber or drop them.',
         '· Keep any "Source:" attribution line, positioned above the footer.',
+        ...(etharaEntry
+          ? [
+              'Anything the post says about Ethara goes in one line opening exactly "At Ethara AI," placed just before the close.',
+              asksForEthara ? 'The operator has asked for that line.' : 'Keep the post\u2019s existing Ethara line if it has one; do not add one unless the instruction asks.',
+              'That line states ONLY what this Knowledge Base entry states \u2014 the lab\u2019s focus and view. No product,',
+              'customer, partner, deployment, result or figure; never "we are building / helping / enabling":',
+              etharaEntry.content,
+            ]
+          : []),
         'Return only the revised post, with its line breaks intact.',
-      ].join('\n'),
+      ].join('\n')),
       prompt: `Instruction: ${instruction}${describeReferences(payload.references, seesImages, modelLabel)}\n\nCurrent post:\n${payload.body}`,
       temperature: 0.4,
       maxOutputTokens: 2048,
@@ -240,6 +302,44 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
   // anything else it returns the body untouched. That is a legitimate outcome,
   // but reporting it as "Applied" is not — the operator reads the note, sees
   // their words quoted back, and believes the edit happened.
+  /*
+   * EVERY ETHARA SENTENCE THE REVISION ADDED, CHECKED.
+   *
+   * A line mentioning Ethara that was not in the post before must pass the same
+   * test as the caption's own Ethara line; one that does not is replaced by the
+   * entry's own words. Asked to mention Ethara and given no such line, the post
+   * gets the entry's line just before its close.
+   */
+  if (etharaEntry) {
+    const before = new Set(payload.body.split('\n').map((line) => line.trim()))
+    const lines = revisedBody.split('\n')
+    let replaced = 0
+    let hasEthara = false
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = (lines[i] ?? '').trim()
+      if (!/ethara/i.test(line) || line.startsWith('#') || line.startsWith('[')) continue
+      hasEthara = true
+      if (before.has(line)) continue
+      if (etharaLineProblem(line, etharaEntry, 3) !== null) {
+        lines[i] = etharaTemplate(etharaEntry, 2)
+        replaced += 1
+      }
+    }
+    revisedBody = lines.join('\n')
+    if (replaced > 0) {
+      structureNotes.push(`${replaced} Ethara sentence(s) stated more than the Knowledge Base supports, so they were replaced with its own words.`)
+    }
+    if (!hasEthara && asksForEthara) {
+      const blocks = revisedBody.split(/\n{2,}/)
+      let at = blocks.length
+      while (at > 0 && /^(#|\[)/.test((blocks[at - 1] ?? '').trim())) at -= 1
+      // Before the close: the last prose block before the footer.
+      blocks.splice(Math.max(0, at - 1), 0, etharaTemplate(etharaEntry, 2))
+      revisedBody = blocks.join('\n\n')
+      structureNotes.push('Added the Ethara line from the Knowledge Base, just before the close.')
+    }
+  }
+
   const unchanged = revisedBody === payload.body.trim()
 
   // The human instruction has been applied. Now the finding is raised alongside
@@ -289,7 +389,8 @@ registerSkill<ReviewPayload>('review.instruction.apply', async (payload, ctx) =>
             : ` The model was not reachable, so this is the built-in writer’s nearest match rather than your instruction. Reason: ${fallbackReason}`
         }`
       : outcome.source === 'live'
-        ? `Applied “${clampWords(instruction, 12)}” with ${textModelId(true)}`
+        ? // What actually changed, counted from the text, not a restatement of the ask.
+          `${changeSummary(payload.body, revisedBody)} for “${clampWords(instruction, 12)}”, with ${textModelId(true)}`
         : `Applied “${clampWords(instruction, 12)}” with the built-in writer`
 
   ctx.log(

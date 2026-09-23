@@ -65,6 +65,8 @@ export default function App() {
   const connectToRuntime = useStore((s) => s.connectToRuntime)
   const wakePhrase = useStore((s) => s.settings.assistantWakePhrase)
   const openBar = useStore((s) => s.openBar)
+  const restoringSession = useStore((s) => s.restoringSession)
+  const restoreSession = useStore((s) => s.restoreSession)
 
   // Theme is one attribute on <html>, applied on mount and on every change.
   useEffect(() => {
@@ -77,6 +79,12 @@ export default function App() {
     void connectToRuntime()
   }, [connectToRuntime])
 
+  // A refresh keeps the operator signed in: the session cookie is still valid,
+  // so ask the server who it belongs to before deciding to show sign-in.
+  useEffect(() => {
+    void restoreSession()
+  }, [restoreSession])
+
   // The wake phrase is off by default and only ever runs when explicitly enabled.
   useEffect(() => {
     if (!user || !wakePhrase) return
@@ -84,6 +92,10 @@ export default function App() {
     handle = startWakeListener(() => openBar())
     return () => handle?.stop()
   }, [user, wakePhrase, openBar])
+
+  // Asking the server takes a moment; showing sign-in in that moment would
+  // flash it on every refresh. The page background alone holds the frame.
+  if (!user && restoringSession) return <div className="min-h-dvh bg-page" aria-busy="true" />
 
   if (!user) {
     return (

@@ -555,7 +555,8 @@ export function Modal({
   open: boolean
   onClose: () => void
   title: string
-  subtitle?: string
+  /** Text, or text with a link in it — the published-post detail links its platform. */
+  subtitle?: ReactNode
   children: ReactNode
   footer?: ReactNode
   wide?: boolean

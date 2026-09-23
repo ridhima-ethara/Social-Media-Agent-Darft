@@ -85,8 +85,8 @@ export function ContentIntelligence() {
   const scrapeRun = useStore((s) => s.scrapeRun)
   const validating = useStore((s) => s.validating)
   const runScraping = useStore((s) => s.runScraping)
-  const runValidation = useStore((s) => s.runValidation)
   const openTheater = useStore((s) => s.openTheater)
+  const isLeadership = useStore((s) => s.user?.role === 'leadership')
 
   const [tab, setTab] = useState<TabId>('keywords')
 
@@ -103,11 +103,10 @@ export function ContentIntelligence() {
         title="Content Intelligence"
         subtitle="What the discovery pipeline found, why each candidate was scored the way it was, and what is still waiting on you."
         agents={['scraping', 'validation', 'analysis']}
+        /* Marketing runs discovery from here. Leadership reads this page
+           and runs the pipeline from the Dashboard instead. */
         actions={
-          <>
-            <Btn variant="ghost" onClick={() => void runValidation()} disabled={validating}>
-              {validating ? 'Validating…' : `Validate (${needsReview})`}
-            </Btn>
+          isLeadership ? undefined : (
             <PlayButton
               label="Run SocialAI"
               hint={`${keywords.filter((k) => k.active).length} keywords active`}
@@ -117,7 +116,7 @@ export function ContentIntelligence() {
                 void runScraping()
               }}
             />
-          </>
+          )
         }
       />
 

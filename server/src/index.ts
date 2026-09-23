@@ -14,9 +14,10 @@ import { REGISTRY_SUMMARY } from '../../shared/agent-registry'
 import { TOOL_SUMMARY } from '../../shared/tool-registry'
 import { config, describeConfiguration } from './config'
 import { assertDb, closePool } from './db/pool'
-import { sweepOrphanedRuns } from './db/repo'
+import { currentWorkspaceId, sweepOrphanedRuns } from './db/repo'
 import { describeDrift, findSchemaDrift } from './db/schema-drift'
 import { createApiRouter } from './api'
+import { writeCalendarBacklog } from './orchestrator'
 import { auditSkillCoverage } from './agents/skills/_register'
 import { auditToolCoverage } from './assistant/tools/index'
 import { describeWhisper, whisperTranscribe } from './integrations/whisper'
@@ -164,6 +165,32 @@ async function main(): Promise<void> {
     )
     console.log(`  ${DIM}health${RESET} http://localhost:${config.core.port}/api/health`)
     console.log(`  ${DIM}events${RESET} http://localhost:${config.core.port}/api/events\n`)
+
+    /*
+     * FINISH WHAT A PREVIOUS PROCESS LEFT UNWRITTEN.
+     *
+     * A run cut off during its write stage leaves this week's posts with no
+     * caption ("No caption yet") or a caption with no creative, until the next
+     * full run. They are finished now, in the background, under the same knobs
+     * the pipeline uses — only the weeks it writes, only what is missing, and
+     * nothing at all when auto-writing is off. Never blocks serving; a failure
+     * is reported per post.
+     */
+    void (async () => {
+      try {
+        const workspaceId = await currentWorkspaceId()
+        const { written, writeFailed } = await writeCalendarBacklog({ workspaceId, trigger: 'api' })
+        if (written > 0 || writeFailed > 0) {
+          console.log(
+            `  ${GREEN}✓${RESET} backlog  ${written} unwritten calendar post(s) written` +
+              (writeFailed > 0 ? ` · ${writeFailed} could not be written` : ''),
+          )
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(`  ${RED}✗${RESET} backlog  could not write the calendar backlog — ${message}`)
+      }
+    })()
   })
 
   const shutdown = (signal: string) => {

@@ -39,6 +39,7 @@ import {
 } from '../../db/repo'
 import { clamp, clampChars, clampWords, contentWords, mean, PLATFORM_LABEL, seededFor, similarity } from '../corpus'
 import { withCaptionSpec } from '../skills/skill-spec'
+import { etharaDomainFor, etharaLineProblem, etharaTemplate } from '../ethara-line'
 import { registerSkill } from '../runtime'
 import { retrieveKnowledge, toGroundingEntry } from '../knowledge/handlers'
 import type { CaptionPayload, GroundingEntry } from '../skills/index'
@@ -306,6 +307,155 @@ const HUMAN_VOICE = [
 
 const CLICKBAIT = /\b(you won'?t believe|this changes everything|secret|hack|shocking|nobody talks about|the truth about)\b/i
 
+/* ── The whole post, in one pass ────────────────────────────────────────── */
+
+interface WholePost {
+  claim: string
+  hook: string
+  problem: string
+  explanation: string
+  close: string
+}
+
+function parseWholePost(raw: string): WholePost | null {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+  const body = fenced ? (fenced[1] as string) : raw
+  const start = body.indexOf('{')
+  const end = body.lastIndexOf('}')
+  if (start === -1 || end <= start) return null
+  try {
+    const parsed = JSON.parse(body.slice(start, end + 1)) as Record<string, unknown>
+    const field = (key: string): string => (typeof parsed[key] === 'string' ? (parsed[key] as string).trim() : '')
+    const post = { claim: field('claim'), hook: field('hook'), problem: field('problem'), explanation: field('explanation'), close: field('close') }
+    return post.hook && post.explanation && post.close ? post : null
+  } catch {
+    return null
+  }
+}
+
+const wordCount = (text: string): number => text.split(/\s+/).filter((w) => w.length > 0).length
+
+/** What a whole-post draft gets wrong against its own brief, in words the retry can act on. */
+function wholePostProblems(post: WholePost, opts: { minWords: number; maxWords: number; hookWords: number; evidence: string }): string[] {
+  const problems: string[] = []
+  const words = wordCount([post.hook, post.problem, post.explanation, post.close].join(' '))
+  if (words > opts.maxWords) problems.push(`it ran to ${words} words; the target is ${opts.minWords}\u2013${opts.maxWords}`)
+  if (words < opts.minWords * 0.7) problems.push(`it ran to only ${words} words; the target is ${opts.minWords}\u2013${opts.maxWords}`)
+  if (wordCount(post.hook) > opts.hookWords) problems.push(`the hook ran to ${wordCount(post.hook)} words; at most ${opts.hookWords}`)
+  if (!post.close.trimEnd().endsWith('?')) problems.push('the close is not a single question')
+  if (/\b(thoughts|agree|comment below|tag someone|like and share)\?*\s*$/i.test(post.close)) problems.push('the close is engagement bait')
+  const allowed = new Set(opts.evidence.match(/\d+(?:\.\d+)?/g) ?? [])
+  const invented = [post.hook, post.problem, post.explanation, post.close]
+    .join(' ')
+    .match(/\d+(?:\.\d+)?/g)
+    ?.filter((n) => !allowed.has(n))
+  if (invented && invented.length > 0) problems.push(`it states a figure the evidence does not (${invented[0]})`)
+  if (/ethara/i.test([post.hook, post.problem, post.explanation, post.close].join(' ')))
+    problems.push('it mentions Ethara, which is added separately from the Knowledge Base')
+  return problems
+}
+
+/**
+ * THE WHOLE POST, CLAIM FIRST.
+ *
+ * The caption used to be four separate model calls — hook, then problem, then
+ * explanation, then close — each seeing only fragments of the others. The body
+ * restated the hook, the mechanism restated the problem, and "This means… /
+ * The implication is that…" filled the gaps. The skill asks for the opposite:
+ * one primary insight, identified BEFORE the hook, then the narrative in order
+ * with every line earning its place.
+ *
+ * So the post is written in one pass that returns its parts as JSON, and is
+ * checked against its own brief — length, hook length, a question close, no
+ * figure the evidence lacks, no Ethara mention (that line comes from the
+ * Knowledge Base) — with one retry naming what was wrong. It returns null when
+ * no model answers or the answer cannot be parsed; the section-by-section steps
+ * then run as before, so nothing is worse than it was.
+ */
+export async function writeWholePost(
+  payload: CaptionPayload,
+  ctx: Parameters<Parameters<typeof registerSkill<CaptionPayload>>[1]>[1],
+  opts: { hookWords: number; styleBrief: string; temperature: number; minWords: number; maxWords: number },
+): Promise<{ post: WholePost; model: string } | null> {
+  const grounding = payload.grounding ?? []
+  const evidence = [
+    payload.title,
+    payload.description,
+    ...grounding.map((g) => `${g.title}: ${g.content}`),
+  ].join('\n')
+
+  const systemInstruction = withCaptionSpec(
+    [
+      payload.voiceInstruction ?? '',
+      HUMAN_VOICE,
+      platformVoiceInstruction(payload.platform),
+      grounding.length > 0
+        ? `Evidence you may use — and nothing else for facts or figures:\n${grounding.map((g) => `\u00b7 ${g.title}: ${g.content}`).join('\n').slice(0, 3200)}`
+        : 'You have no retrieved evidence beyond the idea itself. Make no numeric claims.',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+  )
+
+  const brief = [
+    `Write one complete ${PLATFORM_LABEL[payload.platform]} post about ${payload.sourceTopic}.`,
+    `The idea: ${payload.title}. ${payload.description}`,
+    `Angle: ${payload.angle}. Written for: ${payload.audience}.`,
+    '',
+    'Work in this order, and return the parts as JSON:',
+    '1. "claim": the ONE central insight the post argues, in one sentence, drawn from the evidence. Everything else serves it.',
+    `2. "hook": the first line, written AFTER the claim, at most ${opts.hookWords} words. ${opts.styleBrief} It must create tension from a real limitation, trade-off or overlooked consequence, and name or clearly signal THIS subject \u2014 a line that could open any AI post is a failure. Never "can" turned into "will", never an unsupported figure.`,
+    '3. "problem": a few short lines of context: what breaks, and for whom. Do not restate the hook. If the hook is a question, start answering it here.',
+    '4. "explanation": the mechanism, then a concrete example or the evidence, then the implication. Short connected lines, one complete thought per line, a blank line between thoughts. Every line must add something the earlier lines did not \u2014 never restate the hook, the problem or an earlier line. Label a hypothetical as an example.',
+    '5. "close": exactly one question a practitioner can answer from their own work, specific to this post\u2019s mechanism, returning to the issue the hook raised. Never "Thoughts?", "Agree?", or a request to like, comment, share or follow.',
+    '',
+    `Length: the hook, problem, explanation and close together run ${opts.minWords}\u2013${opts.maxWords} words. Shorter is right when the evidence is thin; never pad.`,
+    'Plain text inside each field: no hashtags, no emoji, no Markdown, no bold, no labels such as "Hook:", and no em dashes.',
+    'Do not mention Ethara \u2014 the Ethara line is added separately. State no number that is not in the evidence.',
+    'Return ONLY a JSON object with the string keys "claim", "hook", "problem", "explanation" and "close".',
+  ].join('\n')
+
+  const call = async (prompt: string) =>
+    withChainFallback(
+      textChain(),
+      { systemInstruction, prompt, temperature: opts.temperature, maxOutputTokens: 3000 },
+      () => '',
+      (reason) => {
+        ctx.emit('activity', `Whole-post pass unavailable \u2014 ${reason}; writing section by section`, { status: 'warn', reason })
+      },
+    )
+
+  const first = await call(brief)
+  if (first.source !== 'live') return null
+  let post = parseWholePost(first.value)
+  let model = textModelIdFor(first.servedBy)
+  if (!post) {
+    ctx.log('The whole-post pass returned no usable JSON; writing section by section')
+    return null
+  }
+
+  const checks = { minWords: opts.minWords, maxWords: opts.maxWords, hookWords: opts.hookWords, evidence }
+  const problems = wholePostProblems(post, checks)
+  if (problems.length > 0) {
+    ctx.log(`Whole-post draft sent back once: ${problems.join('; ')}`)
+    const retry = await call(
+      `${brief}\n\nYour previous draft is below. Fix exactly these problems and keep the same central claim: ${problems.join('; ')}.\n\n${JSON.stringify(post)}`,
+    )
+    const second = retry.source === 'live' ? parseWholePost(retry.value) : null
+    if (second && wholePostProblems(second, checks).length < problems.length) {
+      post = second
+      model = textModelIdFor(retry.servedBy)
+    }
+    const left = wholePostProblems(post, checks)
+    if (left.length > 0) ctx.emit('activity', `Caption kept with ${left.length} open issue(s): ${left.join('; ')}`, { status: 'warn' })
+  }
+
+  // The hook is one line and stays inside its budget whatever came back.
+  post.hook = clampWords(post.hook.split(/\n+/)[0]?.trim().replace(/^["'\u201c\u2018]|["'\u201d\u2019]$/g, '') ?? '', opts.hookWords)
+  ctx.log(`Whole post written in one pass by ${model} \u2014 claim: \u201c${post.claim.slice(0, 120)}\u201d`)
+  return { post, model }
+}
+
 registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) => {
   const maxWords = ctx.num('maxWords', 18)
   const style = ctx.str('style', 'Declarative')
@@ -365,6 +515,31 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
    * twice, and `hookReference` says it again in its closing instruction.
    */
   const reference = hookReference(topic, payload.ideaId ?? subject)
+
+  if (ctx.bool('wholePost', true)) {
+    const wordsFor = payload.platform === 'facebook'
+      ? { min: ctx.num('facebookMinWords', 100), max: ctx.num('facebookMaxWords', 180) }
+      : payload.platform === 'x'
+        ? { min: 0, max: ctx.num('linkedinMaxWords', 230) }
+        : { min: ctx.num('linkedinMinWords', 150), max: ctx.num('linkedinMaxWords', 230) }
+    const whole = await writeWholePost(payload, ctx, {
+      hookWords: maxWords,
+      styleBrief: `${styleBrief[style] ?? styleBrief.Declarative ?? ''}\n${reference}`,
+      temperature: temperatureFromPercent(temperature),
+      minWords: wordsFor.min,
+      maxWords: wordsFor.max,
+    })
+    if (whole) {
+      return {
+        hook: whole.post.hook,
+        problem: whole.post.problem,
+        explanation: whole.post.explanation,
+        close: whole.post.close,
+        wholePost: true,
+        centralClaim: whole.post.claim,
+      }
+    }
+  }
 
   const prompt = [
     `Write ONLY the first line of a ${PLATFORM_LABEL[payload.platform]} post about ${topic}.`,
@@ -451,6 +626,11 @@ registerSkill<CaptionPayload>('generation.caption.hook', async (payload, ctx) =>
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<CaptionPayload>('generation.caption.problem', async (payload, ctx) => {
+  // Written by the whole-post pass alongside the hook it follows from.
+  if (payload.wholePost && payload.problem) {
+    ctx.log('Problem kept from the whole-post pass')
+    return {}
+  }
   const maxSentences = ctx.num('maxSentences', 3)
   const quantify = ctx.bool('quantify', true)
   const temperature = ctx.num('temperature', 55)
@@ -597,6 +777,10 @@ function firstFigure(grounding: GroundingEntry[]): string | null {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 registerSkill<CaptionPayload>('generation.caption.explanation', async (payload, ctx) => {
+  if (payload.wholePost && payload.explanation) {
+    ctx.log('Explanation kept from the whole-post pass')
+    return {}
+  }
   const temperature = ctx.num('temperature', 60)
   const maxOutputTokens = ctx.num('maxOutputTokens', 2048)
   const layers = ctx.num('layers', 3)
@@ -688,10 +872,14 @@ function extractLayers(caption: string, layers: number): string {
    CAPTION 6 · generation.caption.close
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ── The Ethara connection ───────────────────────────────────────────────── */
+
 registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) => {
   const closeStyle = ctx.str('closeStyle', 'Open question')
   const bannedCta = ctx.bool('bannedCta', true)
   const temperature = ctx.num('temperature', 55)
+  const etharaConnection = ctx.bool('etharaConnection', true)
+  const etharaMaxSentences = Math.max(1, ctx.num('etharaMaxSentences', 2))
 
   /*
    * THE POST ENDS BY ASKING SOMETHING.
@@ -718,7 +906,11 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
     None: '',
   }
 
-  if (closeStyle === 'None') return { close: '' }
+  const ethara = etharaConnection
+    ? await writeEtharaLine(payload, ctx, etharaMaxSentences, temperatureFromPercent(temperature))
+    : {}
+
+  if (closeStyle === 'None') return { close: '', ...ethara }
 
   const wantsQuestion = closeStyle === 'Open question'
 
@@ -755,22 +947,27 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
     'No hashtags, no emoji, no heading, no quotation marks around it.',
   ].join('\n')
 
-  const outcome = await withChainFallback(
-    textChain(),
-    {
-      systemInstruction,
-      prompt,
-      temperature: temperatureFromPercent(temperature),
-      maxOutputTokens: 256,
-    },
-    () => templates[closeStyle] ?? templates.Implication ?? '',
-    (reason) => {
-      ctx.emit('activity', `Closing line written by the template writer \u2014 ${reason}`, {
-        status: 'warn',
-        reason,
-      })
-    },
-  )
+  // The whole-post pass already wrote the close with the body it answers; it is
+  // kept, and held to exactly the same checks below as a close written here.
+  const preset = payload.wholePost && payload.close ? payload.close : null
+  const outcome = preset !== null
+    ? { value: preset, source: 'live' as const, servedBy: 'whole-post', viaBackup: false }
+    : await withChainFallback(
+        textChain(),
+        {
+          systemInstruction,
+          prompt,
+          temperature: temperatureFromPercent(temperature),
+          maxOutputTokens: 256,
+        },
+        () => templates[closeStyle] ?? templates.Implication ?? '',
+        (reason) => {
+          ctx.emit('activity', `Closing line written by the template writer \u2014 ${reason}`, {
+            status: 'warn',
+            reason,
+          })
+        },
+      )
 
   let close = outcome.value
     .trim()
@@ -803,12 +1000,84 @@ registerSkill<CaptionPayload>('generation.caption.close', async (payload, ctx) =
   }
 
   ctx.log(
-    `${closeStyle} close by ${outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'the template writer'}` +
+    `${closeStyle} close ${preset !== null ? 'kept from the whole-post pass' : `by ${outcome.source === 'live' ? textModelIdFor(outcome.servedBy) : 'the template writer'}`}` +
       (wantsQuestion ? `, ending in a question` : ''),
   )
 
-  return { close }
+  return { close, ...ethara }
 })
+
+/**
+ * WHAT ETHARA DOES HERE — "At Ethara AI, …".
+ *
+ * Every post says, in its own words, where the lab stands on the subject it
+ * has just explained. The line is written from ONE Brand Corpus domain entry —
+ * the one the post's words match most — and may say only what that entry says:
+ * the lab's focus and its view. The model phrases it to connect with the post;
+ * the checks in `etharaLineProblem` decide whether that phrasing may stand, and
+ * the entry's own words stand in when it may not. So the line can be more or
+ * less fluent, but never more than the Knowledge Base supports.
+ */
+export async function writeEtharaLine(
+  payload: CaptionPayload,
+  ctx: Parameters<Parameters<typeof registerSkill<CaptionPayload>>[1]>[1],
+  maxSentences: number,
+  temperature: number,
+): Promise<{ etharaLine?: string; etharaEntryId?: string }> {
+  const corpus = await listKnowledge(ctx.workspaceId, { activeOnly: true, category: 'Brand Corpus', limit: 40 })
+  const text = [payload.sourceTopic, payload.title, payload.hashtag ?? '', payload.hook ?? '', payload.explanation ?? ''].join(' ')
+  const entry = etharaDomainFor(corpus, text)
+  if (!entry) {
+    ctx.log('No Ethara line: the Knowledge Base has no active Brand Corpus domain entry to draw it from')
+    return {}
+  }
+
+  const template = etharaTemplate(entry, maxSentences)
+  const prompt = [
+    `Write the Ethara connection for a ${PLATFORM_LABEL[payload.platform]} post about ${payload.sourceTopic}.`,
+    'It sits after the post has explained its point and before the closing question.',
+    `The post's hook: "${payload.hook ?? ''}"`,
+    `What the post explains: "${(payload.explanation ?? payload.problem ?? '').slice(0, 700)}"`,
+    '',
+    'What Ethara\u2019s Knowledge Base says about this domain \u2014 the ONLY source you may use:',
+    entry.content,
+    '',
+    `Write at most ${maxSentences} sentence${maxSentences === 1 ? '' : 's'}. Begin with exactly "At Ethara AI," and say what the lab works on`,
+    'and how it thinks about this post\u2019s subject, in a way that connects to the point the post just made.',
+    'Use only what the entry states. Name no product, customer, partner, deployment, result, figure or date.',
+    'Do not write "we are building", "helping", "empowering", "enabling" or "transforming".',
+    'Plain text: no hashtags, no emoji, no quotation marks around it.',
+  ].join('\n')
+
+  const outcome = await withChainFallback(
+    textChain(),
+    {
+      systemInstruction: withCaptionSpec([payload.voiceInstruction ?? '', HUMAN_VOICE].filter(Boolean).join('\n\n')),
+      prompt,
+      temperature,
+      maxOutputTokens: 256,
+    },
+    () => template,
+    (reason) => {
+      ctx.emit('activity', `Ethara line written from the Knowledge Base entry directly \u2014 ${reason}`, { status: 'warn', reason })
+    },
+  )
+
+  let line = outcome.value
+    .trim()
+    .replace(/^["'\u201c\u2018]|["'\u201d\u2019]$/g, '')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  const problem = line === '' ? 'it came back empty' : etharaLineProblem(line, entry, maxSentences)
+  if (problem !== null) {
+    if (outcome.source === 'live') ctx.log(`The model's Ethara line was set aside because ${problem}; the entry's own words stand in`)
+    line = template
+  }
+
+  ctx.log(`Ethara line drawn from \u201c${entry.title}\u201d${problem === null && outcome.source === 'live' ? ` by ${textModelIdFor(outcome.servedBy)}` : ''}`)
+  return { etharaLine: line, etharaEntryId: entry.id }
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    CAPTION 7 · generation.caption.hashtags
@@ -839,7 +1108,12 @@ registerSkill<CaptionPayload>('generation.caption.hashtags', (payload, ctx) => {
    * is invisible to it, survives untouched, and the enforcer then appends a
    * second, prefixed one. The post ships with its tags twice.
    */
-  const derived = deriveHashtags(`${payload.sourceTopic} ${payload.title}`, count)
+  // The post's own text, so the tags follow what it discusses (see deriveHashtags).
+  const derived = deriveHashtags(
+    `${payload.sourceTopic} ${payload.title}`,
+    count,
+    [payload.hook, payload.problem, payload.explanation].filter(Boolean).join(' '),
+  )
   const tags = derived.map((tag) => `#${tag.replace(/^#/, '')}`)
 
   if (useSourceHashtag && payload.hashtag) {
@@ -885,7 +1159,7 @@ registerSkill<CaptionPayload>('generation.caption.adapt', (payload, ctx) => {
   }
   const preserveLineBreaks = ctx.bool('preserveLineBreaks', true)
 
-  const parts = [payload.hook, payload.problem, payload.explanation, payload.close].filter(
+  const parts = [payload.hook, payload.problem, payload.explanation, payload.etharaLine, payload.close].filter(
     (p): p is string => typeof p === 'string' && p.trim().length > 0,
   )
 
@@ -913,13 +1187,21 @@ registerSkill<CaptionPayload>('generation.caption.adapt', (payload, ctx) => {
     const hook = (payload.hook ?? '').trim()
     const close = (payload.close ?? '').trim()
 
-    const withMiddle = (middle: string): string =>
-      [hook, middle, close].filter((part) => part.length > 0).join(' ')
+    const ethara = (payload.etharaLine ?? '').trim()
+    const withMiddle = (middle: string, withEthara = true): string =>
+      [hook, middle, withEthara ? ethara : '', close].filter((part) => part.length > 0).join(' ')
 
+    // The Ethara line outranks the middle sentence: the hook and the close are
+    // the fixed points, the Ethara line is what every post must say, and the
+    // explanation is what compresses first.
     let lead = withMiddle(firstSentence(payload.explanation ?? payload.problem ?? ''))
     if (lead.length > room) {
       lead = withMiddle('')
-      ctx.log(`Dropped the middle sentence to keep the hook and the closing question inside X's ${limit} characters`)
+      ctx.log(`Dropped the middle sentence to keep the hook, the Ethara line and the closing question inside X's ${limit} characters`)
+    }
+    if (lead.length > room && ethara !== '') {
+      lead = withMiddle('', false)
+      ctx.log(`The Ethara line would not fit X's ${limit} characters beside the hook and the close, so this X post goes without it`)
     }
     if (lead.length > room && close !== '') {
       lead = clampChars(hook, Math.max(0, room - close.length - 1)).trim()
@@ -932,7 +1214,7 @@ registerSkill<CaptionPayload>('generation.caption.adapt', (payload, ctx) => {
     const tags = payload.hashtagBlock ?? ''
     const sep = preserveLineBreaks ? '\n\n' : ' '
     const assemble = (explanation: string): string => {
-      const blocks = [payload.hook, payload.problem, explanation, payload.close].filter(
+      const blocks = [payload.hook, payload.problem, explanation, payload.etharaLine, payload.close].filter(
         (p): p is string => typeof p === 'string' && p.trim().length > 0,
       )
       const text = blocks.join(sep)

@@ -9,7 +9,7 @@
  *               standing interests, and dropping one would put a hole in the
  *               trend series that the Validation Agent reads as a decline.
  *   ROTATING  — captured only during their week. This is what lets a
- *               31-week cycle cover 134 distinct terms without asking one
+ *               30-week cycle cover 123 distinct terms without asking one
  *               run to crawl them all.
  *
  * WHY WEEKS RATHER THAN DAYS. A week gives each theme enough consecutive runs to
@@ -20,7 +20,7 @@
  *
  * WHY A CYCLE RATHER THAN DATES. The sheet numbers its rows rather than dating
  * them, so this is a repeating cycle anchored to a start date. It keeps running
- * after week 31 instead of falling off the end, and moving the anchor shifts the
+ * after week 30 instead of falling off the end, and moving the anchor shifts the
  * whole rota without rewriting a single row.
  *
  * Seeded into `keyword_schedule` on migrate and editable thereafter. This file is
@@ -39,8 +39,8 @@ export interface ScheduleWeek {
 /**
  * Captured EVERY week, alongside the current week's rotating set.
  *
- * Held separately rather than repeated across all 31 weeks: storing them per
- * week would be 155 rows that must all be edited together, and the first time
+ * Held separately rather than repeated across all 30 weeks: storing them per
+ * week would be 150 rows that must all be edited together, and the first time
  * one was missed the series would break silently.
  */
 export const CONSTANT_KEYWORDS: string[] = [
@@ -354,28 +354,6 @@ export const SCHEDULE_WEEKS: ScheduleWeek[] = [
       'benchmark for autonomous AI agents',
       'production-ready agent benchmarks',
       'training environments for frontier models',
-    ],
-  },
-  {
-    week: 31,
-    topic: 'Ethara Brand Monitoring',
-    keywords: [
-      'Ethara reinforcement learning',
-      'Ethara RL environments',
-      'Ethara RLaaS',
-      'Ethara AI benchmarks',
-      'Ethara AI research',
-      'Ethara agent evaluation',
-      'Ethara AI post-training',
-      'Ethara MILO-Bench',
-      'MILO-Bench',
-      'Ethara Raiden',
-      'Ethara Kaiju',
-      'Ethara Rinzler',
-      'Ethara Kang',
-      'Ethara Mephisto',
-      'Ethara TERRA',
-      'Ethara TRON',
     ],
   },
 ]

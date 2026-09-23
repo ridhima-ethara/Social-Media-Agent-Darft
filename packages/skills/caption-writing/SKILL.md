@@ -16,8 +16,15 @@ Write for business leaders and informed non-specialists as well as practitioners
 knowledge base to connect the topic to reinforcement learning, agentic AI and AGI infrastructure.
 
 Ethara.AI positions itself as **Reinforcement Learning as a Service for AGI**. That is positioning,
-not evidence: **do not infer specific products, customers, deployments or results from it.** Include
-an Ethara connection only where it is directly supported and useful.
+not evidence: **do not infer specific products, customers, deployments or results from it.**
+
+**Every post carries an Ethara connection** — one or two sentences opening **"At Ethara AI,"**, placed
+after the implication and before the close, that say what the lab works on and how it thinks about
+this post's subject. It is written from the Knowledge Base **Brand Corpus** domain entry the post's
+subject matches (reinforcement learning, post-training, evaluation, agentic AI, synthetic data,
+infrastructure), or from the positioning entry when none matches, and it states **only what that entry
+states**: the lab's focus and point of view — never a product, customer, partner, deployment, result or
+figure. It reports a position; it never pitches ("we are building / helping / enabling…").
 
 Prefer an informed, precise, professional voice. Show why a topic matters through its mechanism or
 practical implication. Avoid generic AI commentary and forced sales language.
@@ -113,8 +120,8 @@ Output passes to `brand-voice` for compliance review.
      sentences into clear complete ideas.
    - Do not split every phrase into a fragment either. Preserve flow with natural transitions and
      explicit links between ideas.
-   - Publishable copy is plain text: no `Hook`/`Body`/`CTA` labels, no Markdown bold markers, and no
-     decorative Unicode fonts. A short list is acceptable when the topic genuinely involves steps or
+   - Publishable copy is plain text: no `Hook`/`Body`/`CTA` labels, no Markdown bold markers, no
+     em dashes, and no decorative Unicode fonts. Brand-voice enforcement removes any that arrive. A short list is acceptable when the topic genuinely involves steps or
      criteria.
 
    Length comes from useful explanation, example and implication — never from repeated claims.
@@ -122,7 +129,7 @@ Output passes to `brand-voice` for compliance review.
 4. **The narrative order is preserved in both language modes:**
 
    hook → context/problem → explanation or mechanism → evidence/example → implication →
-   optional Ethara connection → close
+   Ethara connection ("At Ethara AI, …") → close
 
    Combine or omit stages that add no value. Do not force every stage into every caption.
 
@@ -320,8 +327,9 @@ The Caption Writing skill **must not**:
 - Broaden a claim beyond what the cited evidence supports.
 - Summarise an entire research source when one primary insight should drive the post.
 - Select a hook before identifying the central claim.
-- Force an Ethara connection where it is not genuinely relevant, or infer a product, customer or
-  result from the company's positioning line.
+- Omit the "At Ethara AI," connection, or let it state more than its Brand Corpus entry does — a
+  product, customer, partner, deployment, result or figure — or infer any of those from the company's
+  positioning line.
 - **Claim or imply an Ethara capability, solution or outcome that no cited corpus entry states** —
   including in the solution beat of `problem-solution-trajectory`, which is grounded or dropped.
 - Present the "where the world is moving" beat as a prediction of fact rather than a supported
@@ -359,14 +367,16 @@ The Caption Writing skill **must not**:
   Compare the prose before the footer; a paraphrase is a failure, not a variant.
 - Any attribution line sits with the prose, above the footer — the keyword line is last.
 - Claims match the cited `key_points`; research sources are retained; hypotheticals are clearly framed.
-- No invented Ethara products, results, clients or capabilities, and no forced brand connection.
+- No invented Ethara products, results, clients or capabilities.
+- The post carries exactly one Ethara connection, opening "At Ethara AI,", grounded in a Brand Corpus
+  entry and free of promotional framing. On X it is kept whenever it fits beside the hook and close.
 - The resolved stance is recorded on the caption, and either its grounding requirement was met or it
   degraded to `default` with a stated reason.
 - Under `problem-solution-trajectory`, the solution beat names an approach traceable to a cited corpus
   entry, and the closing beat reads as a supported trajectory rather than an assertion of fact.
 - A week's calendar carries more than one stance.
 - Platform treatments and option angles are distinct, except for an explicitly configured cross-post.
-- No decorative Unicode letterforms and no Markdown bold in publishable copy.
+- No decorative Unicode letterforms, no Markdown bold and no em dashes in publishable copy.
 
 ## Failure modes
 

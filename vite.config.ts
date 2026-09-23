@@ -98,6 +98,8 @@ export default defineConfig({
       '.pages.dev',
       '.vercel.app',
       '.netlify.app',
+      // The production domain, fronting the AWS instance on :3010.
+      'sma.ethara.ai',
       // Anything else the operator is actually deploying behind, from the
       // environment rather than from this file. A named tunnel or a real
       // domain (`socialai.ethara.ai`) is a host Vite has never heard of, and

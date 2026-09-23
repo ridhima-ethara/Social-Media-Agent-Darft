@@ -12,10 +12,10 @@
  */
 
 import { useState } from 'react'
-import { ChevronDown, Check, AlertTriangle } from 'lucide-react'
+import { ChevronDown, Check } from 'lucide-react'
 import { SELECTABLE_IMAGE_MODELS } from '@shared/image-models'
 import { IMAGE_MODEL_ADAPTER, SELECTABLE_TEXT_MODELS } from '@shared/text-models'
-import { Badge, useOutsideClick } from './ui'
+import { useOutsideClick } from './ui'
 import { useStore } from '../store'
 
 /** What a model needs, reduced to the two things the menu renders. */
@@ -131,35 +131,29 @@ export function ModelMenu({
                   onSelect(entry.id)
                   setOpen(false)
                 }}
-                className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-2"
+                /* The name is the whole entry. What the model is, its licence
+                   and why it might be unreachable are one hover away rather
+                   than a paragraph per option. */
+                title={[
+                  entry.summary,
+                  entry.licence,
+                  state === 'unreachable'
+                    ? `${apiMode === 'connected' ? (report?.reason ?? 'Not configured') : 'The API is unreachable'} — ${floor} will be used instead.`
+                    : state === 'unknown'
+                      ? 'Reachability is not reported for this model.'
+                      : '',
+                ]
+                  .filter((part) => part.length > 0)
+                  .join('\n')}
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-2"
               >
-                <span className="mt-0.5 w-3.5 shrink-0">
+                <span className="w-3.5 shrink-0">
                   {entry.id === selected ? <Check size={13} className="text-accent-bright" /> : null}
                 </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[12px] font-medium text-ink">{entry.label}</span>
-                    <Badge tone="neutral">{entry.licence}</Badge>
-                  </span>
-                  <span className="mt-0.5 block text-[11px] leading-relaxed text-ink-3">{entry.summary}</span>
-
-                  {state === 'unreachable' ? (
-                    <span className="mt-1 flex items-start gap-1 text-[11px] leading-relaxed text-warn">
-                      <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-                      {apiMode === 'connected'
-                        ? (report?.reason ?? 'Not configured')
-                        : 'The API is unreachable'}{' '}
-                      — {floor} will be used instead.
-                    </span>
-                  ) : null}
-
-                  {state === 'unknown' ? (
-                    <span className="mt-1 flex items-start gap-1 text-[11px] leading-relaxed text-ink-3">
-                      <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-                      Reachability is not reported for this model, so it cannot be verified from here.
-                    </span>
-                  ) : null}
-                </span>
+                <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">{entry.label}</span>
+                {state === 'unreachable' ? (
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" aria-label="Not reachable" />
+                ) : null}
               </button>
             )
           })}

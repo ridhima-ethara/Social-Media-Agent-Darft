@@ -69,7 +69,7 @@ import type {
   ReviewPayload,
   ScoredHook,
 } from './agents/skills/index'
-import { PLATFORM_LABEL } from './agents/corpus'
+import { inPlanningWindow, PLATFORM_LABEL } from './agents/corpus'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    TRIGGERS
@@ -319,78 +319,7 @@ export async function runDiscoveryPipeline(
    * never fails the run, because a written calendar with four of five posts is
    * worth more than a failed pipeline.
    */
-  const rankConfig = await resolveSkillConfig(workspaceId, 'calendar.rank.select')
-  const autoWrite = rankConfig.autoWriteCalendar !== false
-  const maxWrites = Math.max(0, Number(rankConfig.maxAutoWrites ?? 5))
-
-  let written = 0
-  let writeFailed = 0
-
-  if (autoWrite && maxWrites > 0) {
-    const onCalendar = await listIdeas(workspaceId, { limit: 400 })
-    const pending = onCalendar
-      .filter((row) => row.calendar_slot === 'primary')
-      .filter((row) => row.status === 'suggested')
-      .sort((a, b) => Number(b.priority_score ?? 0) - Number(a.priority_score ?? 0))
-
-    const queue: IdeaRow[] = []
-    for (const row of pending) {
-      if (queue.length >= maxWrites) break
-      // Already written by an earlier run or by hand — nothing to redo.
-      const existing = await getDraft(row.id, row.platform as Platform)
-      if (existing) continue
-      queue.push(row)
-    }
-
-    if (queue.length > 0) {
-      await insertActivity({
-        workspaceId,
-        agentId: 'caption',
-        message: `Writing ${queue.length} post(s) that took a calendar slot`,
-        status: 'running',
-      })
-    }
-
-    for (const row of queue) {
-      try {
-        await generateDraft({
-          workspaceId,
-          trigger,
-          turnId,
-          paceMs,
-          configOverrides,
-          ideaId: row.id,
-          platform: row.platform as Platform,
-          // One call covers both agents, so a card never appears written but
-          // unillustrated.
-          withImage: true,
-        })
-        written += 1
-      } catch (error) {
-        writeFailed += 1
-        const message = error instanceof Error ? error.message : String(error)
-        // Named per post. A caption that could not be written is a fact about
-        // that post, not about the run.
-        await insertActivity({
-          workspaceId,
-          agentId: 'caption',
-          message: `Could not write “${row.title.slice(0, 60)}” — ${message}`,
-          status: 'error',
-        })
-      }
-    }
-
-    if (written > 0 || writeFailed > 0) {
-      await insertActivity({
-        workspaceId,
-        agentId: 'image',
-        message:
-          `${written} post(s) written and illustrated, now on the calendar` +
-          (writeFailed > 0 ? ` · ${writeFailed} could not be written and keep their slot unwritten` : ''),
-        status: writeFailed > 0 ? 'warn' : 'ok',
-      })
-    }
-  }
+  const { written, writeFailed } = await writeCalendarBacklog({ workspaceId, trigger, turnId, paceMs, configOverrides })
 
   /* ── Finish ─────────────────────────────────────────────────────────────── */
   const buckets = final.buckets ?? { validated: 0, needs_review: 0, duplicate: 0, rejected: 0 }
@@ -470,6 +399,187 @@ function emptySummary(): PipelineSummary {
     written: 0,
     writeFailed: 0,
   }
+}
+
+/**
+ * Write every calendar post that holds a slot but has no caption yet.
+ *
+ * The pipeline calls this as its last stage. It is also called once when the
+ * API starts, because a run cut off mid-write — a deploy, a crash, a restart —
+ * used to leave its remaining slots placed but unwritten until the next full
+ * run, and the calendar showed them as "No caption yet" for all that time.
+ * Idempotent: a post that already has a draft is skipped, so running it twice
+ * writes nothing twice.
+ */
+/*
+ * One backlog write at a time. The boot-time recovery and a pipeline run that
+ * reaches its last stage could otherwise both pick the same unwritten post and
+ * write it twice. A caller that arrives mid-write waits, then looks again —
+ * so a run's freshly placed posts are still covered.
+ */
+let backlogInFlight: Promise<unknown> | null = null
+
+export async function writeCalendarBacklog(
+  ctx: OrchestratorContext,
+): Promise<{ written: number; writeFailed: number }> {
+  while (backlogInFlight !== null) await backlogInFlight.catch(() => undefined)
+  const pending = writeCalendarBacklogNow(ctx)
+  backlogInFlight = pending
+  try {
+    return await pending
+  } finally {
+    backlogInFlight = null
+  }
+}
+
+async function writeCalendarBacklogNow(
+  ctx: OrchestratorContext,
+): Promise<{ written: number; writeFailed: number }> {
+  const { workspaceId, trigger, turnId = null, paceMs = 0, configOverrides = {} } = ctx
+  const rankConfig = await resolveSkillConfig(workspaceId, 'calendar.rank.select')
+  const autoWrite = rankConfig.autoWriteCalendar !== false
+  const maxWrites = Math.max(0, Number(rankConfig.maxAutoWrites ?? 5))
+  const planningWeeks = Math.max(1, Number(rankConfig.planningWeeks ?? 2))
+  // Only the first weeks are written now; the rest of the plan is placed and
+  // waits. Never wider than the plan itself.
+  const writeWeeks = Math.min(planningWeeks, Math.max(1, Number(rankConfig.autoWriteWeeks ?? 1)))
+
+  let written = 0
+  let writeFailed = 0
+
+  if (autoWrite && maxWrites > 0) {
+    const onCalendar = await listIdeas(workspaceId, { limit: 400 })
+    const unwritten = onCalendar
+      .filter((row) => row.calendar_slot === 'primary')
+      .filter((row) => row.status === 'suggested')
+      // Only inside the planning window: a post dated past it is re-dated by the
+      // next run's rank selection, not written where the calendar never shows it.
+      .filter((row) => inPlanningWindow(String(row.scheduled_date ?? ''), planningWeeks * 7))
+    /*
+     * THIS WEEK IS WRITTEN; NEXT WEEK WAITS.
+     *
+     * Only posts in the first `autoWriteWeeks` weeks are written and
+     * illustrated now. Later weeks keep their slots as "No caption yet" and are
+     * written when their week arrives — the next run, or the backlog pass when
+     * the API starts — or when someone drafts one from its card. Nothing here
+     * rewrites a post that already has a caption: `status === 'suggested'` and
+     * the draft check below both guard that.
+     */
+    const pending = unwritten
+      .filter((row) => inPlanningWindow(String(row.scheduled_date ?? ''), writeWeeks * 7))
+      .sort((a, b) => Number(b.priority_score ?? 0) - Number(a.priority_score ?? 0))
+    const queuedLater = unwritten.length - pending.length
+
+    const queue: IdeaRow[] = []
+    for (const row of pending) {
+      if (queue.length >= maxWrites) break
+      // Already written by an earlier run or by hand — nothing to redo.
+      const existing = await getDraft(row.id, row.platform as Platform)
+      if (existing) continue
+      queue.push(row)
+    }
+
+    if (queue.length > 0) {
+      await insertActivity({
+        workspaceId,
+        agentId: 'caption',
+        message: `Writing ${queue.length} post(s) for this week`,
+        status: 'running',
+      })
+    }
+    // Said out loud, so a placed-but-unwritten card reads as queued, not failed.
+    if (queuedLater > 0) {
+      await insertActivity({
+        workspaceId,
+        agentId: 'caption',
+        message: `${queuedLater} post(s) for next week are placed and queued — their captions are written when that week arrives, or from the card`,
+        status: 'ok',
+      })
+    }
+
+    for (const row of queue) {
+      try {
+        await generateDraft({
+          workspaceId,
+          trigger,
+          turnId,
+          paceMs,
+          configOverrides,
+          ideaId: row.id,
+          platform: row.platform as Platform,
+          // One call covers both agents, so a card never appears written but
+          // unillustrated.
+          withImage: true,
+        })
+        written += 1
+      } catch (error) {
+        writeFailed += 1
+        const message = error instanceof Error ? error.message : String(error)
+        // Named per post. A caption that could not be written is a fact about
+        // that post, not about the run.
+        await insertActivity({
+          workspaceId,
+          agentId: 'caption',
+          message: `Could not write “${row.title.slice(0, 60)}” — ${message}`,
+          status: 'error',
+        })
+      }
+    }
+
+    if (written > 0 || writeFailed > 0) {
+      await insertActivity({
+        workspaceId,
+        agentId: 'image',
+        message:
+          `${written} post(s) written and illustrated, now on the calendar` +
+          (writeFailed > 0 ? ` · ${writeFailed} could not be written and keep their slot unwritten` : ''),
+        status: writeFailed > 0 ? 'warn' : 'ok',
+      })
+    }
+
+    /*
+     * A CAPTION WITH NO CREATIVE.
+     *
+     * A post is written in two steps — caption, then image — and a run cut off
+     * between them leaves a written post with no creative, which nothing above
+     * picks up because it is no longer `suggested`. Within the weeks being
+     * written, each such post gets its image now. Never re-renders an existing
+     * one: only a post with NO media asset qualifies.
+     */
+    const writtenPosts = onCalendar
+      .filter((row) => row.calendar_slot === 'primary')
+      .filter((row) => row.status !== 'suggested' && row.status !== 'rejected' && row.status !== 'published')
+      .filter((row) => row.content_format !== 'short_form_script')
+      .filter((row) => inPlanningWindow(String(row.scheduled_date ?? ''), writeWeeks * 7))
+    let illustrated = 0
+    for (const row of writtenPosts) {
+      const platform = row.platform as Platform
+      if ((await getMediaAsset(row.id, platform)) !== null) continue
+      if ((await getDraft(row.id, platform)) === null) continue
+      try {
+        await renderIdeaImage({ workspaceId, trigger, turnId, paceMs, configOverrides, ideaId: row.id, platform })
+        illustrated += 1
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await insertActivity({
+          workspaceId,
+          agentId: 'image',
+          message: `Could not draw the creative for “${row.title.slice(0, 60)}” — ${message}`,
+          status: 'error',
+        })
+      }
+    }
+    if (illustrated > 0) {
+      await insertActivity({
+        workspaceId,
+        agentId: 'image',
+        message: `${illustrated} written post(s) were missing their creative and now have one`,
+        status: 'ok',
+      })
+    }
+  }
+
+  return { written, writeFailed }
 }
 
 async function failRun(

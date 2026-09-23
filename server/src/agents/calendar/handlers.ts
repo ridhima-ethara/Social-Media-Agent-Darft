@@ -26,11 +26,12 @@ import {
   FORMAT_PLATFORM_FIT,
   HOUR_WEIGHTS,
   isoDate,
-  isWeekend,
   labelToMinutes,
   nearestPostingTime,
   PLATFORM_LABEL,
   seededFor,
+  inPlanningWindow,
+  planningDays,
   planningStart,
   weekdayName,
   type EditorialFormat,
@@ -479,8 +480,6 @@ registerSkill<PipelinePayload>('calendar.slot.optimize', (payload, ctx) => {
     .sort((a, b) => b.weight - a.weight)
 
   const bestHour = admissible[0] ?? { hour: 10, weight: HOUR_WEIGHTS[10] as number }
-  // Never before today: a slot in a day that has gone cannot be published.
-  const weekStart = planningStart()
 
   /*
    * HOW FAR AHEAD THE CALENDAR REACHES.
@@ -492,26 +491,17 @@ registerSkill<PipelinePayload>('calendar.slot.optimize', (payload, ctx) => {
    * slots and the cadence limits then had to fight over them.
    */
   const horizonDays = Math.max(1, ctx.num('planningHorizonDays', 14))
+  // The postable days of the window, ending at the week boundary the horizon
+  // reaches — so a fortnight is this week and next, never a third.
+  const days = planningDays(horizonDays, avoidWeekends)
 
-  // Deterministic spreading: day offsets walk the horizon, so two runs of the
-  // same corpus place the same ideas on the same days.
+  // Deterministic spreading: ideas walk the window's postable days in order, so
+  // two runs of the same corpus place the same ideas on the same days.
   const taken = new Map<string, number[]>()
 
   ideas.forEach((idea, index) => {
     const rand = seededFor(idea.title, 4127)
-    let dayOffset = index % horizonDays
-    let date = isoDate(addDays(weekStart, dayOffset))
-
-    if (avoidWeekends) {
-      let guard = 0
-      // Guarded by the horizon, not by 7: on a fortnight there are more days to
-      // walk before giving up, and a guard of 7 could return a Saturday.
-      while (isWeekend(date) && guard < horizonDays) {
-        dayOffset = (dayOffset + 1) % horizonDays
-        date = isoDate(addDays(weekStart, dayOffset))
-        guard += 1
-      }
-    }
+    const date = days[index % days.length] as string
 
     // Choose an hour from the admissible set, preferring the strongest but
     // stepping down when the slot is already occupied inside the minimum gap.
@@ -573,6 +563,9 @@ registerSkill<PipelinePayload>('calendar.cadence.balance', (payload, ctx) => {
   // Declared on this skill too, because a skill is pure with respect to its own
   // config — reading the placement skill's knob would couple the two.
   const avoidWeekends = ctx.bool('avoidWeekends', true)
+  // Declared here for the same reason: the balancer must stay inside the window
+  // the placement planned, and it cannot see the placement skill's config.
+  const horizonDays = Math.max(1, ctx.num('planningHorizonDays', 14))
 
   const ideas = payload.ideas ?? []
   if (ideas.length === 0) return {}
@@ -580,11 +573,22 @@ registerSkill<PipelinePayload>('calendar.cadence.balance', (payload, ctx) => {
   // The same base the placement used, so the weekly count below measures the
   // window that was actually planned rather than one starting before it.
   const weekStart = planningStart()
+  /*
+   * THE DAYS A DISPLACED POST MAY MOVE TO.
+   *
+   * This walked forward a day at a time for up to fourteen hops, so a post
+   * displaced from a full second Friday landed in a third week the calendar
+   * was never meant to plan. It now wraps around the window's own postable
+   * days — weekends already excluded — and never leaves them.
+   */
+  const days = planningDays(horizonDays, avoidWeekends)
   const perDay = new Map<string, number>()
   const perDayPlatform = new Map<string, number>()
   let moved = 0
 
   for (const idea of ideas.sort((a, b) => b.confidence - a.confidence)) {
+    const placed = idea.scheduledDate
+    const placedReasons = idea.slotReasons
     let guard = 0
     for (;;) {
       const dayKey = idea.scheduledDate
@@ -598,24 +602,20 @@ registerSkill<PipelinePayload>('calendar.cadence.balance', (payload, ctx) => {
         break
       }
 
-      if (guard >= 14) break
-      /*
-       * SKIP WEEKENDS ON THE WAY PAST.
-       *
-       * `calendar.slot.optimize` avoids weekends, and this then pushed straight
-       * through them: a post displaced from a full Friday landed on Saturday,
-       * silently violating the `avoidWeekends` knob that had just been honoured.
-       * The rebalancer has to respect the same rule it is rebalancing under, or
-       * the knob only holds until the first collision.
-       */
-      let next = isoDate(addDays(new Date(`${idea.scheduledDate}T12:00:00Z`), 1))
-      if (avoidWeekends) {
-        let hop = 0
-        while (isWeekend(next) && hop < 7) {
-          next = isoDate(addDays(new Date(`${next}T12:00:00Z`), 1))
-          hop += 1
-        }
+      // Every postable day in the window is full: keep the placed date rather
+      // than escape the window. Rank selection then decides which ideas keep a
+      // calendar slot and which wait in suggestions.
+      if (guard >= days.length) {
+        idea.scheduledDate = placed
+        idea.slotReasons = [
+          ...placedReasons,
+          'Every postable day in the planning window is already at its ceiling, so this keeps its placed day rather than moving past the window.',
+        ]
+        moved -= guard
+        break
       }
+      const index = days.indexOf(idea.scheduledDate)
+      const next = days[(index + 1) % days.length] as string
       idea.scheduledDate = next
       idea.slotReasons = [
         ...idea.slotReasons,
@@ -695,9 +695,11 @@ registerSkill<PipelinePayload>('calendar.crossplatform.adapt', (payload, ctx) =>
 
   const maxVariants = ctx.num('maxVariants', 2)
   const staggerDays = ctx.num('staggerDays', 2)
+  const horizonDays = Math.max(1, ctx.num('planningHorizonDays', 14))
 
   const ideas = payload.ideas ?? []
   const variants: PlannedIdea[] = []
+  let outsideWindow = 0
 
   // Only the strongest ideas earn a second channel; adapting everything would
   // fill the calendar with echoes.
@@ -710,7 +712,25 @@ registerSkill<PipelinePayload>('calendar.crossplatform.adapt', (payload, ctx) =>
     const alt = idea.altPlatforms[0]
     if (!alt) continue
 
-    const date = isoDate(addDays(new Date(`${idea.scheduledDate}T12:00:00Z`), staggerDays))
+    /*
+     * Staggered later when that stays inside the planning window, earlier when
+     * it does not — a variant of an idea on the window's last Friday would
+     * otherwise open a third week. Neither fits: no variant, rather than a date
+     * outside the window.
+     */
+    const base = new Date(`${idea.scheduledDate}T12:00:00Z`)
+    const later = isoDate(addDays(base, staggerDays))
+    const earlier = isoDate(addDays(base, -staggerDays))
+    const date = inPlanningWindow(later, horizonDays)
+      ? later
+      : inPlanningWindow(earlier, horizonDays)
+        ? earlier
+        : null
+    if (date === null) {
+      outsideWindow += 1
+      continue
+    }
+    const direction = date === later ? 'later' : 'earlier'
     variants.push({
       ...idea,
       key: `${idea.key}-alt-${alt.platform}`,
@@ -723,17 +743,18 @@ registerSkill<PipelinePayload>('calendar.crossplatform.adapt', (payload, ctx) =>
       platformRank: null,
       variantOf: idea.key,
       slotReasons: [
-        `Adapted from the ${PLATFORM_LABEL[idea.platform]} post, staggered ${staggerDays} day${staggerDays === 1 ? '' : 's'} later so the two do not compete.`,
+        `Adapted from the ${PLATFORM_LABEL[idea.platform]} post, staggered ${staggerDays} day${staggerDays === 1 ? '' : 's'} ${direction} so the two do not compete.`,
         `${PLATFORM_LABEL[alt.platform]} scored ${alt.score}% on this format, which cleared the alternate threshold.`,
       ],
       conflicts: [],
     })
   }
 
+  const skipped = outsideWindow > 0 ? ` · ${outsideWindow} skipped, no staggered day inside the planning window` : ''
   ctx.log(
-    variants.length === 0
+    (variants.length === 0
       ? 'No cross-platform variants — no idea had an alternate above the threshold'
-      : `${variants.length} cross-platform variant(s) added, staggered ${staggerDays} day(s)`,
+      : `${variants.length} cross-platform variant(s) added, staggered ${staggerDays} day(s)`) + skipped,
   )
 
   return { ideas: [...ideas, ...variants] }
@@ -798,14 +819,20 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
    * TWO RULES BOUND IT.
    *
    *   Nothing a human has touched is moved. From `in_review` onward a person has
-   *   acted on the idea, so it keeps its slot and consumes a slot. Only
-   *   `suggested` and `drafted` ideas are promoted or demoted by an agent.
+   *   acted on the idea, so it keeps its slot and consumes a slot.
+   *
+   *   Nothing already WRITTEN is moved either. `drafted` used to be demotable,
+   *   so a post whose caption and creative were done could be pushed off the
+   *   calendar by a higher-scoring newcomer from a later run — this week's
+   *   finished posts were the ones at risk. Only `suggested` ideas, which hold
+   *   no caption yet, are promoted, demoted or re-dated by an agent. A written
+   *   post keeps its slot and date and counts against the cap.
    *
    *   Nothing is deleted. A demoted idea keeps its title, rank, reasons and
    *   lineage and sits in More suggestions, where it can be promoted again.
    */
   const reconcile = ctx.bool('reconcileOverCap', true)
-  const DEMOTABLE: readonly IdeaStatus[] = ['suggested', 'drafted']
+  const DEMOTABLE: readonly IdeaStatus[] = ['suggested']
 
   const onCalendar = await listIdeas(ctx.workspaceId, { limit: 600 })
   // Title plus platform is how a stored idea is recognised — `persistIdeas`
@@ -877,18 +904,17 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
    */
   function nextFreeDate(platform: Platform): string {
     const booked = bookedByPlatform.get(platform) ?? new Set<string>()
-    const from = planningStart()
-    // Bounded by the weeks being planned plus slack for the weekends skipped
-    // inside them, so a fortnight plan can actually reach the fortnight's end.
-    for (let offset = 0; offset < planningWeeks * 7 + 7; offset += 1) {
-      const date = isoDate(addDays(from, offset))
-      if (isWeekend(date)) continue
+    // Only the window's own weekdays. This searched `planningWeeks * 7 + 7`
+    // days as "slack for weekends", but the weekends already sit inside the
+    // weeks being planned — the slack was a whole third week.
+    const days = planningDays(planningWeeks * 7, true)
+    for (const date of days) {
       if (booked.has(date)) continue
       booked.add(date)
       bookedByPlatform.set(platform, booked)
       return date
     }
-    return isoDate(from)
+    return days[0] as string
   }
 
   for (const platform of PLATFORMS) {
@@ -939,10 +965,7 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
           promoted += 1
           const current = String(c.idea.scheduledDate ?? '').slice(0, 10)
           const booked = bookedByPlatform.get(platform) ?? new Set<string>()
-          const withinWindow =
-            current !== '' &&
-            new Date(`${current}T12:00:00Z`) >= planningStart() &&
-            new Date(`${current}T12:00:00Z`) < addDays(planningStart(), planningWeeks * 7)
+          const withinWindow = current !== '' && inPlanningWindow(current, planningWeeks * 7)
           if (!withinWindow || booked.has(current)) {
             c.idea.scheduledDate = nextFreeDate(platform)
             c.idea.slotReasons = [
@@ -970,6 +993,18 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
       } else if (!shouldBePrimary && c.slot === 'primary') {
         await updateIdea(ctx.workspaceId, row.id, { calendarSlot: 'suggestion', platformRank: rank })
         demoted += 1
+      } else if (
+        shouldBePrimary &&
+        c.movable &&
+        !inPlanningWindow(String(row.scheduled_date ?? ''), planningWeeks * 7)
+      ) {
+        // A primary an earlier run dated past the window — or one the window
+        // has since moved away from — is brought back inside it. Only an
+        // agent-placed idea: a human's placement is never moved.
+        await updateIdea(ctx.workspaceId, row.id, {
+          platformRank: rank,
+          scheduledDate: nextFreeDate(platform),
+        })
       } else if (row.platform_rank !== rank) {
         await updateIdea(ctx.workspaceId, row.id, { platformRank: rank })
       }
@@ -981,14 +1016,14 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
       `${PLATFORM_LABEL[platform]}: ${Math.min(weeklyCap, held + winners.length)} on the calendar of ${weeklyCap} (${topPerPlatform}/week × ${planningWeeks})` +
         (promoted > 0 ? ` · ${promoted} promoted` : '') +
         (demoted > 0 ? ` · ${demoted} moved to suggestions` : '') +
-        (held > 0 ? ` · ${held} held by a human review` : ''),
+        (held > 0 ? ` · ${held} kept in place — already written or in review` : ''),
       { platform, promoted, demoted, locked: held, cap: weeklyCap, perWeek: topPerPlatform, weeks: planningWeeks },
     )
 
     if (demoted > 0 || promoted > 0) {
       ctx.log(
         `${PLATFORM_LABEL[platform]} reconciled against ${forPlatform.length} candidate(s): ` +
-          `${promoted} promoted, ${demoted} demoted, ${held} untouchable (past planning). ` +
+          `${promoted} promoted, ${demoted} demoted, ${held} kept in place (written or in review). ` +
           `Cut-off score ${winners[winners.length - 1]?.score ?? 0}.`,
       )
     }

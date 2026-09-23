@@ -1,8 +1,8 @@
 /**
  * THE CALENDAR ASSISTANT — the right-hand column of the Weekly Calendar.
  *
- * The same command plane the ⌘K bar drives (Qwen3 over Ollama when configured,
- * the in-bundle deterministic parser otherwise), surfaced on the Weekly Calendar
+ * The same command plane the ⌘K bar drives (the configured text model — Gemini
+ * on this deployment — or the in-bundle deterministic parser without one), surfaced on the Weekly Calendar
  * so an operator can change the calendar and edit a post's caption or image
  * without leaving the screen. Every rule the plane enforces holds here: the plan
  * is shown before it runs, and the confirm gate is token-validated.
@@ -156,15 +156,15 @@ export function CalendarAssistant() {
 
         <span className="min-w-0 flex-1">
           <span className="display block truncate text-[13px] leading-tight">Calendar Assistant</span>
-          <span className="flex items-center gap-1.5 text-[10.5px] leading-tight text-ink-3">
-            <span
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                apiMode === 'connected' ? 'bg-good' : 'bg-warn'
-              }`}
-              aria-hidden="true"
-            />
-            {apiMode === 'connected' ? 'Qwen3 · live' : 'Standalone parser'}
-          </span>
+          {/* Only the degraded state is worth a line. Connected needs no label —
+              and the old one was a hard-coded "Qwen3" that was not the model
+              answering: the plane runs on the configured text provider. */}
+          {apiMode === 'connected' ? null : (
+            <span className="flex items-center gap-1.5 text-[10.5px] leading-tight text-ink-3">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" aria-hidden="true" />
+              Offline · built-in parser
+            </span>
+          )}
         </span>
 
         {hasTranscript ? (

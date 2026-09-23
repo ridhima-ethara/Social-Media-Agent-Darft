@@ -365,7 +365,7 @@ export const BRAND_RULES: BrandRule[] = [
     n: 4,
     area: 'Voice & Positioning',
     title: 'Ethara connection',
-    text: 'Include an Ethara AI connection only when it follows naturally from the subject and the available evidence. Never force company promotion into an otherwise research-focused post.',
+    text: 'Every post carries one Ethara AI connection, opening \u201cAt Ethara AI,\u201d before the close: what the lab works on and how it views this post\u2019s subject, drawn from the Brand Corpus entry for its domain. It reports a position, never promotion \u2014 no product, customer, result or figure the entry does not state, and no \u201cwe are building / helping / enabling\u201d framing.',
     enforcement: 'assisted',
   },
   {
@@ -395,7 +395,7 @@ export const BRAND_RULES: BrandRule[] = [
     n: 8,
     area: 'Factual & Content',
     title: 'Caption structure',
-    text: 'A full caption functionally contains Hook → Context → Problem → Reframe → Mechanism → Evidence → Implication → Ethara AI connection → Closing line or question. Not every stage needs its own sentence, and the Ethara connection may be omitted when including it would force promotion.',
+    text: 'A full caption functionally contains Hook → Context → Problem → Reframe → Mechanism → Evidence → Implication → Ethara AI connection → Closing line or question. Not every stage needs its own sentence. The Ethara connection is always present, opening \u201cAt Ethara AI,\u201d, and stays a statement of the lab\u2019s focus rather than promotion.',
     enforcement: 'assisted',
   },
   {
@@ -684,8 +684,18 @@ export function topicInProse(topic: string): string {
     .join('')
 }
 
-export function deriveHashtags(topic: string, count = 4): string[] {
+export function deriveHashtags(topic: string, count = 4, body = ''): string[] {
   const clamped = Math.max(BRAND.hashtags.min, Math.min(BRAND.hashtags.max, count))
+  /*
+   * THE POST, NOT JUST ITS TOPIC LINE.
+   *
+   * Tags were derived from the topic alone and then topped up from the
+   * canonical list in a fixed order, so almost every post ended on the same
+   * block — #ReinforcementLearning #RewardModeling #PostTraining — whether or
+   * not it discussed reward models at all. The body is now read too, and a
+   * canonical concept is only offered when the post actually talks about it.
+   */
+  const text = `${topic} ${body}`
 
   const seedFromTopic = contentWords(topic)
     .map((w) => w.replace(/-/g, ''))
@@ -737,8 +747,23 @@ export function deriveHashtags(topic: string, count = 4): string[] {
    * mentions is the best tag available, a strong single word is the safe
    * fallback, and a generated pair is the last resort rather than the first.
    */
-  const haystack = topic.toLowerCase().replace(/[^a-z0-9]/g, '')
-  const prose = topic.toLowerCase()
+  const haystack = text.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const prose = text.toLowerCase()
+
+  /** What a post has to say for each canonical tag to be about it. */
+  const cue: Record<string, RegExp> = {
+    ReinforcementLearning: /reinforcement learning|\brlhf\b|\brlvr\b|\brl\b/i,
+    RewardModeling: /reward model|reward signal|reward function|reward hacking|reward design/i,
+    PostTraining: /post-?training|fine-?tun|instruction tuning|\bsft\b/i,
+    AgenticAI: /\bagent(s|ic)?\b/i,
+    ModelEvaluation: /evaluat|benchmark|\beval(s)?\b|harness/i,
+    SyntheticData: /synthetic data|generated data/i,
+    LLMOps: /inference|serving|latency|in production|deploy/i,
+    AIAlignment: /\balign(ment|ed)?\b|preference/i,
+  }
+  const aboutIt = (tag: string): boolean => cue[tag]?.test(text) ?? false
+  // Single words too vague to be worth a tag slot on their own.
+  const WEAK = new Set(['agent', 'agents', 'model', 'models', 'eval', 'evals', 'data', 'learning', 'training', 'system', 'systems'])
 
   /*
    * A tag has to be about the subject, and "the subject" is a declared thing
@@ -762,11 +787,19 @@ export function deriveHashtags(topic: string, count = 4): string[] {
   for (const term of domainPhrases) {
     pool.push(term.split(/[\s-]+/).map((w) => pascal(w)).join(''))
   }
-  for (const w of seedFromTopic) if (w.length > 4 && isDomainWord(w)) pool.push(pascal(w))
-  // Canonical concepts before generated pairs: an on-brand tag the post did not
-  // literally contain beats a grammatical pair that means nothing (#ModelLearns).
+  // Canonical concepts the post discusses, in the words it uses for them.
+  for (const c of canonical) if (aboutIt(c)) pool.push(c)
+  for (const w of seedFromTopic) if (w.length > 4 && isDomainWord(w) && !WEAK.has(w)) pool.push(pascal(w))
+  // Then a generated pair, only when both of its words are domain vocabulary
+  // (#BuiltSynthetic and #YourModel are what the looser rule made); then, only
+  // to reach the minimum, the lab-wide tags that fit any post it publishes; and
+  // the remaining canonical concepts as the very last resort.
+  for (const phrase of phrases) {
+    const parts = words.filter((w) => phrase.includes(w))
+    if (parts.length >= 2 && parts.every((w) => isDomainWord(w))) pool.push(pascalPhrase(phrase, words))
+  }
+  pool.push('AIResearch', 'MachineLearning')
   for (const c of canonical) pool.push(c)
-  for (const phrase of phrases) pool.push(pascalPhrase(phrase, words))
 
   /*
    * A tag must not be a fragment of one already chosen.
@@ -795,6 +828,7 @@ export function deriveHashtags(topic: string, count = 4): string[] {
     const key = tag.toLowerCase()
     if (GENERIC_HASHTAGS.includes(key)) continue
     if (tag.length < 4) continue
+    if (WEAK.has(key)) continue
     if (subsumes(key)) continue
     taken.push(key)
     out.push(tag)
@@ -971,12 +1005,62 @@ export function enforceShortLines(
   return { body: rewritten.join('\n\n'), changed }
 }
 
+/*
+ * PLAIN PUBLISHABLE TEXT (caption-writing rule 3).
+ *
+ * Applied first and unconditionally, whatever wrote the text. Em dashes are
+ * removed on request of the brand team: " — " between clauses becomes a comma,
+ * a dash that closes a line becomes a full stop. An en dash inside a number
+ * range ("150–230") is left alone. Markdown bold and heading markers, section
+ * labels such as "Hook:" or "CTA:", and decorative Unicode bold/italic letters
+ * (which screen readers and search cannot read) are reduced to plain text.
+ */
+function toPlainText(text: string): { text: string; notes: string[] } {
+  const notes: string[] = []
+  let out = text
+
+  if (/[\u2014]|\s\u2013\s/.test(out)) {
+    out = out
+      .replace(/[ \t]*\u2014[ \t]*$/gm, '.')
+      .replace(/[ \t]*\u2014[ \t]*/g, ', ')
+      .replace(/[ \t]\u2013[ \t]/g, ', ')
+      .replace(/,[ \t]*([.,;:!?])/g, '$1')
+      .replace(/([.!?]),[ \t]/g, '$1 ')
+    notes.push('Removed em dashes.')
+  }
+
+  const unbolded = out.replace(/\*\*([^*\n]+)\*\*/g, '$1').replace(/__([^_\n]+)__/g, '$1').replace(/^#{1,6}\s+/gm, '')
+  if (unbolded !== out) {
+    out = unbolded
+    notes.push('Removed Markdown formatting.')
+  }
+
+  const unlabelled = out.replace(/^\s*(?:hook|body|context|problem|mechanism|implication|cta|close|closing(?: line)?)\s*:\s*/gim, '')
+  if (unlabelled !== out) {
+    out = unlabelled
+    notes.push('Removed section labels.')
+  }
+
+  const plainLetters = out.replace(/[\u{1D400}-\u{1D7FF}]/gu, (ch) => ch.normalize('NFKC'))
+  if (plainLetters !== out) {
+    out = plainLetters
+    notes.push('Replaced decorative Unicode letters with plain text.')
+  }
+
+  return { text: out, notes }
+}
+
 export function enforceBrandVoice(caption: string, topic: string): EnforceResult {
   const notes: string[] = []
   const rulesApplied = new Set<number>()
   const original = caption
 
-  let body = caption
+  const plain = toPlainText(caption)
+  let body = plain.text
+  if (plain.notes.length > 0) {
+    rulesApplied.add(3)
+    notes.push(...plain.notes)
+  }
 
   // Short-line layout, enforced mechanically because the model complies unevenly.
   const lines = enforceShortLines(body)
@@ -1322,7 +1406,7 @@ export function checkBrandCompliance(candidate: BrandCandidate): BrandCheck {
       detail:
         'The Ethara connection is framed as promotion ("at Ethara we are building…") rather than following from the evidence.',
       required_action:
-        'State what the work found and let the connection follow, or omit the connection — rule 8 allows it to be dropped.',
+        'Rewrite the Ethara line as a statement of the lab\u2019s focus and view (\u201cAt Ethara AI, we treat\u2026 / we hold that\u2026\u201d), drawn from the Brand Corpus entry for this domain.',
       mechanical: false,
     })
     raise('REVISE')
@@ -1898,33 +1982,39 @@ export interface PlatformVoice {
 }
 
 export const PLATFORM_VOICE: Record<Platform, PlatformVoice> = {
+  /*
+   * Aligned with caption-writing rules 2, 8 and 9. These entries used to forbid
+   * a question hook on LinkedIn (the skill permits one), cut Instagram to one or
+   * two sentences (the skill makes Instagram the LinkedIn prose, verbatim) and
+   * allow X one hashtag (the skill sets five to seven). The skill wins.
+   */
   linkedin: {
     register: 'Peer-to-peer and specific. Written for a practitioner who will recognise a shortcut.',
     structure:
-      'A claim, then the mechanism in short paragraphs, then the implication. Line breaks between every beat — a wall of text is not read.',
-    opens: 'A correction of something conventional practice gets wrong.',
-    avoid: 'Engagement bait, a question as the opening line, and any call to follow.',
+      'The most developed treatment: hook, the problem, the mechanism, an example or evidence, the implication, the Ethara connection, then the close. One complete thought per line, a blank line between thoughts.',
+    opens: 'A real limitation, trade-off or overlooked consequence of this subject. A question hook is allowed when the next lines start answering it.',
+    avoid: 'Engagement bait, a wall of text, restating the hook in the body, and any call to follow.',
   },
   instagram: {
-    register: 'Plainer and shorter. The image carries the argument; the caption anchors it.',
+    register: 'The same voice as LinkedIn: the Instagram caption is the LinkedIn prose.',
     structure:
-      'One or two sentences that state what the visual shows, then the single takeaway. No multi-paragraph exposition.',
-    opens: 'The concrete thing in the picture, named.',
-    avoid: 'Long reasoning chains, and text that only makes sense if the reader zooms into the creative.',
+      'The corresponding LinkedIn hook, body and close, unchanged, followed by exactly five hashtags and a final bracketed line of seven or eight keywords.',
+    opens: 'Exactly the LinkedIn hook.',
+    avoid: 'A shortened or re-paced rewrite, Instagram-only prose, and a second call to action such as "link in bio".',
   },
   x: {
-    register: 'Compressed and declarative. One idea, no preamble.',
+    register: 'The most compressed. One idea, no preamble.',
     structure:
-      'A single claim that stands alone. If it needs a second sentence, the second sentence is the evidence and nothing else.',
+      'A claim that stands alone, then only the evidence it needs. When the idea needs the space, a short thread, with the hashtags on the final post.',
     opens: 'The claim itself, first word.',
-    avoid: 'Threads implied but not written, hedging clauses, and hashtags beyond one.',
+    avoid: 'Hedging clauses, filler, and a thread implied but not written.',
   },
   facebook: {
-    register: 'Explanatory and unhurried. Assume less shared vocabulary than LinkedIn.',
+    register: 'Accessible and unhurried. Assume less shared vocabulary than LinkedIn.',
     structure:
-      'Say what happened, then why it matters, in complete sentences. Define the term the first time it appears.',
+      'What happens, why it matters and what it means in practice, in complete sentences. Define a term the first time it appears.',
     opens: 'The plain-language consequence, before the terminology.',
-    avoid: 'Unexplained jargon, and the assumption that the reader already follows the field.',
+    avoid: 'Unexplained jargon, and assuming the reader already follows the field.',
   },
 }
 

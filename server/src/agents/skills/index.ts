@@ -400,6 +400,18 @@ export interface CaptionPayload extends Record<string, unknown> {
   problem?: string
   explanation?: string
   close?: string
+  /**
+   * The "At Ethara AI, …" line: what the lab works on and how it thinks about
+   * this post's subject, drawn from one Brand Corpus domain entry. Sits between
+   * the explanation and the close.
+   */
+  etharaLine?: string
+  /** Set when the hook step wrote the whole post in one pass; later steps keep its parts. */
+  wholePost?: boolean
+  /** The one insight the whole post argues, identified before its hook (rule 1). */
+  centralClaim?: string
+  /** The Brand Corpus entry the Ethara line rests on. */
+  etharaEntryId?: string
   hashtagBlock?: string
   /** Instagram only: the bracketed 7–8 keyword footer. */
   keywordBlock?: string

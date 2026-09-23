@@ -9,6 +9,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ArrowRight, Check, ChevronLeft, ChevronRight, Clock, ExternalLink, FileText, Paperclip, RefreshCw, Send, Shuffle, Sparkles, X } from 'lucide-react'
+import { diffSentences, type SentenceRow } from '@shared/text-diff'
 import { useStore } from '../store'
 
 /* The right column — the live preview with the agent under it — is draggable
@@ -98,6 +99,8 @@ interface Bubble {
   id: string
   speaker: 'operator' | 'assistant'
   text: string
+  /** An operator bubble's bare instruction, to recognise it once the stored revision carries it. */
+  instruction?: string
 }
 
 /**
@@ -274,6 +277,9 @@ export function ReviewPanel() {
   const [target, setTarget] = useState<'caption' | 'image'>('caption')
   const [body, setBody] = useState('')
   const [bubbles, setBubbles] = useState<Bubble[]>([])
+  // Whether Regenerate is in flight. A caption plus its creative takes a
+  // minute or more, and a button that gives no sign of that reads as dead.
+  const [regenerating, setRegenerating] = useState<'caption' | null>(null)
   const [chatValue, setChatValue] = useState('')
 
   /*
@@ -386,7 +392,10 @@ export function ReviewPanel() {
   )
   const spine = stored.length > 0 ? stored : sessionSpine
   /** True when the thread on screen is this session's only and will not outlive it. */
-  const threadIsSessionOnly = stored.length === 0 && sessionSpine.length > 0
+  // Only when there is no API to store it. Connected, a first revision is
+  // session-only for the second before the refetch lands, and a warning that
+  // flashes on every first edit reads as a failure rather than a fact.
+  const threadIsSessionOnly = apiMode !== 'connected' && stored.length === 0 && sessionSpine.length > 0
 
   /*
    * A STEP CAN ONLY BE RETURNED TO IF IT HOLDS TEXT.
@@ -513,7 +522,13 @@ export function ReviewPanel() {
   )
   const isLeadership = user?.role === 'leadership'
 
-  const send = (instruction: string): void => {
+  /*
+   * `to` is passed explicitly by the caption starter chips. They switch the tab
+   * and send in the same click, and `target` read here would still be the tab
+   * that was open BEFORE the click — so "Shorten" pressed from the image tab
+   * went to the image agent and re-rendered the creative.
+   */
+  const send = (instruction: string, to: 'caption' | 'image' = target): void => {
     const text = instruction.trim()
     if (text.length === 0) return
 
@@ -527,12 +542,12 @@ export function ReviewPanel() {
 
     setBubbles((prev) => [
       ...prev,
-      { id: `q-${Date.now()}`, speaker: 'operator', text: `${text}${attachedNote}` },
+      { id: `q-${Date.now()}`, speaker: 'operator', text: `${text}${attachedNote}`, instruction: text },
     ])
     setChatValue('')
-    setThinking(target === 'caption' ? 'Rewriting draft…' : `Re-rendering with ${asset?.model ?? 'brand-svg'}…`)
+    setThinking(to === 'caption' ? 'Rewriting draft…' : `Re-rendering with ${asset?.model ?? 'brand-svg'}…`)
 
-    if (target === 'image') {
+    if (to === 'image') {
       void instructImage(idea.id, text, attached).then(() => {
         setThinking(null)
         setBubbles((prev) => [
@@ -898,7 +913,7 @@ export function ReviewPanel() {
                 <button
                   key={action.label}
                   type="button"
-                  onClick={() => { setTarget('caption'); send(action.instruction) }}
+                  onClick={() => { setTarget('caption'); send(action.instruction, 'caption') }}
                   className="rounded-full border border-line-strong px-3 py-1.5 text-[11.5px] text-ink-2 transition-colors hover:border-magenta/50 hover:text-magenta-ink"
                 >
                   {action.label}
@@ -906,10 +921,18 @@ export function ReviewPanel() {
               ))}
               <button
                 type="button"
-                onClick={() => void regenerateDraft(idea.id)}
-                className="ml-auto inline-flex items-center gap-1.5 rounded-[9px] border border-line-strong px-3 py-1.5 text-[11.5px] font-semibold text-ink transition-colors hover:border-accent"
+                disabled={regenerating !== null}
+                aria-busy={regenerating === 'caption'}
+                onClick={() => {
+                  setRegenerating('caption')
+                  // The whole post: a fresh caption and the creative drawn for
+                  // it. This is the post's one Regenerate — the preview has none.
+                  void regenerateDraft(idea.id, undefined, { withImage: true }).finally(() => setRegenerating(null))
+                }}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-[9px] border border-line-strong px-3 py-1.5 text-[11.5px] font-semibold text-ink transition-colors hover:border-accent disabled:cursor-wait disabled:opacity-60"
               >
-                <RefreshCw size={11} aria-hidden="true" /> Regenerate
+                <RefreshCw size={11} aria-hidden="true" className={regenerating === 'caption' ? 'animate-spin' : ''} />
+                {regenerating === 'caption' ? 'Regenerating…' : 'Regenerate'}
               </button>
             </div>
 
@@ -1075,28 +1098,18 @@ export function ReviewPanel() {
 
               {/* The creative's canvas and model are not printed here: the
                   picture above already shows what was rendered, and the model
-                  is chosen a few lines down. A creative that FELL BACK still
-                  says so — that is a fact about the image, not a caption. */}
-              <div
-                className="flex shrink-0 flex-wrap items-center gap-2"
-                /* Hidden rather than removed: a script has no creative, so
-                   "Regenerate" would render an asset nothing can publish. */
-                hidden={idea.content_format === 'short_form_script'}
-              >
-                {asset?.fallbackReason ? (
+                  is chosen in the Image tab. A creative that FELL BACK still
+                  says so — that is a fact about the image, not a caption.
+                  There is no Regenerate here: the image changes from the Image
+                  tab, so this column only ever shows the post. */}
+              {asset?.fallbackReason && idea.content_format !== 'short_form_script' ? (
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   <span title={asset.fallbackReason} className="mono inline-flex shrink-0 items-center gap-1.5 text-[10.5px] tracking-[0.08em] text-serious">
                     <span className="h-1 w-1 rounded-full bg-serious" aria-hidden="true" />
                     SVG FALLBACK
                   </span>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => void regenerateImage(idea.id)}
-                  className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-[9px] border border-line-strong px-3 py-1.5 text-[11.5px] font-semibold text-ink transition-colors hover:border-accent"
-                >
-                  <RefreshCw size={11} aria-hidden="true" /> Regenerate
-                </button>
-              </div>
+                </div>
+              ) : null}
             </section>
 
             {/* ── the agent ── */}
@@ -1150,16 +1163,6 @@ export function ReviewPanel() {
                   </div>
                 </div>
 
-                {/* The latest step on the spine, in one line. The whole spine
-                    is below, for anyone who wants to walk it. */}
-                {spine.length > 0 ? (
-                  <div className="relative flex shrink-0 items-center gap-2 text-[10.5px] text-ink-3">
-                    <span className="mono shrink-0 rounded-[6px] border border-magenta/35 px-1.5 py-px text-[9.5px] font-semibold text-magenta-ink">
-                      R{spine[spine.length - 1].revision}
-                    </span>
-                    <span className="min-w-0 truncate" title={spine[spine.length - 1].summary}>{spine[spine.length - 1].summary}</span>
-                  </div>
-                ) : null}
 
                 <div className="relative flex shrink-0 overflow-hidden rounded-[10px] border border-line-strong" role="group" aria-label="What an instruction changes">
                   {(['caption', 'image'] as const).map((t) => (
@@ -1271,12 +1274,37 @@ export function ReviewPanel() {
                       </div>
                     ))}
 
-                    {bubbles.filter((b) => b.speaker === 'assistant' && !spine.some((r) => r.summary === b.text)).map((bubble) => (
-                      <div key={bubble.id} className="flex gap-2.5" style={{ animation: 'eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
-                        <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] border border-line-strong text-[10.5px] text-ink-3">IM</span>
-                        <p className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-ink-2">{bubble.text}</p>
-                      </div>
-                    ))}
+                    {/*
+                      THE INSTRUCTION SHOWS THE MOMENT IT IS SENT.
+
+                      Only assistant bubbles used to render here; an instruction
+                      appeared once its revision was stored, so a slow rewrite
+                      left the operator looking at "Rewriting draft…" with no
+                      sign of what they had asked. Every bubble now renders in
+                      the order it happened, and one whose instruction or
+                      summary the stored thread already shows is dropped, so
+                      nothing appears twice once the refetch lands.
+                    */}
+                    {bubbles
+                      .filter((b) =>
+                        b.speaker === 'operator'
+                          ? !spine.some((r) => r.instruction === b.instruction)
+                          : !spine.some((r) => r.summary === b.text),
+                      )
+                      .map((bubble) =>
+                        bubble.speaker === 'operator' ? (
+                          <div key={bubble.id} className="flex justify-end" style={{ animation: 'eth-rise 280ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
+                            <p className="max-w-[86%] whitespace-pre-line rounded-[10px] rounded-br-[3px] border border-hud-strong bg-accent/12 px-2.5 py-1.5 text-[11.5px] leading-relaxed text-ink">
+                              {bubble.text}
+                            </p>
+                          </div>
+                        ) : (
+                          <div key={bubble.id} className="flex gap-2.5" style={{ animation: 'eth-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both' }}>
+                            <AssistantCore state="dormant" size={18} className="mt-0.5 shrink-0" />
+                            <p className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-ink-2">{bubble.text}</p>
+                          </div>
+                        ),
+                      )}
 
                     {thinking ? (
                       <div className="flex gap-2.5">
@@ -1769,231 +1797,112 @@ function ScoreBar({ label, value, delay }: { label: string; value: number; delay
 }
 
 /**
- * What each revision changed, as a list rather than a character diff.
+ * THIS VERSION AGAINST THE ONE BEFORE IT — and nothing else.
  *
- * A real inline diff needs the before and after text aligned token by token;
- * what is shown here is what was measured — the instruction, the counted
- * deltas, and the agent's own account. Claiming more than that would be a
- * picture of a diff rather than one.
- */
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   WORD DIFF
-
-   Written here rather than pulled in: a diff library is a large dependency for
-   one panel, and the thing it would compute is ninety lines of standard LCS.
-   Keeping it local also keeps it deterministic, which matters because a
-   revision spine is re-rendered from stored bodies and must not shift between
-   renders.
-
-   WORDS, NOT CHARACTERS. The instructions here are editorial — "make it more
-   technical", "shorten it" — and rewrite phrases rather than letters. A
-   character diff of a rewritten sentence marks a spray of single letters inside
-   words that both versions share, which is unreadable. Whitespace is carried on
-   the token so the rebuilt text keeps its own spacing.
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-export type DiffOp = { kind: 'same' | 'add' | 'remove'; text: string }
-
-/** Splits into words, each keeping the whitespace that followed it. */
-function tokenise(text: string): string[] {
-  return text.match(/\S+\s*/g) ?? []
-}
-
-/**
- * Longest common subsequence over word tokens.
+ * The panel used to list every revision since the first draft, each diffed
+ * word by word, so the one comparison anyone opens it for — what did the last
+ * change do — sat at the bottom of a long page of struck-through fragments.
+ * It now shows exactly two versions: the current caption and the caption
+ * before it, lined up sentence by sentence (`diffSentences`). Kept sentences
+ * are plain, a reworded sentence marks only the words that changed, and a
+ * removed or added sentence is shown on its own side.
  *
- * The table is O(n·m); a caption is a few hundred words, so this is far below
- * anything worth optimising. Bodies longer than `MAX_TOKENS` skip the table and
- * report themselves as a wholesale replacement rather than freezing the panel.
+ * "Before it" is the previous CAPTION revision with text: an image turn, or an
+ * old entry recorded without a body, changed no caption and would otherwise
+ * make the whole post read as newly added.
  */
-const MAX_TOKENS = 4000
-
-export function diffWords(before: string, after: string): DiffOp[] {
-  const a = tokenise(before)
-  const b = tokenise(after)
-
-  if (a.length + b.length > MAX_TOKENS) {
-    return [
-      { kind: 'remove', text: before },
-      { kind: 'add', text: after },
-    ]
-  }
-
-  // lcs[i][j] = length of the longest common subsequence of a[i..] and b[j..]
-  const lcs: number[][] = Array.from({ length: a.length + 1 }, () =>
-    new Array<number>(b.length + 1).fill(0),
-  )
-  for (let i = a.length - 1; i >= 0; i -= 1) {
-    for (let j = b.length - 1; j >= 0; j -= 1) {
-      lcs[i]![j] =
-        a[i]!.trim() === b[j]!.trim()
-          ? (lcs[i + 1]![j + 1] ?? 0) + 1
-          : Math.max(lcs[i + 1]![j] ?? 0, lcs[i]![j + 1] ?? 0)
-    }
-  }
-
-  // Walk the table, coalescing runs so the output is spans rather than words.
-  const ops: DiffOp[] = []
-  const push = (kind: DiffOp['kind'], text: string): void => {
-    const last = ops[ops.length - 1]
-    if (last && last.kind === kind) last.text += text
-    else ops.push({ kind, text })
-  }
-
-  let i = 0
-  let j = 0
-  while (i < a.length && j < b.length) {
-    if (a[i]!.trim() === b[j]!.trim()) {
-      /*
-       * The AFTER token, not the before one.
-       *
-       * Tokens carry the whitespace that followed them, and equality is tested
-       * on the trimmed word — so "short" (end of the old text) matches
-       * "short " (mid-sentence in the new one). Emitting the before form there
-       * dropped the space, and the rendered result read "shortand".
-       *
-       * The after side is what the panel presents as the current caption, so
-       * its spacing is the authoritative one.
-       */
-      push('same', b[j]!)
-      i += 1
-      j += 1
-    } else if ((lcs[i + 1]![j] ?? 0) >= (lcs[i]![j + 1] ?? 0)) {
-      push('remove', a[i]!)
-      i += 1
-    } else {
-      push('add', b[j]!)
-      j += 1
-    }
-  }
-  while (i < a.length) { push('remove', a[i]!); i += 1 }
-  while (j < b.length) { push('add', b[j]!); j += 1 }
-
-  return ops
-}
-
-/** One revision, rendered as before → after with the changes marked. */
-function RevisionDiff({ before, after }: { before: string; after: string }) {
-  const ops = useMemo(() => diffWords(before, after), [before, after])
-  const [side, setSide] = useState(false)
-
-  const added = ops.filter((o) => o.kind === 'add').reduce((n, o) => n + o.text.trim().length, 0)
-  const removed = ops.filter((o) => o.kind === 'remove').reduce((n, o) => n + o.text.trim().length, 0)
-
-  if (added === 0 && removed === 0) {
-    return (
-      <p className="mt-2 text-[11.5px] text-ink-3">
-        The text is identical. The instruction was recorded but changed nothing.
-      </p>
-    )
-  }
-
-  return (
-    <div className="mt-2">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="mono text-[10px] tracking-[0.08em] text-good-ink">+{added}</span>
-        <span className="mono text-[10px] tracking-[0.08em] text-critical-ink">−{removed}</span>
-        {/* Unified reads better for a rewritten sentence; side-by-side is the
-            one people reach for when a whole paragraph moved. Both, cheaply. */}
-        <button
-          type="button"
-          onClick={() => setSide((s) => !s)}
-          className="mono ml-auto rounded-[5px] border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
-        >
-          {side ? 'Unified' : 'Side by side'}
-        </button>
-      </div>
-
-      {side ? (
-        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
-          <div>
-            <p className="mono mb-1 text-[9.5px] uppercase tracking-[0.1em] text-ink-3">Before</p>
-            <p className="whitespace-pre-wrap break-words rounded-[8px] border border-line bg-page px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
-              {ops.filter((o) => o.kind !== 'add').map((o, n) =>
-                o.kind === 'remove' ? (
-                  <mark key={n} className="rounded-[3px] bg-critical/25 px-0.5 text-ink line-through decoration-critical-ink/60">{o.text}</mark>
-                ) : (
-                  <span key={n}>{o.text}</span>
-                ),
-              )}
-            </p>
-          </div>
-          <div>
-            <p className="mono mb-1 text-[9.5px] uppercase tracking-[0.1em] text-ink-3">After</p>
-            <p className="whitespace-pre-wrap break-words rounded-[8px] border border-line bg-page px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
-              {ops.filter((o) => o.kind !== 'remove').map((o, n) =>
-                o.kind === 'add' ? (
-                  <mark key={n} className="rounded-[3px] bg-good/25 px-0.5 text-ink">{o.text}</mark>
-                ) : (
-                  <span key={n}>{o.text}</span>
-                ),
-              )}
-            </p>
-          </div>
-        </div>
-      ) : (
-        <p className="whitespace-pre-wrap break-words rounded-[8px] border border-line bg-page px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
-          {ops.map((op, n) =>
-            op.kind === 'add' ? (
-              <mark key={n} className="rounded-[3px] bg-good/25 px-0.5 text-ink">{op.text}</mark>
-            ) : op.kind === 'remove' ? (
-              <mark key={n} className="rounded-[3px] bg-critical/20 px-0.5 text-ink-3 line-through decoration-critical-ink/60">{op.text}</mark>
-            ) : (
-              <span key={n}>{op.text}</span>
-            ),
-          )}
-        </p>
-      )}
-    </div>
-  )
-}
-
 function DiffView({ spine }: { spine: Revision[] }) {
-  if (spine.length <= 1) {
+  const captions = spine.filter((rev) => rev.target !== 'image' && rev.body.trim().length > 0)
+  const current = captions[captions.length - 1]
+  const previous = captions[captions.length - 2]
+  const rows = useMemo(
+    () => (current && previous ? diffSentences(previous.body, current.body) : []),
+    [current, previous],
+  )
+
+  if (!current || !previous) {
     return (
       <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">
-        Only the first draft exists, so there is nothing to compare. Ask for a change and each
-        revision will be listed here with what it altered.
+        Only one version of the caption exists, so there is nothing to compare yet. Ask for a change
+        and this shows the new caption against the one before it.
       </p>
     )
   }
+
+  const count = (kind: SentenceRow['kind']): number => rows.filter((row) => row.kind === kind).length
+  const changed = count('changed')
+  const removedN = count('removed')
+  const addedN = count('added')
+  const summary = [
+    changed > 0 ? `${changed} reworded` : '',
+    addedN > 0 ? `${addedN} added` : '',
+    removedN > 0 ? `${removedN} removed` : '',
+    `${count('same')} unchanged`,
+  ].filter(Boolean)
+
+  const cell = 'whitespace-pre-wrap break-words rounded-[8px] px-3 py-2 text-[12px] leading-relaxed'
+  const empty = `${cell} border border-dashed border-line text-[10.5px] italic text-ink-3`
+
   return (
-    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-      {spine.slice(1).map((rev, index) => (
-        <div key={rev.id} className="rounded-lg border border-line-strong bg-surface px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <span className="mono text-[10.5px] tracking-[0.12em] text-accent-bright">R{rev.revision}</span>
-            <span className="mono ml-auto text-[11px] text-ink-3">
-              {rev.charDelta > 0 ? '+' : ''}{rev.charDelta} chars
-              {rev.paraDelta !== 0 ? ` · ${rev.paraDelta > 0 ? '+' : ''}${rev.paraDelta} para` : ''}
-            </span>
-          </div>
-          {rev.instruction ? <p className="mt-1.5 text-[12px] font-medium text-ink">“{rev.instruction}”</p> : null}
-          <p className="mt-1 text-[11.5px] leading-relaxed text-ink-2">{rev.summary}</p>
+    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+      <div className="rounded-lg border border-line-strong bg-surface px-3 py-2.5">
+        <p className="text-[12px] text-ink">
+          <span className="mono text-[10.5px] tracking-[0.1em] text-ink-3">R{previous.revision}</span>
+          <span className="mx-1.5 text-ink-3">→</span>
+          <span className="mono text-[10.5px] tracking-[0.1em] text-accent-bright">R{current.revision}</span>
+          {current.instruction ? <span className="ml-2 font-medium">“{current.instruction}”</span> : null}
+        </p>
+        <p className="mt-1 text-[11.5px] text-ink-3">
+          {changed + removedN + addedN === 0 ? 'The text is identical — this change altered nothing.' : `${summary.join(' · ')} sentences`}
+        </p>
+      </div>
 
-          {/*
-            THE ACTUAL CHANGE, NOT A DESCRIPTION OF IT.
+      {changed + removedN + addedN === 0 ? null : (
+        <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5">
+          <p className="mono text-[9.5px] uppercase tracking-[0.12em] text-ink-3">Previous · R{previous.revision}</p>
+          <p className="mono text-[9.5px] uppercase tracking-[0.12em] text-accent-bright">Current · R{current.revision}</p>
 
-            This panel stated "+357 chars · +1 para" and the instruction that
-            caused it, which says a change happened without showing any of it.
-            The reason to open a diff at all is to read the words that moved, so
-            they are rendered: the previous revision's body against this one's,
-            additions marked and deletions struck through.
-
-            `spine[index]` is the PREVIOUS revision — `spine.slice(1)` shifted
-            the list by one, so the element at the same index in the unsliced
-            spine is the one before this.
-          */}
-          {rev.target === 'image' ? (
-            <p className="mt-2 text-[11.5px] text-ink-3">
-              This turn changed the creative, not the caption, so there is no text to compare.
-            </p>
-          ) : (
-            <RevisionDiff before={spine[index]?.body ?? ''} after={rev.body} />
+          {rows.map((row, n) =>
+            row.kind === 'same' ? (
+              <div key={n} className="contents">
+                <p className={`${cell} text-ink-3`}>{row.text}</p>
+                <p className={`${cell} text-ink-3`}>{row.text}</p>
+              </div>
+            ) : row.kind === 'changed' ? (
+              <div key={n} className="contents">
+                <p className={`${cell} border border-critical/25 bg-critical/[0.06] text-ink-2`}>
+                  {row.words.filter((op) => op.kind !== 'add').map((op, k) =>
+                    op.kind === 'remove' ? (
+                      <mark key={k} className="rounded-[3px] bg-critical/25 px-0.5 text-ink line-through decoration-critical-ink/60">{op.text}</mark>
+                    ) : (
+                      <span key={k}>{op.text}</span>
+                    ),
+                  )}
+                </p>
+                <p className={`${cell} border border-good/25 bg-good/[0.06] text-ink-2`}>
+                  {row.words.filter((op) => op.kind !== 'remove').map((op, k) =>
+                    op.kind === 'add' ? (
+                      <mark key={k} className="rounded-[3px] bg-good/25 px-0.5 text-ink">{op.text}</mark>
+                    ) : (
+                      <span key={k}>{op.text}</span>
+                    ),
+                  )}
+                </p>
+              </div>
+            ) : row.kind === 'removed' ? (
+              <div key={n} className="contents">
+                <p className={`${cell} border border-critical/30 bg-critical/[0.12] text-ink line-through decoration-critical-ink/50`}>{row.before}</p>
+                <p className={empty}>removed</p>
+              </div>
+            ) : (
+              <div key={n} className="contents">
+                <p className={empty}>new</p>
+                <p className={`${cell} border border-good/30 bg-good/[0.12] text-ink`}>{row.after}</p>
+              </div>
+            ),
           )}
         </div>
-      ))}
+      )}
     </div>
   )
 }

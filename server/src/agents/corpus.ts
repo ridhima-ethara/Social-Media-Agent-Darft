@@ -501,6 +501,42 @@ export function planningStart(now: Date = new Date()): Date {
   return monday.getTime() > today.getTime() ? monday : today
 }
 
+/**
+ * The first day PAST the planning window — nothing may be dated on or after it.
+ *
+ * A horizon of N days used to be counted from `planningStart()`, which is today
+ * once the week is underway. Counted from a Wednesday, fourteen days ran into
+ * the Tuesday of a third calendar week, and the calendar rendered that week.
+ * So the horizon also stops at the week boundary it reaches: fourteen days is
+ * this week and next, never a third.
+ */
+export function planningEnd(horizonDays: number, now: Date = new Date()): Date {
+  const days = Math.max(1, Math.round(horizonDays))
+  const byDays = addDays(planningStart(now), days)
+  const byWeeks = addDays(startOfWeek(now), Math.ceil(days / 7) * 7)
+  return byDays.getTime() < byWeeks.getTime() ? byDays : byWeeks
+}
+
+/** Whether `dateIso` falls inside the planning window of `horizonDays`. */
+export function inPlanningWindow(dateIso: string, horizonDays: number, now: Date = new Date()): boolean {
+  const t = new Date(`${dateIso.slice(0, 10)}T12:00:00Z`).getTime()
+  return t >= planningStart(now).getTime() && t < planningEnd(horizonDays, now).getTime()
+}
+
+/**
+ * The postable days of the planning window, in order — weekends dropped when
+ * `avoidWeekends` is on. Never empty: a window with no weekday falls back to
+ * every day in it.
+ */
+export function planningDays(horizonDays: number, avoidWeekends: boolean, now: Date = new Date()): string[] {
+  const start = planningStart(now)
+  const end = planningEnd(horizonDays, now)
+  const all: string[] = []
+  for (let d = start; d.getTime() < end.getTime(); d = addDays(d, 1)) all.push(isoDate(d))
+  const postable = avoidWeekends ? all.filter((day) => !isWeekend(day)) : all
+  return postable.length > 0 ? postable : all
+}
+
 export function startOfWeek(d: Date): Date {
   const out = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
   const day = out.getUTCDay()

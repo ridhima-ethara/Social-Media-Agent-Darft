@@ -63,6 +63,14 @@ interface RequestOptions {
   timeoutMs?: number
 }
 
+/*
+ * How long the browser waits on a route that writes or renders with a model.
+ * A caption plus its creative on Gemini 2.5 Pro can run past two minutes; the
+ * server keeps the connection alive with a heartbeat meanwhile, so the only
+ * limit that matters is this one.
+ */
+const LONG_MS = 300_000
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, timeoutMs = 30_000 } = options
 
@@ -90,6 +98,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
         ? String((parsed as { error: unknown }).error)
         : `Request failed with ${response.status}.`
     throw new Error(message)
+  }
+
+  // A slow route that kept the connection alive with a heartbeat has already
+  // committed a 200, so a failure after that arrives in the body instead.
+  if (parsed !== null && typeof parsed === 'object' && (parsed as { failed?: unknown }).failed === true) {
+    throw new Error(String((parsed as { error?: unknown }).error ?? 'The request failed.'))
   }
 
   return parsed as T
@@ -282,11 +296,15 @@ export const api = {
 
   /* ── Ideas and content ─────────────────────────────────────────────────── */
 
+  /** The published post's own page on the platform, when the platform has returned one. */
+  postLink: (id: string): Promise<{ url: string | null; status: string; reason: string | null }> =>
+    request(`/posts/${id}/link`),
+
   generateDraft: (
     id: string,
     body: { platform?: Platform; withImage?: boolean } = {},
   ): Promise<{ draft?: Draft; media?: MediaAsset; [key: string]: unknown }> =>
-    request(`/ideas/${id}/draft`, { method: 'POST', body, timeoutMs: 120_000 }),
+    request(`/ideas/${id}/draft`, { method: 'POST', body, timeoutMs: LONG_MS }),
 
   renderImage: (
     id: string,
@@ -298,7 +316,7 @@ export const api = {
       references?: ModelReference[]
     },
   ): Promise<{ media: MediaAsset }> =>
-    request(`/ideas/${id}/image`, { method: 'POST', body, timeoutMs: 120_000 }),
+    request(`/ideas/${id}/image`, { method: 'POST', body, timeoutMs: LONG_MS }),
 
   instruct: (
     id: string,
@@ -316,7 +334,7 @@ export const api = {
     compliance: unknown
     preference: { title: string; content: string } | null
     skills: unknown[]
-  }> => request(`/ideas/${id}/instruct`, { method: 'POST', body, timeoutMs: 120_000 }),
+  }> => request(`/ideas/${id}/instruct`, { method: 'POST', body, timeoutMs: LONG_MS }),
 
   /**
    * Returns the caption to the text it held at an earlier step on the thread.
@@ -409,7 +427,7 @@ export const api = {
     request(`/ideas/${ideaId}/hooks`),
 
   generateHooks: (ideaId: string): Promise<{ hooks: HookVariant[]; note?: string }> =>
-    request(`/ideas/${ideaId}/hooks`, { method: 'POST', body: {}, timeoutMs: 180_000 }),
+    request(`/ideas/${ideaId}/hooks`, { method: 'POST', body: {}, timeoutMs: LONG_MS }),
 
   // Selects one and unselects the rest. The others are kept — "the four we did
   // not pick" is evidence about what this account decided.
@@ -419,7 +437,7 @@ export const api = {
   writeScript: (
     ideaId: string,
   ): Promise<{ script: string; source: string; model: string; hooks: unknown[] }> =>
-    request(`/ideas/${ideaId}/script`, { method: 'POST', body: {}, timeoutMs: 180_000 }),
+    request(`/ideas/${ideaId}/script`, { method: 'POST', body: {}, timeoutMs: LONG_MS }),
 
   refreshAnalytics: (body: { platform?: Platform; month?: string } = {}): Promise<
     Record<string, unknown>

@@ -89,6 +89,16 @@ type FeedRow =
       reason: string | null
     }
 
+/** A row that reports extraction work — not a lane that came back empty, nor a warning. */
+function isExtractionRow(row: FeedRow): boolean {
+  if (row.kind === 'note') return row.tone !== 'warn'
+  if (row.kind === 'lane') {
+    if (row.status === 'running') return true
+    return row.status === 'ok' && (row.captured ?? row.kept ?? 0) > 0
+  }
+  return true
+}
+
 const BUCKET_META: Array<{ id: ValidationVerdict; label: string; tone: string }> = [
   { id: 'validated', label: 'Validated', tone: 'var(--color-good)' },
   { id: 'needs_review', label: 'Needs review', tone: 'var(--color-warn)' },
@@ -396,7 +406,15 @@ export function PipelineTheater() {
     return () => window.removeEventListener('keydown', onKey)
   }, [theaterOpen, closeTheater, reportOpen])
 
-  const rows = live ? liveRows : script.slice(0, revealed)
+  /*
+   * THE FEED SHOWS WHAT WAS EXTRACTED, NOT WHAT WAS NOT.
+   *
+   * A lane that came back empty and a stage's warning note are diagnostics, and
+   * in this column they read as the run failing even when every other lane
+   * delivered. They are dropped here — before filtering and paging, so the
+   * pager counts only what is shown. The run report still carries them.
+   */
+  const rows = (live ? liveRows : script.slice(0, revealed)).filter(isExtractionRow)
 
   /*
    * THE FEED FOLLOWS THE RUN.

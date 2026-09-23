@@ -13,7 +13,7 @@
  */
 
 import { useState } from 'react'
-import { Check, Loader, Volume2, X } from 'lucide-react'
+import { Check, ChevronDown, Loader, Volume2, X } from 'lucide-react'
 import { RiskPill, timeAgo } from '../ui'
 import { AssistantCore } from './core'
 import type { AssistantTurn, PlanStep } from '../../types'
@@ -70,6 +70,59 @@ export function WorkStep({ step }: { step: PlanStep }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   THE OUTCOME LINE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/**
+ * "2026-09-27" → "Sun 27 Sep". A person reads a weekday, not an ISO date.
+ * Spelled out rather than `toLocaleDateString`, whose en-GB month is "Sept".
+ */
+function humanDate(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  const date = new Date(Date.UTC(y ?? 0, (m ?? 1) - 1, d ?? 1))
+  if (Number.isNaN(date.getTime())) return iso
+  return `${WEEKDAY[date.getUTCDay()]} ${date.getUTCDate()} ${MONTH[date.getUTCMonth()]}`
+}
+
+function humanDates(text: string): string {
+  return text.replace(/\b\d{4}-\d{2}-\d{2}\b/g, humanDate)
+}
+
+/**
+ * The move tool's sentence — `“Title” is now LinkedIn on 2026-09-27 at 10:30 AM.`
+ * — read back into its parts, so the reply can show the post and where it went
+ * as two clean lines. Any other sentence is shown as written.
+ */
+function parseMove(line: string): { title: string; when: string; platform: string } | null {
+  const match = /^“(.+)” is now (.+?) on (\d{4}-\d{2}-\d{2}) at (.+?)\.?$/.exec(line.trim())
+  if (!match) return null
+  const [, title, platform, date, time] = match
+  return { title: title ?? '', platform: platform ?? '', when: `${humanDate(date ?? '')} · ${time ?? ''}` }
+}
+
+/**
+ * What changed, in one or two lines — the part the operator asked for.
+ *
+ * A reply used to open with every tool's finding, then the model's paraphrase
+ * of those findings, then the plan: three tellings of one move, the first of
+ * which could be a read step's "Nothing matches that" sitting above the move
+ * that then succeeded. For a turn that changed something, the summaries of the
+ * steps that WROTE are the outcome; the reads that led there are detail.
+ * A turn that only read has no such step, and its answer is the narration.
+ */
+function outcomeOf(turn: AssistantTurn, steps: PlanStep[]): { kind: 'done' | 'answer' | 'failed'; lines: string[] } {
+  if (turn.status === 'failed') return { kind: 'failed', lines: [turn.narration ?? ''] }
+  const writes = steps.filter((s) => s.status === 'completed' && s.risk !== 'safe' && s.summary)
+  if (writes.length > 0) {
+    return { kind: 'done', lines: [...new Set(writes.map((s) => s.summary as string))] }
+  }
+  return { kind: 'answer', lines: [humanDates(turn.narration ?? '')] }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    THE EXCHANGE
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -97,12 +150,18 @@ export function Exchange({
   // The work is what the operator watches while it runs, and what they can
   // check afterwards. Once the answer is in, it folds beneath the answer.
   const [showWork, setShowWork] = useState(!finished)
+  // A live turn starts unfinished with its work open; when the answer lands the
+  // work folds away, exactly as it is on a turn reloaded after the fact.
+  // Adjusted during render rather than in an effect, so there is no frame in
+  // which the finished answer shows with its work still open.
+  const [wasFinished, setWasFinished] = useState(finished)
+  if (finished !== wasFinished) {
+    setWasFinished(finished)
+    if (finished) setShowWork(false)
+  }
   // The operator's own row carries the question and nothing else while a
   // conversation is live; the answer is the assistant's row that follows it.
   const questionOnly = turn.speaker === 'operator' && !turn.narration && !turn.plan && steps.length === 0
-  // What the tools actually found, in their own words — the evidence the
-  // prose is a reading of. Shown first, because it is the part that is measured.
-  const evidence = [...new Set(steps.filter((s) => s.status === 'completed' && s.summary).map((s) => s.summary as string))]
 
   return (
     <li className="anim-fade-up space-y-2">
@@ -139,54 +198,100 @@ export function Exchange({
         <AssistantCore
           state={running ? 'working' : awaiting ? 'attention' : 'dormant'}
           size={18}
-          className="mt-0.5 shrink-0"
+          className="mt-2.5 shrink-0"
         />
 
         <div className="min-w-0 flex-1 space-y-1.5">
-          {/* The answer, first, once there is one. */}
-          {turn.narration && finished ? (
-            <div className="group rounded-[10px] border border-line-strong bg-surface px-3 py-2.5">
-              {evidence.length > 0 ? (
-                <>
-                  <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">What the tools found</p>
-                  <ul className="mt-1 space-y-1">
-                    {evidence.map((line) => (
-                      <li key={line} className="flex gap-2 text-[12.5px] leading-relaxed text-ink">
-                        <span className="mt-[9px] h-[3px] w-[3px] shrink-0 rounded-full bg-accent" aria-hidden="true" />
-                        <span className="min-w-0">{line}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  <p className="mono mt-2.5 text-[10.5px] uppercase tracking-[0.12em] text-ink-3">Ethara’s reading</p>
-                </>
-              ) : (
-                <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">Answer</p>
-              )}
-              <p className={`mt-1 whitespace-pre-wrap leading-relaxed ${evidence.length > 0 ? 'text-[12px] text-ink-2' : 'text-[12.5px] text-ink'}`}>{turn.narration}</p>
-              <div className="mt-1.5 flex items-center gap-3">
-                {steps.length > 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => setShowWork((v) => !v)}
-                    aria-expanded={showWork}
-                    className="mono text-[11px] uppercase tracking-[0.1em] text-ink-3 transition-colors hover:text-ink"
-                  >
-                    {showWork ? 'hide the work' : `how I got there · ${steps.length} step${steps.length === 1 ? '' : 's'}`}
-                  </button>
+          {/* The outcome, first, once there is one. The explanation and the
+              steps behind it are one tap away rather than stacked on top. */}
+          {turn.narration && finished ? (() => {
+            const outcome = outcomeOf(turn, steps)
+            const hasDetail = steps.length > 0 || outcome.kind === 'done'
+            const frame =
+              outcome.kind === 'done'
+                ? 'border-good/25 bg-good/[0.05]'
+                : outcome.kind === 'failed'
+                  ? 'border-critical/35 bg-critical/[0.05]'
+                  : 'border-line-strong bg-surface'
+            return (
+              <div className={`rounded-[12px] border px-3 py-2.5 ${frame}`}>
+                {outcome.kind === 'answer' ? (
+                  <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink">{humanDates(outcome.lines[0] ?? '')}</p>
+                ) : (
+                  <>
+                    <p className={`flex items-center gap-1.5 text-[11.5px] font-semibold ${outcome.kind === 'done' ? 'text-good-ink' : 'text-critical-ink'}`}>
+                      <span
+                        className={`anim-pop-in flex h-4 w-4 shrink-0 items-center justify-center rounded-full ${
+                          outcome.kind === 'done' ? 'bg-good/20' : 'bg-critical/20'
+                        }`}
+                        aria-hidden="true"
+                      >
+                        {outcome.kind === 'done' ? <Check size={10} strokeWidth={3.2} /> : <X size={10} strokeWidth={3.2} />}
+                      </span>
+                      {outcome.kind === 'done' ? 'Done' : 'Not done'}
+                    </p>
+                    <ul className="mt-1.5 space-y-2">
+                      {outcome.lines.map((line) => {
+                        const move = parseMove(line)
+                        return (
+                          <li key={line} className="min-w-0">
+                            {move ? (
+                              <>
+                                <p className="text-[12.5px] font-medium leading-snug text-ink">{move.title}</p>
+                                <p className="mt-0.5 text-[11.5px] leading-snug text-ink-3">
+                                  Moved to <span className="text-ink-2">{move.when}</span> · {move.platform}
+                                </p>
+                              </>
+                            ) : (
+                              <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-ink-2">{humanDates(line)}</p>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </>
+                )}
+
+                {hasDetail || onSpeak ? (
+                  <div className="mt-2 flex items-center gap-3">
+                    {hasDetail ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowWork((v) => !v)}
+                        aria-expanded={showWork}
+                        className="inline-flex items-center gap-0.5 text-[10.5px] text-ink-3 transition-colors hover:text-ink-2"
+                      >
+                        {showWork ? 'Hide details' : 'Details'}
+                        <ChevronDown
+                          size={11}
+                          aria-hidden="true"
+                          className={`transition-transform duration-[var(--dur-fast)] ${showWork ? 'rotate-180' : ''}`}
+                        />
+                      </button>
+                    ) : null}
+                    {onSpeak ? (
+                      <button
+                        type="button"
+                        onClick={() => onSpeak(turn.narration ?? '')}
+                        aria-label="Speak this"
+                        className="inline-flex items-center gap-1 text-[10.5px] text-ink-3 transition-colors hover:text-ink-2"
+                      >
+                        <Volume2 size={11} /> Speak
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
-                {onSpeak ? (
-                  <button
-                    type="button"
-                    onClick={() => onSpeak(turn.narration ?? '')}
-                    aria-label="Speak this"
-                    className="inline-flex items-center gap-1 text-[10px] text-ink-3 transition-colors hover:text-ink-2"
-                  >
-                    <Volume2 size={11} /> Speak
-                  </button>
+
+                {/* The model's own telling of it, for a turn whose outcome line
+                    came from the steps. Detail, not headline. */}
+                {showWork && outcome.kind === 'done' ? (
+                  <p className="mt-2 border-t border-line pt-2 text-[11.5px] leading-relaxed text-ink-3">
+                    {humanDates(turn.narration)}
+                  </p>
                 ) : null}
               </div>
-            </div>
-          ) : null}
+            )
+          })() : null}
 
           {turn.plan && (showWork || !finished) ? (
             <div className="rounded-xl border border-line bg-surface-2 px-2.5 py-2">

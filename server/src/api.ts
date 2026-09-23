@@ -107,6 +107,7 @@ import {
   setTrackedAccountActive,
   setVoiceProfileActive,
   upsertTrackedAccount,
+  getPost,
 } from './db/repo'
 import {
   conversationTranscript,
@@ -184,6 +185,55 @@ function route(handler: Handler) {
       const message = error instanceof Error ? error.message : String(error)
       const status = error instanceof HttpError ? error.status : 500
       if (!res.headersSent) res.status(status).json({ error: message })
+    }
+  }
+}
+
+/*
+ * THE HEARTBEAT FOR A SLOW ROUTE.
+ *
+ * Writing a caption and rendering its creative takes one to two minutes. The
+ * public domain sits behind an nginx whose read timeout is sixty seconds, so a
+ * Regenerate click was cut off with a 504 while the server was still writing —
+ * the button looked dead, and the local stand-in draft was all that remained.
+ *
+ * A route that answers inside the first beat responds exactly as `route` does.
+ * One that runs longer commits a 200 and writes a single space every beat:
+ * whitespace before a JSON document is still valid JSON, and each byte resets
+ * the proxy's read timer. An error after that point cannot change the status,
+ * so it is written as `{ failed: true, error }`, which the client's `request()`
+ * treats exactly like a non-2xx answer.
+ */
+const HEARTBEAT_MS = 15_000
+
+function longRoute(handler: Handler) {
+  return async (req: Request, res: Response): Promise<void> => {
+    let committed = false
+    const beat = setInterval(() => {
+      if (res.writableEnded) return
+      if (!committed) {
+        committed = true
+        res.status(200).setHeader('Content-Type', 'application/json; charset=utf-8')
+        // Proxies that buffer would hold the beats back; this asks them not to.
+        res.setHeader('X-Accel-Buffering', 'no')
+      }
+      res.write(' ')
+    }, HEARTBEAT_MS)
+
+    try {
+      const workspaceId = await currentWorkspaceId()
+      const result = await handler(req, res, workspaceId)
+      clearInterval(beat)
+      if (res.writableEnded) return
+      if (committed) res.end(JSON.stringify(result ?? { ok: true }))
+      else if (!res.headersSent) res.json(result ?? { ok: true })
+    } catch (error) {
+      clearInterval(beat)
+      const message = error instanceof Error ? error.message : String(error)
+      const status = error instanceof HttpError ? error.status : 500
+      if (res.writableEnded) return
+      if (committed) res.end(JSON.stringify({ failed: true, status, error: message }))
+      else if (!res.headersSent) res.status(status).json({ error: message })
     }
   }
 }
@@ -393,6 +443,35 @@ export function createApiRouter(): Router {
    * card. It is not built yet, and pretending otherwise would be worse than
    * saying so here.
    */
+  /*
+   * WHERE A PUBLISHED POST LIVES ON THE PLATFORM.
+   *
+   * Buffer's receipt is its own id, not the platform's; the permalink appears
+   * on Buffer's post record once the platform has accepted it. Asked on demand
+   * rather than stored, so it is always Buffer's current answer. `url` is null
+   * — never guessed — while the platform has not returned one, and for a demo
+   * post, which never left this machine.
+   */
+  api.get(
+    '/posts/:id/link',
+    route(async (req, _res, workspaceId) => {
+      const post = await getPost(workspaceId, String(req.params.id ?? ''))
+      if (!post) throw new HttpError(404, 'No such published post.')
+      if (post.publish_mode !== 'live' || !post.external_id) {
+        return { url: null, status: 'demo', reason: 'This post was published in demo mode, so it has no platform page.' }
+      }
+      const measured = await bufferAdapter.fetchPostMetrics(post.external_id)
+      if (measured === null) {
+        return { url: null, status: 'unknown', reason: 'Buffer returned no record for this post.' }
+      }
+      return {
+        url: measured.externalLink,
+        status: measured.status,
+        reason: measured.externalLink ? null : `Buffer reports this post as “${measured.status}” and has no platform link for it yet.`,
+      }
+    }),
+  )
+
   api.get('/media/:id.png', async (req, res) => {
     const id = String(req.params.id ?? '').replace(/\.png$/i, '')
     if (!/^[0-9a-f-]{36}$/i.test(id)) {
@@ -845,7 +924,7 @@ export function createApiRouter(): Router {
    */
   api.post(
     '/ideas/:id/hooks',
-    route(async (req, _res, workspaceId) => {
+    longRoute(async (req, _res, workspaceId) => {
       const idea = await getIdea(workspaceId, String(req.params.id))
       if (!idea) throw new Error('No such idea.')
 
@@ -890,7 +969,7 @@ export function createApiRouter(): Router {
    */
   api.post(
     '/ideas/:id/script',
-    route(async (req, _res, workspaceId) => {
+    longRoute(async (req, _res, workspaceId) => {
       const idea = await getIdea(workspaceId, String(req.params.id))
       if (!idea) throw new Error('No such idea.')
       if (idea.content_format !== 'short_form_script') {
@@ -1563,7 +1642,7 @@ export function createApiRouter(): Router {
 
   api.post(
     '/ideas/:id/draft',
-    route(async (req, _res, workspaceId) => {
+    longRoute(async (req, _res, workspaceId) => {
       const body = parseBody(
         z.object({
           platform: platformSchema.optional(),
@@ -1625,7 +1704,7 @@ export function createApiRouter(): Router {
 
   api.post(
     '/ideas/:id/image',
-    route(async (req, _res, workspaceId) => {
+    longRoute(async (req, _res, workspaceId) => {
       const body = parseBody(
         z.object({
           platform: platformSchema,
@@ -1661,7 +1740,7 @@ export function createApiRouter(): Router {
 
   api.post(
     '/ideas/:id/instruct',
-    route(async (req, _res, workspaceId) => {
+    longRoute(async (req, _res, workspaceId) => {
       const body = parseBody(
         z.object({
           platform: platformSchema,
