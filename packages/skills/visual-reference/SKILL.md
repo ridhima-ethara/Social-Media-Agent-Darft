@@ -224,6 +224,45 @@ This does not license model-drawn lettering, which rule 4 forbids without except
 geometry — the spine, the nodes, the arrangement, the direction of travel. The words that name the
 parts are drawn locally, as vectors, over the top.
 
+### 15 — The reference travels as pixels where the painter can see them
+
+A reference reaching the painter as a sentence written from it is lossy in the
+ways that matter most: a clause cannot carry the exact violet, the falloff of the
+light, the density of the wireframe or the amount of air around the subject, and
+those are most of what makes the house set read as one body of work.
+
+Where a painter accepts image input, the reference file itself is sent and the
+clause goes with it — the image shows the treatment, the words say which parts of
+it to keep. Where a painter does not, the clause travels alone and the brief says
+`style-clause`, per rule 1.
+
+Two things must be stated to the painter whenever the pixels travel, because both
+failures were observed without them:
+
+- The reference is a sample of a STYLE, not a subject and not an image to edit.
+  Given an image and an instruction this family will return a recoloured copy.
+- Reproduce none of its lettering. Every house reference carries a finished
+  headline because it was cut from a shipped creative, and a model matching it
+  faithfully reproduces that text — which rule 4 forbids without exception.
+
+### 16 — The composition is written for the post, not looked up by concept
+
+A concept is a category, not an idea. Deriving art direction from the concept
+alone gives every post in that category the same picture however different their
+arguments, which is the mechanical quality that makes a feed of creatives look
+generated rather than made.
+
+So the brief is written against THIS caption: what the hero object is, how it is
+lit, what the arrangement argues. The reasoning model does this; the image model
+renders it. Neither is asked to do the other's job — and a reasoning model that
+cannot paint is not made the painter because its name sounds stronger.
+
+The writer of the brief is bound by the same rules as everything else here: no
+lettering in the composition, no invented figure, and a picture is described
+rather than a claim asserted. When it cannot be reached the assembled prompt
+stands in and the creative is stamped `template`, because a generic composition
+honestly labelled is worth more than a run that fails.
+
 ## The governing references
 
 The house set, and what each is for. `concepts` tags live in `references.json`; this table is the
@@ -276,6 +315,9 @@ what makes it land in a feed of creatives that do.
 | The manifest is missing or malformed | Render without a clause and stamp the reason. A missing manifest is not an error — it is the pre-reference behaviour |
 | The chosen entry has an empty `style` | Record `image-only`; the text painters receive nothing and the brief says so |
 | The renderer cannot accept an image | Report the limitation; proceed on the clause alone and label the mode honestly |
+| The painted background reproduces text from the reference | Reject and regenerate with the exclusion restated. Never composite over model-drawn lettering |
+| The art-direction model is unreachable | Render on the assembled prompt and stamp `template`. A generic composition labelled honestly beats a failed run |
+| A reasoning model is named as the painter | Refuse the substitution and say why. A model that cannot paint does not become a painter by being the better model |
 | The reference conflicts with the thesis | Name both sides and choose the thesis; a reference never outranks the argument |
 | A locked element conflicts with the reference | Hold the lock, report the conflict, change nothing else |
 | Retrieval returns nothing that licenses the structure | Return to `image-brief` for a treatment the evidence supports |

@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ExternalLink, Play, X } from 'lucide-react'
+import { Download, ExternalLink, Play, X } from 'lucide-react'
 import { useStore } from '../store'
 import { Logo } from '../components/logo'
 import type { GraphBucket } from '../components/pipeline-graph'
@@ -51,6 +51,8 @@ type FeedRow =
       relevance: number
       /** The page this row was captured from, when the source named one. */
       url: string | null
+      /** ISO timestamp of capture. Empty on a live row that reported none. */
+      capturedAt: string
       /** Held back by the scraping stage as already on record. Never reached scoring. */
       held: { since: string; originalTitle: string } | null
     }
@@ -192,6 +194,7 @@ export function PipelineTheater() {
         engagement: item.metrics_available ? item.engagement : null,
         relevance: item.relevance,
         url: item.url,
+        capturedAt: item.scraped_at,
         held: null,
       })
     }
@@ -268,6 +271,9 @@ export function PipelineTheater() {
         engagement: null,
         relevance: capture.relevance ?? 0,
         url: capture.url,
+        // A live row carries no capture time of its own; it is being captured
+        // now, so the run's clock is the honest answer rather than a blank.
+        capturedAt: new Date().toISOString(),
         held: capture.held,
       })
     }
@@ -1304,7 +1310,20 @@ export function PipelineTheater() {
           >
             <RunReport
               captures={rows.filter((r): r is Extract<FeedRow, { kind: 'capture' }> => r.kind === 'capture')}
-              lanes={rows.filter((r): r is Extract<FeedRow, { kind: 'lane' }> => r.kind === 'lane')}
+              /*
+               * Where each TOPIC can be read about, as opposed to where a single
+               * captured page lives. The badge names an Ethara research topic and
+               * was the only thing on the row with no way through — the title
+               * links to one article, which is not the same question as "what is
+               * this topic and what else is in it".
+               */
+              topicUrls={
+                new Map(
+                  signals
+                    .map((sig) => [sig.term, sig.top_post_url ?? sig.search_url ?? ''] as const)
+                    .filter(([, url]) => url !== ''),
+                )
+              }
               trending={trending.map((t) => ({ term: t.term, score: t.trend_score, rank: t.rank ?? 0 }))}
               topHashtags={topHashtags.map((h) => ({ tag: h.display_tag, score: h.hashtag_score }))}
               buckets={buckets}
@@ -2227,9 +2246,132 @@ function FeedItem({
    those numbers, so a bad keyword looked exactly like a good one.
    ═══════════════════════════════════════════════════════════════════════════ */
 
+
+/**
+ * OPENS A PRINTABLE REPORT AND ASKS THE BROWSER TO PRINT IT.
+ *
+ * ═══ WHY A GENERATED DOCUMENT AND NOT `@media print` ON THE DIALOG ═══
+ *
+ * The first attempt printed the dialog in place, hiding everything else with
+ * `body > * { display: none }`. That produced a blank page, and the reason is
+ * structural rather than a tuning problem: the dialog renders INSIDE `#root`,
+ * so the rule hid its own ancestor. Reaching past that would mean unhiding a
+ * chain of wrappers by selector and keeping those selectors true as the layout
+ * changes — a print stylesheet quietly coupled to the DOM shape of the app.
+ *
+ * A generated document has none of that. It contains the capture list and
+ * nothing else, so it cannot print blank, and what it contains is decided here
+ * rather than by whatever happened to be visible on screen.
+ *
+ * ═══ WHY IT IS STILL THE BROWSER'S PDF ═══
+ *
+ * No PDF library is added. One would be a second renderer drawing a different
+ * document from the one the operator read, and the two drift the first time
+ * either changes. This prints the same rows, with the URL of every one of them
+ * written out in full — a PDF of a link list is useless if the links are only
+ * clickable.
+ */
+function printRunReport(input: {
+  captures: Array<Extract<FeedRow, { kind: 'capture' }>>
+  trending: Array<{ term: string; score: number; rank: number }>
+  topHashtags: Array<{ tag: string; score: number }>
+  buckets: GraphBucket[]
+}): void {
+  const { captures, trending, topHashtags, buckets } = input
+
+  const esc = (text: string): string =>
+    text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+  const when = (iso: string): string => {
+    if (iso === '') return '—'
+    const d = new Date(iso)
+    return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 16).replace('T', ' ')
+  }
+
+  const rows = captures
+    .map(
+      (c, i) => `<tr>
+        <td class="n">${i + 1}</td>
+        <td>${esc(c.keyword)}</td>
+        <td>${esc(c.platform ?? 'open web')}</td>
+        <td class="t">${esc(c.title)}</td>
+        <td class="u">${c.url ? esc(c.url) : '<span class="muted">no URL recorded</span>'}</td>
+        <td class="n">${esc(when(c.capturedAt))}</td>
+        <td class="n">${c.held ? 'held' : 'kept'}</td>
+      </tr>`,
+    )
+    .join('')
+
+  const counts = buckets.map((b) => `${esc(b.label)} ${b.count}`).join(' · ')
+  const held = captures.filter((c) => c.held !== null).length
+
+  const doc = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Ethara.AI — pipeline run report</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 11px/1.45 -apple-system, Segoe UI, Inter, sans-serif; color: #111; margin: 0; padding: 22px; }
+  h1 { font-size: 17px; margin: 0 0 2px; letter-spacing: -0.01em; }
+  .sub { color: #555; margin: 0 0 14px; font-size: 11px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: #666;
+       margin: 16px 0 6px; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; }
+  th { text-align: left; font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
+       color: #666; border-bottom: 1px solid #bbb; padding: 4px 6px 4px 0; font-weight: 600; }
+  td { padding: 5px 6px 5px 0; border-bottom: 1px solid #eee; vertical-align: top; }
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  .n { white-space: nowrap; color: #444; }
+  .t { max-width: 230px; }
+  /* The URL is written out, not linked: a printed link that only works when
+     clicked is not a record of where anything came from. */
+  .u { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8.5px;
+       color: #2a2a7a; word-break: break-all; max-width: 250px; }
+  .muted { color: #999; font-style: italic; }
+  .chips { color: #333; }
+  @page { margin: 12mm; }
+</style></head>
+<body>
+  <h1>Ethara.AI — pipeline run report</h1>
+  <p class="sub">${esc(new Date().toLocaleString())} · ${captures.length} page(s) captured, ${held} held on record · ${esc(counts)}</p>
+
+  ${
+    trending.length === 0
+      ? ''
+      : `<h2>Top keywords</h2><p class="chips">${trending
+          .map((t) => `${t.rank}. ${esc(t.term)} (${t.score})`)
+          .join(' &nbsp;·&nbsp; ')}</p>`
+  }
+  ${
+    topHashtags.length === 0
+      ? ''
+      : `<h2>Consolidated hashtags</h2><p class="chips">${topHashtags
+          .map((h) => esc(h.tag))
+          .join(' &nbsp;·&nbsp; ')}</p>`
+  }
+
+  <h2>Everything captured on this run</h2>
+  ${
+    captures.length === 0
+      ? '<p class="muted">Nothing was captured on this run.</p>'
+      : `<table>
+          <thead><tr><th>#</th><th>Topic</th><th>Lane</th><th>Title</th><th>URL</th><th>Captured</th><th>State</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`
+  }
+</body></html>`
+
+  const win = window.open('', '_blank')
+  if (!win) return
+  win.document.write(doc)
+  win.document.close()
+  win.focus()
+  // The document has to be laid out before it can be printed; without the
+  // frame the print dialog can open over an empty document.
+  win.requestAnimationFrame(() => win.print())
+}
+
 function RunReport({
   captures,
-  lanes,
+  topicUrls,
   trending,
   topHashtags,
   buckets,
@@ -2239,7 +2381,8 @@ function RunReport({
   onClose,
 }: {
   captures: Array<Extract<FeedRow, { kind: 'capture' }>>
-  lanes: Array<Extract<FeedRow, { kind: 'lane' }>>
+  /** Topic term → where that topic can be read about. Absent terms stay plain. */
+  topicUrls: Map<string, string>
   trending: Array<{ term: string; score: number; rank: number }>
   topHashtags: Array<{ tag: string; score: number }>
   buckets: GraphBucket[]
@@ -2248,6 +2391,17 @@ function RunReport({
   onNavigate: (page: 'calendar' | 'intelligence') => void
   onClose: () => void
 }) {
+  /*
+   * COUNTED FROM THE CAPTURES, NOT FROM THE LANE ROWS.
+   *
+   * `lanes` is empty whenever the console is showing a replayed run — lane rows
+   * are a live-stream artefact — so the header read "across 0 lanes" beside a
+   * list of 26 captured pages, which contradicts itself. The keywords the
+   * captures name are present in both modes and are the more useful figure
+   * anyway: what was searched for, rather than how many pipes were open.
+   */
+  const laneCount = new Set(captures.map((c) => c.keyword).filter((k) => k !== '—')).size
+
   const held = captures.filter((c) => c.held !== null)
   const kept = captures.filter((c) => c.held === null)
   const placed = newTrendIdeas.filter((i) => i.slot === 'primary')
@@ -2280,7 +2434,7 @@ function RunReport({
           <p className="mt-0.5 text-[12px] leading-relaxed text-ink-3">
             {captures.length === 0
               ? 'Nothing was captured on this run. The rows below say which lanes reported and why.'
-              : `${fmt(captures.length)} page${captures.length === 1 ? '' : 's'} read across ${lanes.length} lane${lanes.length === 1 ? '' : 's'}, and Dora placed the strongest trends into the week.`}
+              : `${fmt(captures.length)} page${captures.length === 1 ? '' : 's'} read across ${fmt(laneCount)} keyword${laneCount === 1 ? '' : 's'}, and Dora placed the strongest trends into the week.`}
           </p>
         </div>
         <button
@@ -2375,9 +2529,21 @@ function RunReport({
                     row.held ? 'border-line bg-surface opacity-70' : 'border-line-strong'
                   }`}
                 >
-                  <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-ink-3">
-                    {row.keyword}
-                  </span>
+                  {topicUrls.get(row.keyword) ? (
+                    <a
+                      href={topicUrls.get(row.keyword)}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      title={`Read about “${row.keyword}”`}
+                      className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+                    >
+                      {row.keyword}
+                    </a>
+                  ) : (
+                    <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                      {row.keyword}
+                    </span>
+                  )}
                   <span className="flex h-3 w-3 shrink-0 items-center justify-center">
                     {row.platform === null ? (
                       <span className="mono text-[9.5px] uppercase tracking-[0.06em] text-ink-3" title="Read from the open web">
@@ -2407,16 +2573,25 @@ function RunReport({
                     </span>
                   )}
 
-                  <span className="mono shrink-0 text-[10px] text-ink-3" title={`Source: ${row.source}`}>
-                    {row.engagement === null ? 'N/A' : fmt(row.engagement)}
-                  </span>
+                  {/*
+                    ENGAGEMENT AND RELEVANCE ARE NOT SHOWN PER ROW HERE.
+
+                    Both were printed on every line and both said the same thing
+                    on every line — `N/A 100%`, several dozen times down the
+                    list. A column that never varies is not information; it is
+                    noise that pushes the title, which does vary, out of view.
+
+                    Neither figure is lost. The band at the top of this report
+                    states the average relevance and how many pages carried
+                    engagement figures at all, which is where a number that is
+                    uniform across the run actually belongs. `held` stays,
+                    because it IS per-row and changes what the row means.
+                  */}
                   {row.held ? (
                     <span className="mono shrink-0 rounded-[3px] border border-line px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-ink-3">
                       held · {timeAgo(row.held.since)}
                     </span>
-                  ) : (
-                    <span className="mono tabular shrink-0 text-[10px] text-ink-3">{row.relevance}%</span>
-                  )}
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -2446,9 +2621,25 @@ function RunReport({
       </div>
 
       {/* ── Actions ──────────────────────────────────────────────────────── */}
-      <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-line px-5 py-3 sm:px-6">
+      <footer
+        className="flex shrink-0 flex-wrap items-center gap-2 border-t border-line px-5 py-3 sm:px-6"
+      >
         <Btn variant="primary" onClick={() => onNavigate('calendar')}>
           Open Weekly Calendar
+        </Btn>
+        {/*
+          The browser's own print-to-PDF, over the report already on screen.
+          A PDF library would be a second renderer drawing a different document
+          from the one being read, and the two drift the first time either
+          changes. `@media print` in index.css hides everything else and lets
+          the capture list run to its full length.
+        */}
+        <Btn
+          variant="subtle"
+          onClick={() => printRunReport({ captures, trending, topHashtags, buckets })}
+          title="Open a printable report and save it as a PDF"
+        >
+          <Download size={13} /> Download PDF
         </Btn>
         <Btn variant="subtle" onClick={() => onNavigate('intelligence')}>
           View Content Intelligence

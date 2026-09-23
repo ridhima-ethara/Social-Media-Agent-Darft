@@ -3069,19 +3069,42 @@ export async function keywordsForCycleWeek(
   workspaceId: string,
   cycleWeek: number,
 ): Promise<KeywordRow[]> {
+  /*
+   * TWO ORDERINGS, AND THE INNER ONE CANNOT DO THE OUTER ONE'S JOB.
+   *
+   * `DISTINCT ON (k.id)` requires `ORDER BY k.id` to come FIRST, so the
+   * "constants first" clause below it only ever decided WHICH DUPLICATE ROW
+   * wins for a keyword scheduled in more than one place. The set this function
+   * returned was ordered by uuid — which is to say, arbitrarily.
+   *
+   * That mattered because the caller caps how many keywords a run captures.
+   * Cutting an arbitrarily-ordered list dropped constants as readily as
+   * anything else, so the standing research interests — RLVR, AI agent
+   * evaluation, LLM post-training — fell out of runs at random, and a brand
+   * monitoring week filled the entire capture with product codenames while the
+   * terms that produce usable content were never searched at all.
+   *
+   * The de-duplication stays inside; the ordering the caller depends on is
+   * applied outside it, where `DISTINCT ON` no longer constrains it.
+   */
   return query<KeywordRow>(
-    `SELECT DISTINCT ON (k.id) k.*
-       FROM keyword_schedule s
-       JOIN keywords k ON k.id = s.keyword_id
-      WHERE s.workspace_id = $1
-        AND s.active = true
-        AND k.active = true
-        AND (s.cycle_week IS NULL OR s.cycle_week = $2)
-      ORDER BY k.id,
-               -- Constants first: they are the standing interests and must never
-               -- be the ones dropped when a run's ceiling is reached.
-               (s.cycle_week IS NULL) DESC,
-               s.slot_rank`,
+    `SELECT d.*
+       FROM (
+         SELECT DISTINCT ON (k.id)
+                k.*,
+                (s.cycle_week IS NULL) AS is_constant,
+                s.slot_rank AS sched_rank
+           FROM keyword_schedule s
+           JOIN keywords k ON k.id = s.keyword_id
+          WHERE s.workspace_id = $1
+            AND s.active = true
+            AND k.active = true
+            AND (s.cycle_week IS NULL OR s.cycle_week = $2)
+          ORDER BY k.id, (s.cycle_week IS NULL) DESC, s.slot_rank
+       ) d
+      -- Constants lead: they are the standing interests, and a run that drops
+      -- them has no trend series to compare this week against.
+      ORDER BY d.is_constant DESC, d.sched_rank NULLS LAST, d.term`,
     [workspaceId, cycleWeek],
   )
 }

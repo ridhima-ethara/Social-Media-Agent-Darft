@@ -25,6 +25,7 @@ import {
 import { listKnowledge, listMediaForIdeas, listIdeas } from '../../db/repo'
 import { clampChars, clampWords, headlineFrom, PLATFORM_LABEL, similarity } from '../corpus'
 import { licensedAnnotations } from './annotations'
+import { directArt } from './art-director'
 import { registerSkill } from '../runtime'
 import { availableImageModels, renderCreative,
   preferredImageModel,
@@ -132,7 +133,7 @@ registerSkill<ImagePayload>('generation.image.reference', async (payload, ctx) =
    3 · generation.image.template
    ═══════════════════════════════════════════════════════════════════════════ */
 
-registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
+registerSkill<ImagePayload>('generation.image.template', async (payload, ctx) => {
   const layout = ctx.str('layout', 'Editorial')
   const headlineMaxWords = ctx.num('headlineMaxWords', 12)
   const safeMargin = ctx.num('safeMargin', 64)
@@ -160,6 +161,46 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
     `${layout} layout on a ${canvas.width}×${canvas.height} ${PLATFORM_LABEL[payload.platform]} canvas, ${safeMargin}px safe margin`,
   )
 
+  /*
+   * THE COMPOSITION IS WRITTEN FOR THIS POST, NOT LOOKED UP BY CONCEPT.
+   *
+   * `assembled` is the concept lookup plus the house reference clause — the
+   * same art direction every post on this concept used to receive, whatever it
+   * argued. The art director reads the caption and replaces it with one
+   * composition for one argument. When it cannot be reached, `assembled` is
+   * what the painter gets, and the reason is stamped.
+   */
+  const assembled = backgroundPromptFor(
+    concept,
+    payload.sourceTopic,
+    styleClause,
+    (payload.annotations ?? []).length > 0,
+  )
+
+  let backgroundPrompt = assembled
+  if (ctx.bool('artDirect', true)) {
+    const directed = await directArt({
+      caption: payload.caption,
+      title: payload.title,
+      sourceTopic: payload.sourceTopic,
+      concept,
+      styleClause,
+      model: ctx.str('artDirectorModel', 'gemini-2.5-pro'),
+      temperature: ctx.num('artDirectorTemperature', 70) / 100,
+      maxTokens: ctx.num('artDirectorMaxTokens', 400),
+      assembledPrompt: assembled,
+    })
+
+    backgroundPrompt = directed.brief
+    if (directed.source === 'model') {
+      ctx.log(`Composition written for this post by ${ctx.str('artDirectorModel', 'gemini-2.5-pro')}`)
+    } else if (directed.fallbackReason) {
+      // Degrade honestly: the render still happens, on the assembled prompt,
+      // and the operator is told which one produced the creative.
+      ctx.emit('activity', directed.fallbackReason, { status: 'warn' })
+    }
+  }
+
   return {
     layout,
     safeMargin,
@@ -170,12 +211,7 @@ registerSkill<ImagePayload>('generation.image.template', (payload, ctx) => {
     width: canvas.width,
     height: canvas.height,
     canvas: canvasKey(payload.platform),
-    backgroundPrompt: backgroundPromptFor(
-      concept,
-      payload.sourceTopic,
-      styleClause,
-      (payload.annotations ?? []).length > 0,
-    ),
+    backgroundPrompt,
   }
 })
 

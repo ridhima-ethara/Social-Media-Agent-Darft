@@ -1776,6 +1776,179 @@ function ScoreBar({ label, value, delay }: { label: string; value: number; delay
  * deltas, and the agent's own account. Claiming more than that would be a
  * picture of a diff rather than one.
  */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WORD DIFF
+
+   Written here rather than pulled in: a diff library is a large dependency for
+   one panel, and the thing it would compute is ninety lines of standard LCS.
+   Keeping it local also keeps it deterministic, which matters because a
+   revision spine is re-rendered from stored bodies and must not shift between
+   renders.
+
+   WORDS, NOT CHARACTERS. The instructions here are editorial — "make it more
+   technical", "shorten it" — and rewrite phrases rather than letters. A
+   character diff of a rewritten sentence marks a spray of single letters inside
+   words that both versions share, which is unreadable. Whitespace is carried on
+   the token so the rebuilt text keeps its own spacing.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export type DiffOp = { kind: 'same' | 'add' | 'remove'; text: string }
+
+/** Splits into words, each keeping the whitespace that followed it. */
+function tokenise(text: string): string[] {
+  return text.match(/\S+\s*/g) ?? []
+}
+
+/**
+ * Longest common subsequence over word tokens.
+ *
+ * The table is O(n·m); a caption is a few hundred words, so this is far below
+ * anything worth optimising. Bodies longer than `MAX_TOKENS` skip the table and
+ * report themselves as a wholesale replacement rather than freezing the panel.
+ */
+const MAX_TOKENS = 4000
+
+export function diffWords(before: string, after: string): DiffOp[] {
+  const a = tokenise(before)
+  const b = tokenise(after)
+
+  if (a.length + b.length > MAX_TOKENS) {
+    return [
+      { kind: 'remove', text: before },
+      { kind: 'add', text: after },
+    ]
+  }
+
+  // lcs[i][j] = length of the longest common subsequence of a[i..] and b[j..]
+  const lcs: number[][] = Array.from({ length: a.length + 1 }, () =>
+    new Array<number>(b.length + 1).fill(0),
+  )
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      lcs[i]![j] =
+        a[i]!.trim() === b[j]!.trim()
+          ? (lcs[i + 1]![j + 1] ?? 0) + 1
+          : Math.max(lcs[i + 1]![j] ?? 0, lcs[i]![j + 1] ?? 0)
+    }
+  }
+
+  // Walk the table, coalescing runs so the output is spans rather than words.
+  const ops: DiffOp[] = []
+  const push = (kind: DiffOp['kind'], text: string): void => {
+    const last = ops[ops.length - 1]
+    if (last && last.kind === kind) last.text += text
+    else ops.push({ kind, text })
+  }
+
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (a[i]!.trim() === b[j]!.trim()) {
+      /*
+       * The AFTER token, not the before one.
+       *
+       * Tokens carry the whitespace that followed them, and equality is tested
+       * on the trimmed word — so "short" (end of the old text) matches
+       * "short " (mid-sentence in the new one). Emitting the before form there
+       * dropped the space, and the rendered result read "shortand".
+       *
+       * The after side is what the panel presents as the current caption, so
+       * its spacing is the authoritative one.
+       */
+      push('same', b[j]!)
+      i += 1
+      j += 1
+    } else if ((lcs[i + 1]![j] ?? 0) >= (lcs[i]![j + 1] ?? 0)) {
+      push('remove', a[i]!)
+      i += 1
+    } else {
+      push('add', b[j]!)
+      j += 1
+    }
+  }
+  while (i < a.length) { push('remove', a[i]!); i += 1 }
+  while (j < b.length) { push('add', b[j]!); j += 1 }
+
+  return ops
+}
+
+/** One revision, rendered as before → after with the changes marked. */
+function RevisionDiff({ before, after }: { before: string; after: string }) {
+  const ops = useMemo(() => diffWords(before, after), [before, after])
+  const [side, setSide] = useState(false)
+
+  const added = ops.filter((o) => o.kind === 'add').reduce((n, o) => n + o.text.trim().length, 0)
+  const removed = ops.filter((o) => o.kind === 'remove').reduce((n, o) => n + o.text.trim().length, 0)
+
+  if (added === 0 && removed === 0) {
+    return (
+      <p className="mt-2 text-[11.5px] text-ink-3">
+        The text is identical. The instruction was recorded but changed nothing.
+      </p>
+    )
+  }
+
+  return (
+    <div className="mt-2">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="mono text-[10px] tracking-[0.08em] text-good-ink">+{added}</span>
+        <span className="mono text-[10px] tracking-[0.08em] text-critical-ink">−{removed}</span>
+        {/* Unified reads better for a rewritten sentence; side-by-side is the
+            one people reach for when a whole paragraph moved. Both, cheaply. */}
+        <button
+          type="button"
+          onClick={() => setSide((s) => !s)}
+          className="mono ml-auto rounded-[5px] border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright"
+        >
+          {side ? 'Unified' : 'Side by side'}
+        </button>
+      </div>
+
+      {side ? (
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+          <div>
+            <p className="mono mb-1 text-[9.5px] uppercase tracking-[0.1em] text-ink-3">Before</p>
+            <p className="whitespace-pre-wrap break-words rounded-[8px] border border-line bg-page px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
+              {ops.filter((o) => o.kind !== 'add').map((o, n) =>
+                o.kind === 'remove' ? (
+                  <mark key={n} className="rounded-[3px] bg-critical/25 px-0.5 text-ink line-through decoration-critical-ink/60">{o.text}</mark>
+                ) : (
+                  <span key={n}>{o.text}</span>
+                ),
+              )}
+            </p>
+          </div>
+          <div>
+            <p className="mono mb-1 text-[9.5px] uppercase tracking-[0.1em] text-ink-3">After</p>
+            <p className="whitespace-pre-wrap break-words rounded-[8px] border border-line bg-page px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
+              {ops.filter((o) => o.kind !== 'remove').map((o, n) =>
+                o.kind === 'add' ? (
+                  <mark key={n} className="rounded-[3px] bg-good/25 px-0.5 text-ink">{o.text}</mark>
+                ) : (
+                  <span key={n}>{o.text}</span>
+                ),
+              )}
+            </p>
+          </div>
+        </div>
+      ) : (
+        <p className="whitespace-pre-wrap break-words rounded-[8px] border border-line bg-page px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
+          {ops.map((op, n) =>
+            op.kind === 'add' ? (
+              <mark key={n} className="rounded-[3px] bg-good/25 px-0.5 text-ink">{op.text}</mark>
+            ) : op.kind === 'remove' ? (
+              <mark key={n} className="rounded-[3px] bg-critical/20 px-0.5 text-ink-3 line-through decoration-critical-ink/60">{op.text}</mark>
+            ) : (
+              <span key={n}>{op.text}</span>
+            ),
+          )}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function DiffView({ spine }: { spine: Revision[] }) {
   if (spine.length <= 1) {
     return (
@@ -1787,7 +1960,7 @@ function DiffView({ spine }: { spine: Revision[] }) {
   }
   return (
     <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-      {spine.slice(1).map((rev) => (
+      {spine.slice(1).map((rev, index) => (
         <div key={rev.id} className="rounded-lg border border-line-strong bg-surface px-3 py-2.5">
           <div className="flex items-center gap-2">
             <span className="mono text-[10.5px] tracking-[0.12em] text-accent-bright">R{rev.revision}</span>
@@ -1798,6 +1971,27 @@ function DiffView({ spine }: { spine: Revision[] }) {
           </div>
           {rev.instruction ? <p className="mt-1.5 text-[12px] font-medium text-ink">“{rev.instruction}”</p> : null}
           <p className="mt-1 text-[11.5px] leading-relaxed text-ink-2">{rev.summary}</p>
+
+          {/*
+            THE ACTUAL CHANGE, NOT A DESCRIPTION OF IT.
+
+            This panel stated "+357 chars · +1 para" and the instruction that
+            caused it, which says a change happened without showing any of it.
+            The reason to open a diff at all is to read the words that moved, so
+            they are rendered: the previous revision's body against this one's,
+            additions marked and deletions struck through.
+
+            `spine[index]` is the PREVIOUS revision — `spine.slice(1)` shifted
+            the list by one, so the element at the same index in the unsliced
+            spine is the one before this.
+          */}
+          {rev.target === 'image' ? (
+            <p className="mt-2 text-[11.5px] text-ink-3">
+              This turn changed the creative, not the caption, so there is no text to compare.
+            </p>
+          ) : (
+            <RevisionDiff before={spine[index]?.body ?? ''} after={rev.body} />
+          )}
         </div>
       ))}
     </div>

@@ -119,6 +119,15 @@ export interface GcpTextInput {
    * "state the absence" rule the capture tier applies to a missing metric.
    */
   images?: Array<{ dataUri: string; name: string }>
+
+  /**
+   * A specific Gemini text model, overriding `fast`.
+   *
+   * Exists for the art director, which wants the reasoning model rather than
+   * whichever tier a caller's `fast` flag happens to select. Absent everywhere
+   * else, so every existing caller resolves exactly as it did.
+   */
+  model?: string
 }
 
 interface GeminiCandidate {
@@ -212,7 +221,7 @@ export const gcpText: ServiceAdapter<GcpTextInput, string> = {
   async run(input: GcpTextInput): Promise<string> {
     if (!this.isConfigured()) throw new AdapterError(this.id, this.unavailableReason())
 
-    const model = input.fast ? config.gcp.fastTextModel : config.gcp.textModel
+    const model = input.model ?? (input.fast ? config.gcp.fastTextModel : config.gcp.textModel)
 
     const payload = await fetchJson<GeminiResponse>(textEndpoint(model), {
       method: 'POST',
@@ -296,6 +305,27 @@ export interface GcpImageInput {
    * decided by a single env var.
    */
   model?: string
+
+  /**
+   * A house reference image the painter should compose in the manner of.
+   *
+   * ═══ WHY THE PIXELS AND NOT JUST THE WORDS ═══
+   *
+   * Until now a reference reached the painter only as a sentence written from
+   * it — "matte black ground, a single tall textured monolith lit by
+   * directional beams". That sentence is a lossy description of a finished
+   * creative: it cannot carry the exact violet, the falloff of the light, the
+   * density of the wireframe or the amount of air around the subject, which is
+   * most of what makes the house set look like one body of work.
+   *
+   * Gemini image models accept image parts, so the reference itself travels and
+   * the model matches what it can see. The clause still goes with it — the
+   * image shows the treatment, the words say which parts of it to keep.
+   *
+   * Imagen's `:predict` shape has no place to put this, so it is ignored there
+   * rather than silently changing what that family is asked for.
+   */
+  reference?: { base64: string; mimeType: string }
 }
 
 /** A base64 PNG payload, ready to composite under the vector brand layer. */
@@ -396,9 +426,22 @@ export const gcpImage: ServiceAdapter<GcpImageInput, PaintedBackground> = {
       : `${input.prompt}. Abstract technical background artwork, ` +
         'no text, no words, no letters, no logos, no watermarks.'
 
+    /*
+     * The reference leads, the instruction follows.
+     *
+     * Order matters to these models: an image placed after the instruction
+     * reads as something to edit, which produced recoloured copies of the
+     * reference. Placed first it reads as the manner to work in, and the text
+     * that follows says what to make.
+     */
+    const referenceParts =
+      gemini && input.reference
+        ? [{ inlineData: { mimeType: input.reference.mimeType, data: input.reference.base64 } }]
+        : []
+
     const body = gemini
       ? {
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          contents: [{ role: 'user', parts: [...referenceParts, { text: prompt }] }],
           generationConfig: {
             // Gemini image models must be told to return an image; text-only is
             // the default and would come back with no inlineData at all.

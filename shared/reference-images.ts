@@ -134,6 +134,51 @@ function paintableClauses(style: string): string {
  * Returns empty when nothing applies or nothing survives sanitising, so the
  * caller appends nothing rather than a dangling connective.
  */
+/**
+ * WHICH house reference governs a concept — the entry, not its description.
+ *
+ * `styleClauseFor` already made this choice internally and returned only the
+ * sentence. Loading the actual file needs the entry itself, and both callers
+ * must resolve to the SAME reference or the words and the pixels sent to the
+ * painter would describe two different creatives.
+ */
+export function chosenReferenceFor(concept: string): ReferenceImage | null {
+  const applicable = referencesFor(concept)
+  if (applicable.length === 0) return null
+
+  const tagged = applicable.filter((r) => (r.concepts ?? []).includes(concept))
+  const pool = tagged.length > 0 ? tagged : applicable
+
+  let seed = 0
+  for (let i = 0; i < concept.length; i += 1) seed = (seed * 31 + concept.charCodeAt(i)) >>> 0
+  return pool[seed % pool.length] ?? null
+}
+
+/**
+ * The reference image itself, base64-encoded, for painters that accept image
+ * input. Returns null when the entry names a file that is not on disk — a
+ * manifest can outlive its files, and a missing reference costs the visual
+ * conditioning, never the render.
+ */
+export function referenceImageFor(
+  concept: string,
+): { base64: string; mimeType: string; file: string } | null {
+  const chosen = chosenReferenceFor(concept)
+  if (!chosen) return null
+  try {
+    const bytes = readFileSync(join(REFERENCES_DIR, chosen.file))
+    const lower = chosen.file.toLowerCase()
+    const mimeType = lower.endsWith('.png')
+      ? 'image/png'
+      : lower.endsWith('.webp')
+        ? 'image/webp'
+        : 'image/jpeg'
+    return { base64: bytes.toString('base64'), mimeType, file: chosen.file }
+  } catch {
+    return null
+  }
+}
+
 export function styleClauseFor(concept: string): string {
   const applicable = referencesFor(concept)
   if (applicable.length === 0) return ''

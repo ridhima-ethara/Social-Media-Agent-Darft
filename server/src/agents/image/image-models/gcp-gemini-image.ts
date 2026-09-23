@@ -14,6 +14,7 @@
 
 import { config } from '../../../config'
 import { DEFAULT_GCP_GEMINI_IMAGE_MODEL } from '../../../../../shared/image-models'
+import { referenceImageFor } from '../../../../../shared/reference-images'
 import { gcpImage } from '../../../integrations/gcp-llm'
 import type { BackgroundPainter, RenderRequest } from './types'
 
@@ -37,12 +38,24 @@ export const geminiImagePainter: BackgroundPainter = {
      */
     const configured = config.gcp.imageModel
     const model = configured.toLowerCase().startsWith('gemini') ? configured : DEFAULT_GCP_GEMINI_IMAGE_MODEL
+
+    /*
+     * THE HOUSE REFERENCE TRAVELS AS AN IMAGE, NOT ONLY AS A SENTENCE.
+     *
+     * This family accepts image parts, so the creative the style clause was
+     * written from is sent alongside it. The clause says which properties to
+     * carry; the image shows them. Absent when the file is missing, in which
+     * case the words still travel and the render still happens.
+     */
+    const reference = referenceImageFor(request.concept)
+
     return gcpImage.run({
       prompt: buildPrompt(request),
       width: request.width,
       height: request.height,
       timeoutMs: request.timeoutMs || config.gcp.timeoutMs,
       model,
+      ...(reference ? { reference: { base64: reference.base64, mimeType: reference.mimeType } } : {}),
     })
   },
 }
@@ -67,12 +80,39 @@ function buildPrompt(request: RenderRequest): string {
 
   const direction = conceptDirection[request.concept] ?? conceptDirection['gradient-field']
 
+  /*
+   * WHAT TO DO WITH THE ATTACHED REFERENCE — and what not to.
+   *
+   * Two failure modes, both of which the first attached-reference renders hit:
+   *
+   *   COPYING. Given an image and an instruction, this family will happily
+   *   return a recoloured version of the image. The reference is a sample of a
+   *   HOUSE STYLE, not a subject, and the brief says so explicitly.
+   *
+   *   LETTERING. Every house reference carries a finished headline — "The
+   *   output is only the visible outcome" — because it was cut from a shipped
+   *   creative. A model matching the reference faithfully reproduces that
+   *   text, and invariant 21 forbids any model-drawn lettering: the brand layer
+   *   draws every word locally. So the exclusion is stated last, where it is
+   *   read against the reference rather than before it is seen.
+   */
+  const withReference = referenceImageFor(request.concept) !== null
+
   return [
-    `Abstract technical background: ${direction}.`,
+    withReference
+      ? 'The attached image is a sample of the visual style to work in — NOT the subject, and not an image to edit.'
+      : '',
+    withReference
+      ? 'Match its palette, lighting, material quality, line weight and use of negative space.'
+      : '',
+    `Compose a NEW abstract technical background: ${direction}.`,
     'Deep near-black ground with violet and purple accents only.',
     'Editorial, restrained, high contrast, generous negative space on the left.',
     `Composition suited to a ${request.width}x${request.height} canvas.`,
     request.backgroundPrompt,
+    withReference
+      ? 'Reproduce NONE of the lettering, headlines, labels, callouts or logos visible in the attached image. The output must contain no text of any kind — every word is added afterwards.'
+      : '',
   ]
     .filter(Boolean)
     .join(' ')
