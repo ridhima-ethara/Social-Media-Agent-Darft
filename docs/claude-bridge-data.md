@@ -19,7 +19,7 @@ The code lives in `server/src/bridges/claude-bridge/`. The rules are in `package
 |---|---|
 | **Mechanism** | A headless Claude Code session (`claude -p`) with a single tool, **WebSearch**. It gets no file, shell or fetch tool, and it runs in an empty folder with no project context. |
 | **What is read** | Public **search-engine results**: each result's URL and title. The bridge never logs in to a platform and never opens a platform page. |
-| **Instructions** | The "Trend Intelligence Acquisition Agent" system prompt and session prompt in `adapters/claude-code.ts`, plus the three reference documents in `corpus/reference/`. LinkedIn also gets a two-part research strategy (see §5). |
+| **Instructions** | The "Trend Intelligence Acquisition Agent" system prompt (32 sections, the operator's text word for word) and the session prompt, both in `adapters/claude-code.ts`. The three input files are supplied as File 1 — Keywords (`KEYWORD_INSTRUCTION_MAP.md`), File 2 — Knowledge Base (`CORPUS_SUMMARY.md`) and File 3 — Brand Voice (`BRAND_VOICE_INSTRUCTION_MAP.md`). LinkedIn also gets its own research strategy (see §5). |
 | **Window** | The current month: from the 1st, in the workspace's time zone (Asia/Kolkata), to now. |
 | **Budget** | Up to 16 searches per platform in the plan. Each research session may run at most 16 searches, and the bridge uses no more than that. |
 | **Frequency** | Once per pipeline run, all four platforms in parallel. |
@@ -54,43 +54,52 @@ These come from the raw search results. Every field is either what the search re
 | `brandRelevance` | High, medium or low | Computed against keywords, brand topics and the Knowledge Base |
 | `related` | Kept for brand-topic signal but names no keyword | Computed |
 | `newHashtags` | Hashtags Ethara doesn't track yet | Computed. After validation they are learned into the Knowledge Base. |
-| `period` | `today`, `earlier` (this month) or `older` | Computed from `publishedAt` |
+| `period` | `today`, `earlier` (this month) or `older` | Computed from `publishedAt`. `older` posts are supporting context only (see below). |
 | `engagement` | Likes, comments, reposts | **Always empty.** A search result states no engagement (`metricsAvailable: false`). It is never zero. |
 
-Posts are grouped into **trends**, at most one per topic per platform. Each trend records:
+Posts are grouped by topic, one group per topic per platform. Each group has an **evidence level** (system prompt §5, §8 and §15):
+
+- **`platform_trend`:** current-month posts from at least 2 independent authors. Several URLs from one author count as one source.
+- **`platform_activity`:** current-month posts, but too few independent authors to call it a platform trend.
+- **`supporting_context`:** posts from before the month. They are kept in the run record for context only and are **never passed to the Validation Agent**, because previous-month evidence cannot establish a current trend.
+
+Each group records:
 
 - the topic
 - its hashtags
 - up to 5 posts, newest first
 - the matched keywords
 - whether it is trending today
+- its evidence level and its number of independent authors
 - a computed reason, for example "3 X posts this month mention 'AI agents' (newest 2 days ago)…"
 
-### Layer B: Claude's trend analysis (interpretation)
+### Layer B: Claude's trend intelligence (interpretation)
 
-This is Claude's JSON reply to the research prompt. It is stored per platform as `claudeTrends` and always labelled as Claude's interpretation.
+This is Claude's JSON reply, in the output schema fixed by the system prompt (§31). It is stored per platform as `claudeTrends` and always labelled as Claude's findings.
 
 | Field | What it is |
 |---|---|
-| `topic` | The trend, in Claude's words |
-| `trendType` | Emerging trend, active trend, high-volume or established topic, or news/event-driven topic |
+| `topic` | The canonical trend. Variants are listed in `relatedKeywords`. |
+| `trendType` | `emerging`, `active`, `established` or `news_event` |
+| `trendStatus` | `emerging`, `active`, `established` or `declining` |
 | `platform` | The platform it is reported for |
-| `windowStatus` | `current_month` (evidence from this month) or `latest_available` (the newest found, but older) |
-| `corpusTheme` | A: rubrics as reward signals · B: SWE agents and benchmarks · C: agentic RL and post-training · D: evaluation and benchmarks · E: adjacent |
-| `relatedKeywords`, `hashtags` | As Claude reported them |
-| `whyTrending` | Claude's explanation |
+| `hashtags`, `relatedKeywords` | As Claude reported them |
+| `whyTrending` | Claude's explanation. It must say when momentum could not be verified. |
+| `observedSignals` | What Claude observed, for example announcements, repeated posts or releases |
+| `evidence[]` | Title, URL, source, publish date and evidence summary |
+| `brandRelevance` | `high`, `medium`, `low` or `unknown`, with a reason. Taken from the Knowledge Base and Brand Voice files, and never used as evidence of trending. |
 | `confidence` | High, medium or low |
-| `evidence[]` | Title, URL, source (for example "LinkedIn post", "arXiv", "BenchLM.ai") and publish date |
+| `windowStatus` | Set by the bridge: `current_month` if some evidence is dated this month, `unverified` if no date could be read |
 
-**Checks the bridge applies to Claude's analysis:**
+**Checks the bridge applies to Claude's reply:**
 
 - **Evidence links:** a link is kept only if a search in that same session returned it. Any other link is dropped and counted (`unverifiedEvidenceDropped`), so an invented URL cannot get through.
 - **Trends without evidence:** a trend left with no verified evidence is dropped.
-- **Dates:** decoded from the post ID where the platform encodes one (`dateSource: platform_id`). Any other date is marked `claude_stated`.
-- **The window label:** checked, not trusted. A trend labelled `current_month` whose every decoded date is older is relabelled `latest_available` (`windowStatusCorrected`).
+- **Dates:** decoded from the post ID where the platform encodes one, including X links cited in LinkedIn sessions (`dateSource: platform_id`). An arXiv link is dated to the month its ID encodes, e.g. `2609.16816` is September 2026 (`arxiv_id`). A date Claude wrote is used only when it starts as an ISO date or month, and is marked `claude_stated`.
+- **The current-month rule:** checked, not trusted. A trend whose every dated piece of evidence predates the month is dropped, and the drop is recorded in the platform's notes.
 - **Duplicates:** the same finding from two parallel sessions is listed once.
 
-Claude also reports `platforms_with_insufficient_data`: in its own words, what it could not find or verify.
+Claude also reports `platforms_with_insufficient_data` and `search_limitations`: in its own words, what it could not find or verify.
 
 ### The run record
 
@@ -127,23 +136,23 @@ Open-web pages (arXiv, news, blogs) are **not** captured as posts. They appear o
 
 ---
 
-## 5. LinkedIn: two labelled parts
+## 5. LinkedIn
 
-Because LinkedIn posts reach the search index weeks late, LinkedIn sessions get an extra research strategy in their system prompt (`research.platform_notes.linkedin` in `bridge.config.json`):
+Because LinkedIn posts reach the search index weeks late, LinkedIn sessions get an extra research strategy in their system prompt (`research.platform_notes.linkedin` in `bridge.config.json`). It works within the system prompt's rules:
 
-1. **Latest LinkedIn activity** (`latest_available`): the newest individual LinkedIn posts on the topics, dated from their activity IDs. Shown with their real dates and never presented as this month's.
-2. **Trending now, for LinkedIn** (`current_month`): what is gaining attention this month on the same topics across X, news, arXiv and AI-lab blogs. That is, what Ethara's LinkedIn audience is discussing. All evidence is from this month, and its source is named.
+1. **Search linkedin.com first,** with the current month named, then the hashtags. Individual post URLs are cited and dated from their activity IDs.
+2. **An older LinkedIn post is supporting historical context only** (§5). It can appear in `observedSignals` but never establishes a trend.
+3. **When current-month LinkedIn evidence is insufficient** (§7), current-month public web evidence (X, arXiv, lab announcements, industry publications) can describe what the LinkedIn audience is discussing. Such a trend is never called "trending on LinkedIn" (§8), and the real source is named on each piece of evidence.
+4. **LinkedIn's indexing limit is reported** in `search_limitations`, and LinkedIn is listed in `platforms_with_insufficient_data` when no current-month LinkedIn post was found.
 
-In layer A, LinkedIn usually reports status `older`: its newest relevant posts, labelled as from before the window.
-
----
+In layer A, LinkedIn usually reports status `older`: its newest relevant posts are listed as supporting context and are not passed on.
 
 ## 6. Where the data goes
 
 | Destination | What |
 |---|---|
 | `pipeline_runs.summary.platformDiscovery` | The full run record, both layers included |
-| `scraped_items` table | Captured posts (layer A) with verified dates, as rows for the Validation Agent |
+| `scraped_items` table | Current-month captured posts (layer A) with verified dates, as rows for the Validation Agent. Supporting-context posts are not stored here. |
 | Validation Agent | Scores credibility, relevance, freshness and duplicates, and gives each post a verdict |
 | Knowledge Base | New hashtags from validated posts, saved as "Discovered Hashtag" entries (up to 10 per run) |
 | The app (sma.ethara.ai) | Content Intelligence → Scraped Data, the pipeline run screen, and the **Discovery results** popup: Topic + Date + Hashtags + Post URL + Platform |

@@ -92,18 +92,31 @@ export function renderPlatformTrends(report: PlatformTrendReport): string {
   }
   const claude = report.platforms.flatMap((p) => p.claudeTrends ?? [])
   if (claude.length > 0) {
-    lines.push('', "### Claude's trend analysis (bridge analysis layer)", '', '| Platform | Window | Topic | Theme | Type | Confidence | Why trending | Evidence |', '|---|---|---|---|---|---|---|---|')
+    lines.push(
+      '',
+      "### Claude's trend intelligence (research session)",
+      '',
+      '| Platform | Topic | Type | Status | Month | Brand relevance | Confidence | Why trending | Evidence |',
+      '|---|---|---|---|---|---|---|---|---|',
+    )
+    const cell = (t: string): string => t.replace(/\|/g, '/').replace(/\n+/g, ' ')
     for (const t of claude) {
       const ev = t.evidence
-        .map((e, i) => `[${i + 1}](${e.url})${e.publishedAt ? ` ${e.publishedAt.slice(0, 10)}${e.dateSource === 'claude_stated' ? '*' : ''}` : ''}`)
-        .join(' ')
-      const win = t.windowStatus === 'current_month' ? 'This month' : t.windowStatus === 'latest_available' ? `Latest available${t.windowStatusCorrected ? ' (relabelled)' : ''}` : '—'
-      lines.push(`| ${t.platform} | ${win} | ${t.topic} | ${t.corpusTheme ?? '—'} | ${t.trendType || '—'} | ${t.confidence} | ${t.whyTrending.replace(/\|/g, '/')} | ${ev} |`)
+        .map((e, i) => `[${i + 1}](${e.url})${e.publishedAt ? ` ${e.publishedAt.slice(0, 10)}${e.dateSource === 'claude_stated' ? '*' : ''}` : ''} ${cell(e.source)}`)
+        .join(' · ')
+      const month = t.windowStatus === 'current_month' ? 'this month' : 'date not verified'
+      lines.push(
+        `| ${cell(t.platform)} | ${cell(t.topic)} | ${t.trendType || '—'} | ${t.trendStatus || '—'} | ${month} | ${t.brandRelevance.relevance}${t.brandRelevance.reason ? `: ${cell(t.brandRelevance.reason)}` : ''} | ${t.confidence} | ${cell(t.whyTrending)} | ${ev} |`,
+      )
     }
-    lines.push('', '_Claude\'s interpretation. Every evidence URL was returned by a search in the same session; dates marked * are as Claude stated them, the rest are decoded from the post id._')
+    lines.push('', "_Claude's findings. Every evidence URL was returned by a search in the same session. Dates marked * are as Claude stated them; the rest are decoded from the post id or, for arXiv, the id's month. Trends whose evidence all predates the month are dropped._")
   }
   const insufficient = report.platforms.flatMap((p) => p.insufficientData ?? [])
-  if (insufficient.length > 0) lines.push('', `**Insufficient data (Claude):** ${insufficient.join(' · ')}`)
+  if (insufficient.length > 0) lines.push('', `**Platforms with insufficient data (Claude):** ${insufficient.join(' · ')}`)
+  const limits = report.platforms.flatMap((p) => p.searchLimitations ?? [])
+  if (limits.length > 0) lines.push('', `**Search limitations (Claude):** ${limits.join(' · ')}`)
+  const notes = report.platforms.flatMap((p) => p.notes ?? [])
+  if (notes.length > 0) lines.push('', `**Bridge notes:** ${notes.join(' · ')}`)
   return lines.join('\n')
 }
 

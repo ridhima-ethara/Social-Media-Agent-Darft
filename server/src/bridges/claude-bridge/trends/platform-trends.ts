@@ -87,9 +87,20 @@ export interface TrendPost {
   trend: string
 }
 
+/**
+ * How strong a group's evidence is (system prompt §5, §8):
+ *   platform_trend      — current-month posts from at least `platform_trend_min_authors` independent authors
+ *   platform_activity   — current-month posts, but too few independent authors to call it a platform trend
+ *   supporting_context  — posts from before the window: historical context only, never a current trend
+ */
+export type EvidenceLevel = 'platform_trend' | 'platform_activity' | 'supporting_context'
+
 export interface PlatformTrend {
   platform: string
   trend: string
+  evidenceLevel: EvidenceLevel
+  /** Distinct authors among its posts — several URLs from one author are one source. */
+  independentAuthors: number
   /** `today` when at least one of its posts was published on the current date. */
   period: TrendPeriod
   /** How many of its posts are from the current date. */
@@ -145,6 +156,8 @@ export interface PlatformReport {
   claudeTrends?: ClaudeTrend[]
   /** What Claude said it could not verify on this platform. */
   insufficientData?: string[]
+  /** Claude's search_limitations for this platform. */
+  searchLimitations?: string[]
 }
 
 /** The three sections the bridge took its context from, as it read them. */
@@ -397,6 +410,8 @@ function buildTrends(
   forcePeriod?: TrendPeriod,
   /** Compact forms of every keyword and learned hashtag — a tag outside it is new. */
   knownTags: ReadonlySet<string> = new Set(),
+  /** Independent authors needed to call a group a platform trend. */
+  minAuthors = 2,
 ): { trends: PlatformTrend[]; posts: TrendPost[] } {
   const isNew = (display: string): boolean => {
     const key = compact(display.replace(/^#/, ''))
@@ -461,6 +476,16 @@ function buildTrends(
     const newest = list[0]?.item.published_at as string
     const postsToday = list.filter((k) => periodOf(k.item.published_at as string) === 'today').length
 
+    // Independent sources: one author is one source however many URLs; an unattributed post counts on its own.
+    const independentAuthors = new Set(list.map((k) => k.author ?? `url:${k.item.url}`)).size
+    const evidenceLevel: EvidenceLevel =
+      forcePeriod === 'older' ? 'supporting_context' : independentAuthors >= minAuthors ? 'platform_trend' : 'platform_activity'
+    const levelNote =
+      evidenceLevel === 'supporting_context'
+        ? ' Supporting historical context only: evidence from before the current month cannot establish a current trend.'
+        : evidenceLevel === 'platform_trend'
+          ? ` Platform trend: ${independentAuthors} independent authors this month.`
+          : ` Platform activity, not a platform trend: ${independentAuthors} independent author${independentAuthors === 1 ? '' : 's'}, fewer than the ${minAuthors} needed. Current activity is observable, but increasing momentum could not be independently verified.`
     const reason =
       (forcePeriod === 'older'
         ? `From before ${span} — no relevant ${platform.label} post from inside the window was indexed, so these are the newest relevant ones found. `
@@ -473,13 +498,16 @@ function buildTrends(
       `; surfaced by ${queriesHit.size} of ${searches.length} search${searches.length === 1 ? '' : 'es'}.` +
       (platform.id === 'web'
         ? ' News stories state no engagement, so this is ranked by recency and volume only.'
-        : ' Search results state no engagement, so this is ranked by recency and volume only.')
+        : ' Search results state no engagement, so this is ranked by recency and volume only.') +
+      levelNote
 
     const newHashtags = hashtags.filter(isNew)
     const allRelated = list.every((k) => k.relevance.matched_keywords.length === 0)
     trends.push({
       platform: platform.label,
       trend: name,
+      evidenceLevel,
+      independentAuthors,
       newHashtags,
       related: allRelated,
       period: forcePeriod ?? (postsToday > 0 ? 'today' : 'earlier'),
@@ -606,6 +634,7 @@ async function discoverOnPlatform(
       if (outcome.notes && outcome.notes.length > 0) report.notes = outcome.notes
       if (outcome.claudeTrends) report.claudeTrends = outcome.claudeTrends
       if (outcome.insufficientData && outcome.insufficientData.length > 0) report.insufficientData = outcome.insufficientData
+      if (outcome.searchLimitations && outcome.searchLimitations.length > 0) report.searchLimitations = outcome.searchLimitations
       executedByAdapter.push(...outcome.executed)
     } else {
       for (const req of requests) {
@@ -718,7 +747,7 @@ async function discoverOnPlatform(
     return { report, trends: [], posts: [], undated, searchesRun }
   }
 
-  let { trends, posts } = buildTrends(kept, platform, report.searches, span, maxPostsPerTrend, now, day, undefined, knownTags)
+  let { trends, posts } = buildTrends(kept, platform, report.searches, span, maxPostsPerTrend, now, day, undefined, knownTags, cfg.platform_trends.platform_trend_min_authors)
   if (kept.length === 0) {
     const detail = why()
     // Nothing verified inside the window: list the newest relevant posts from before it, labelled.
@@ -728,12 +757,12 @@ async function discoverOnPlatform(
           .slice(0, pt.fallback_max_posts)
       : []
     if (older.length > 0) {
-      ;({ trends, posts } = buildTrends(older, platform, report.searches, span, maxPostsPerTrend, now, day, 'older', knownTags))
+      ;({ trends, posts } = buildTrends(older, platform, report.searches, span, maxPostsPerTrend, now, day, 'older', knownTags, cfg.platform_trends.platform_trend_min_authors))
       report.status = 'older'
       report.kept = older.length
       report.reason =
         `No relevant post verifiably from ${span} (${detail}). ` +
-        `Showing the ${older.length} newest relevant post${older.length === 1 ? '' : 's'} found instead, newest ${(older[0]?.item.published_at as string).slice(0, 10)} — labelled as from before the window.` +
+        `Listing the ${older.length} newest relevant post${older.length === 1 ? '' : 's'} found as supporting historical context only, newest ${(older[0]?.item.published_at as string).slice(0, 10)}. They are not current evidence and are not passed on as current posts.` +
         (report.reason ? ` ${report.reason}` : '')
     } else {
       report.status = 'empty'

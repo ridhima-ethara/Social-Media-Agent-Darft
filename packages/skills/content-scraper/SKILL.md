@@ -131,9 +131,11 @@ that was found, and never filled in. The operator may choose a rolling window in
    is never given the capture time. The keyword searches name the current month and year
    (`recency_hint`), because search engines rank by relevance and not by date; the hashtag search
    does not, so recall does not suffer.
-5a. **The current month, by default.** With `showOlderWhenEmpty` on (the default), a platform with
-   nothing relevant verified inside the window lists its newest relevant posts from before it,
-   labelled `older` and never presented as current; off, it reports empty with its reason. With
+5a. **The current month, by default.** Previous-month evidence is supporting historical context
+   only and can never establish a current trend. With `showOlderWhenEmpty` on (the default), a
+   platform with nothing relevant verified inside the window lists its newest relevant posts from
+   before it in the discovery record, labelled `supporting_context`; they are **not passed to the
+   Validation Agent**. Off, it reports empty with its reason. With
    `listUndatedPlatforms` on (the default), Facebook's relevant posts are listed with "date not
    stated", for reference only.
 5b. **Related posts count, not only keyword matches.** A post that names no configured keyword is
@@ -154,7 +156,10 @@ that was found, and never filled in. The operator may choose a rolling window in
    subdomains, tracking parameters and trailing slashes do not make a new post) is kept once, and
    near-identical text under a different URL is merged by the computed similarity, never a judged
    one. Which searches surfaced a post is kept.
-8. Kept posts are grouped into trends — one per platform per Ethara keyword the posts mention. A
+8. Kept posts are grouped by topic — one group per platform per Ethara keyword the posts mention.
+   A group is a **`platform_trend`** only when at least `platform_trend_min_authors` independent
+   authors posted it this month; fewer is **`platform_activity`**, and its reason says momentum
+   could not be verified. Several URLs from one author are one source. A
    trend keeps at most `maxPostsPerTrend` posts, newest first. Its hashtags are the ones those posts
    wrote; its author is the handle the post URL carries; its reason is computed from the evidence
    (how many posts, how recent, how many of the searches surfaced them) and says that no engagement
@@ -193,14 +198,18 @@ that was found, and never filled in. The operator may choose a rolling window in
     notes. The same documents are ingested into the Knowledge Base, so the bridge's own relevance
     scoring reads them too. Each platform may carry its own research strategy
     (`research.platform_notes`), added to the system prompt for that platform's sessions.
-17. **LinkedIn is researched in two labelled parts**, because public search indexes LinkedIn posts
-    weeks late. (a) *Latest LinkedIn activity*: the newest individual LinkedIn posts on the topics,
-    dated from their activity ids, labelled `latest_available` and never presented as current.
-    (b) *Trending now, for LinkedIn*: what is gaining attention in the current month on the same
-    topics across X, news, arXiv and lab blogs, labelled `current_month`, with every piece of
-    evidence from the current month and its source platform named. The label is checked, not
-    trusted: a `current_month` trend whose every date decodes older is relabelled
-    `latest_available`.
+17. **The research session follows the Trend Intelligence Acquisition Agent system prompt**
+    (`adapters/claude-code.ts`, `SYSTEM_PROMPT`, the operator's text word for word) and returns its
+    JSON schema: trend type and status, observed signals, evidence with summaries, brand relevance,
+    confidence, platforms with insufficient data and search limitations. The three input files are
+    supplied as File 1 — Keywords (`KEYWORD_INSTRUCTION_MAP.md`), File 2 — Knowledge Base
+    (`CORPUS_SUMMARY.md`) and File 3 — Brand Voice (`BRAND_VOICE_INSTRUCTION_MAP.md`). The bridge
+    checks the reply rather than trusting it: evidence URLs must have been returned by the session's
+    own searches, dates are decoded from post ids where possible, and a trend whose every dated piece
+    of evidence predates the current month is dropped. **LinkedIn** searches linkedin.com first; an
+    older LinkedIn post is supporting context only; when current-month LinkedIn evidence is
+    insufficient, current-month public web evidence may describe what the LinkedIn audience is
+    discussing, but never as "trending on LinkedIn".
 
 ## Boundaries
 

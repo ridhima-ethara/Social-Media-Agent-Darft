@@ -876,19 +876,21 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
     { status: 'ok', context: report.context },
   )
   for (const p of report.platforms) {
+    // Nothing current on this platform: its reason stands with the others if the whole capture comes back empty.
+    if (p.status === 'older' || p.status === 'undated') laneReasons.push(`${p.platform}: ${p.reason ?? p.status}`)
     if (p.status === 'older' || p.status === 'undated') {
       // Output, but not current or not datable — said plainly on the lane.
       ctx.emit(
         'activity',
         p.status === 'older'
-          ? `${p.platform}: nothing indexed from the window — ${p.kept} newest relevant post(s) shown, labelled older`
+          ? `${p.platform}: nothing indexed from the current month — ${p.kept} older post(s) kept as supporting context only, not passed on`
           : `${p.platform}: ${p.kept} relevant post(s), date not stated — listed for reference, not validated`,
         {
           status: 'warn',
           platform: p.platformId,
           keyword: DISCOVERY_LANE_KEY,
           searches: p.searches,
-          count: p.status === 'older' ? p.kept : 0,
+          count: 0,
           captured: p.found,
           reason: p.reason,
         },
@@ -954,8 +956,22 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
 
   const byTerm = new Map(keywords.map((k) => [k.term.toLowerCase(), k]))
   const posts: ScrapedPost[] = []
+  /*
+   * PREVIOUS-MONTH EVIDENCE IS CONTEXT, NOT CAPTURE (system prompt §5).
+   * Posts from before the window stay in the run's discovery record, labelled
+   * supporting context, but are never handed to the Validation Agent as current
+   * evidence — so nothing downstream can build on them as a current trend.
+   */
+  const current = report.posts.filter((tp) => tp.period !== 'older')
+  const supporting = report.posts.length - current.length
+  if (supporting > 0) {
+    ctx.emit('activity', `${supporting} post(s) from before ${report.windowName} kept as supporting context only — not passed to validation`, {
+      status: 'warn',
+      supportingContext: supporting,
+    })
+  }
   // Newest first, as the bridge returned them.
-  for (const tp of report.posts) {
+  for (const tp of current) {
     const keyword = tp.matchedEtharaKeywords.map((t) => byTerm.get(t.toLowerCase())).find((k) => k !== undefined)
     // A related post names no keyword: its trend (the brand topic it matched) stands in.
     const term = keyword?.term ?? tp.matchedEtharaKeywords[0] ?? tp.trend
@@ -1095,7 +1111,8 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
     captureSource: 'live' as const,
     captureFallbackReasons: laneReasons,
     /** Handed to the Validation Agent beside `posts`. */
-    platformTrends: report.trends,
+    // Current-month groups only; supporting-context groups stay in the discovery record.
+    platformTrends: report.trends.filter((t) => t.evidenceLevel !== 'supporting_context'),
     /** The wrapped, escaped block. The only form in which a model may read these bodies. */
     evidenceText: evidence.text,
     injectionAttempts: evidence.injectionAttempts,

@@ -105,12 +105,21 @@
         "trend_count": 10,
         "max_searches_per_session": 16,
         "reference_files": [
-          "corpus/reference/BRAND_VOICE_INSTRUCTION_MAP.md",
-          "corpus/reference/CORPUS_SUMMARY.md",
-          "corpus/reference/KEYWORD_INSTRUCTION_MAP.md"
+          {
+            "role": "File 1 \u2014 Keywords",
+            "path": "corpus/reference/KEYWORD_INSTRUCTION_MAP.md"
+          },
+          {
+            "role": "File 2 \u2014 Knowledge Base",
+            "path": "corpus/reference/CORPUS_SUMMARY.md"
+          },
+          {
+            "role": "File 3 \u2014 Brand Voice",
+            "path": "corpus/reference/BRAND_VOICE_INSTRUCTION_MAP.md"
+          }
         ],
         "platform_notes": {
-          "linkedin": "Public search indexes LinkedIn posts weeks late, so a LinkedIn post from the current month is rarely findable. Research LinkedIn in two parts and label every trend with `window_status`:\n\n1. **Latest LinkedIn activity** (`window_status: \"latest_available\"`). Find the most recent individual LinkedIn posts on the topics. Search with the current month first (\"<topic>\" September 2026), then the previous month and the year (\"<topic>\" August 2026, \"<topic>\" 2026), then the hashtags. Use allowed_domains [\"linkedin.com\"]. Cite only individual post URLs: linkedin.com/posts/<author>_<slug>-activity-<id>-<code> or linkedin.com/feed/update/urn:li:activity:<id>. The 19-digit activity id encodes the publish time: shift it right by 22 bits to get Unix milliseconds, and use that as published_at. Prefer the newest. Report these with their true dates as the latest LinkedIn activity, never as current-month activity when they are older.\n2. **Trending now, for LinkedIn** (`window_status: \"current_month\"`). Find what is gaining attention in the current month on these topics across the public web: X posts, news, arXiv papers, AI-lab and company blogs, LinkedIn News stories and LinkedIn newsletters. Focus on what the LinkedIn audience is likely discussing: researchers, ML engineers, heads of AI and CTOs. Every piece of evidence must be from the current month. Name the source platform in `source`, and set `platform` to \"LinkedIn\" with the trend described as a topic for LinkedIn.\n\nNever cite profiles (/in/), company pages (/company/), job listings (/jobs/) or search pages. A /pulse article or LinkedIn News story can support part 2 only when its search result shows a current-month date. Prefer researchers, ML engineers, AI labs and heads of AI over recruiters, course sellers and generic reposts. Return both parts: up to half the trends from part 1 and the rest from part 2. Say in platforms_with_insufficient_data which part came up short and why."
+          "linkedin": "Public search indexes LinkedIn posts weeks after they are published, so direct LinkedIn evidence from the current month is often scarce. Research LinkedIn as follows:\n\n1. **Search linkedin.com first** (allowed_domains [\"linkedin.com\"], or site:linkedin.com). Put the current month in the searches (\"<topic>\" September 2026), then try the hashtags.\n2. **Cite individual LinkedIn post URLs as LinkedIn evidence:** linkedin.com/posts/<author>_<slug>-activity-<id>-<code> or linkedin.com/feed/update/urn:li:activity:<id>. The 19-digit activity id encodes the publish time: shift it right by 22 bits to get Unix milliseconds, and use that date as published_at. Never cite profiles (/in/), company pages (/company/), job listings (/jobs/) or search pages as evidence.\n3. **A LinkedIn post from before the current month is supporting historical context only (section 5).** Mention it in observed_signals if it helps. It can never be the evidence that establishes a trend.\n4. **When current-month LinkedIn evidence is insufficient (section 7), search relevant public web sources for the same topics:** X, research publications (arXiv), official lab and company announcements, industry publications, LinkedIn News and LinkedIn newsletters. Keep only current-month evidence. A trend supported this way describes what the LinkedIn audience (researchers, ML engineers, heads of AI, CTOs) is discussing. State in why_trending that it is not established by LinkedIn-native evidence, never claim it is trending on LinkedIn (section 8), and name the real source in each evidence item's `source`.\n5. Prefer researchers, ML engineers, AI labs and heads of AI over recruiters, course sellers and generic reposts. Record LinkedIn's indexing limitation in search_limitations, and add LinkedIn to platforms_with_insufficient_data when no current-month LinkedIn post was found."
         }
       }
     },
@@ -209,6 +218,7 @@
     "max_searches_per_platform": 30,
     "default_searches_per_platform": 16,
     "fixed_keyword_share": 0.5,
+    "platform_trend_min_authors": 2,
     "broad_searches": 1,
     "exclude_brand_named_searches": true,
     "terms_per_search": 5,

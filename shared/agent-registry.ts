@@ -620,7 +620,7 @@ const SCRAPING_SKILLS: SkillSpec[] = [
         'The most new hashtags one run adds to the Knowledge Base, the most frequent first.',
         { min: 0, max: 50, step: 1 }),
       bool('showOlderWhenEmpty', 'Show the newest posts when the window is empty', true,
-        'On, a platform with no relevant post verified inside the window lists its newest relevant posts from before it (up to about six months back) instead of nothing \u2014 real posts with real dates, labelled \u201colder than the window\u201d, never presented as current. They go through validation like any other post, and the calendar still prefers anything fresher. Off, such a platform reports empty.'),
+        'On, a platform with no relevant post verified inside the window lists its newest relevant posts from before it in the run\u2019s discovery record, as SUPPORTING HISTORICAL CONTEXT only \u2014 real posts with real dates, never presented as current. They are not passed to validation: previous-month evidence cannot establish a current trend. Off, such a platform reports empty.'),
       bool('listUndatedPlatforms', 'List relevant posts that cannot be dated', true,
         'On, platforms whose post ids carry no date (Facebook) are searched too, and their relevant posts are listed with \u201cdate not stated\u201d. They are shown for reference only and never passed on as dated evidence. Off skips such platforms without spending a search.'),
       bool('includeLinkedin', 'Capture LinkedIn', true,

@@ -18,7 +18,7 @@ describe('discovery results', () => {
       post({ url: 'https://example.com/undated', postedAt: '', platform: null, validation: 'validated', verdictReason: '' }),
     ],
     platformTrends: [
-      { platform: 'LinkedIn', trend: 'Agentic AI', period: 'today', postsToday: 1, hashtags: ['#AgenticAI'], newHashtags: [], related: false, engagement: null, posts: [{ url: 'https://www.linkedin.com/posts/a-1', publishedAt: '2026-09-22T08:00:00Z', author: 'a', period: 'today', engagement: null }], matchedEtharaKeywords: ['agentic AI'], reason: '1 post in the last 48 hours.' },
+      { platform: 'LinkedIn', trend: 'Agentic AI', evidenceLevel: 'platform_activity', independentAuthors: 1, period: 'today', postsToday: 1, hashtags: ['#AgenticAI'], newHashtags: [], related: false, engagement: null, posts: [{ url: 'https://www.linkedin.com/posts/a-1', publishedAt: '2026-09-22T08:00:00Z', author: 'a', period: 'today', engagement: null }], matchedEtharaKeywords: ['agentic AI'], reason: '1 post in the last 48 hours.' },
     ],
   }
 

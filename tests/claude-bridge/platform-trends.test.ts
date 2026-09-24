@@ -130,7 +130,7 @@ describe('platform trend discovery', async () => {
   it('returns trends in the requested shape, at most five posts each, newest first', () => {
     expect(report.trends.length).toBeGreaterThan(0)
     for (const t of report.trends) {
-      expect(Object.keys(t).sort()).toEqual(['engagement', 'hashtags', 'matchedEtharaKeywords', 'newHashtags', 'period', 'platform', 'posts', 'postsToday', 'reason', 'related', 'trend'])
+      expect(Object.keys(t).sort()).toEqual(['engagement', 'evidenceLevel', 'hashtags', 'independentAuthors', 'matchedEtharaKeywords', 'newHashtags', 'period', 'platform', 'posts', 'postsToday', 'reason', 'related', 'trend'])
       // A web search result states no engagement, so none is invented.
       expect(t.engagement).toBeNull()
       expect(t.posts.length).toBeLessThanOrEqual(5)
@@ -144,6 +144,19 @@ describe('platform trend discovery', async () => {
     expect([...newest].sort().reverse()).toEqual(newest)
     const all = report.posts.map((p) => p.publishedAt)
     expect([...all].sort().reverse()).toEqual(all)
+  })
+
+  it('calls a group a platform trend only with enough independent authors (system prompt §8, §15)', () => {
+    const agents = report.trends.find((t) => t.trend === 'AI Agent Evaluation')!
+    expect(agents.independentAuthors).toBeGreaterThanOrEqual(2)
+    expect(agents.evidenceLevel).toBe('platform_trend')
+    // Two URLs of one author's post are one source.
+    const rlvr = report.trends.find((t) => t.trend === 'RLVR' && t.platform === 'LinkedIn')!
+    expect(rlvr.independentAuthors).toBe(2)
+    for (const t of report.trends.filter((x) => x.independentAuthors < 2)) {
+      expect(t.evidenceLevel).toBe('platform_activity')
+      expect(t.reason).toMatch(/Platform activity, not a platform trend/)
+    }
   })
 
   it('labels what is trending today and lists it first', () => {
@@ -219,6 +232,9 @@ describe('when a platform has nothing inside the window', async () => {
     expect(report.posts.length).toBeGreaterThan(0)
     for (const p of report.posts) expect(p.period).toBe('older')
     for (const t of report.trends) expect(t.period).toBe('older')
+    // Previous-month evidence is supporting context only, never a current trend (system prompt §5).
+    for (const t of report.trends) expect(t.evidenceLevel).toBe('supporting_context')
+    expect(li.reason).toMatch(/supporting historical context only/)
     expect(report.posts[0]!.url).toContain('rlvr-late')
   })
 

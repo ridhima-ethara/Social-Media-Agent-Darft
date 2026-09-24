@@ -123,7 +123,9 @@ export const bridgeConfigSchema = z.object({
            * Read on every run, so an edit takes effect without a restart. A missing
            * file is reported in the platform's notes, never silently skipped.
            */
-          reference_files: z.array(z.string().min(1)).default([]),
+          reference_files: z
+            .array(z.union([z.string().min(1), z.object({ role: z.string().min(1), path: z.string().min(1) })]))
+            .default([]),
           /** Platform-specific instructions added to that platform's brief. */
           platform_notes: z.record(z.string(), z.string().min(1)).default({}),
         })
@@ -208,6 +210,13 @@ export const bridgeConfigSchema = z.object({
      * keyword is searched over successive runs.
      */
     fixed_keyword_share: z.number().min(0).max(1).default(0.5),
+    /**
+     * PLATFORM TREND VS PLATFORM ACTIVITY (system prompt §8, §15). A group of
+     * current-month posts on one topic is a `platform_trend` only when at least
+     * this many INDEPENDENT authors posted it; fewer is `platform_activity`.
+     * Several URLs from one author are one source.
+     */
+    platform_trend_min_authors: positiveInt.default(2),
     /** How many searches the broad field terms (`broad_terms`) fill, one term each. */
     broad_searches: z.number().int().min(0).default(1),
     /**

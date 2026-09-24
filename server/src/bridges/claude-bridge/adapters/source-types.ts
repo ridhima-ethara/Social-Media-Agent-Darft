@@ -118,6 +118,8 @@ export interface BatchOutcome {
   claudeTrends?: ClaudeTrend[]
   /** Platforms Claude reported it could not verify trend data for, in its words. */
   insufficientData?: string[]
+  /** Claude's search_limitations, in its words. */
+  searchLimitations?: string[]
 }
 
 export interface ClaudeTrendEvidence {
@@ -127,24 +129,29 @@ export interface ClaudeTrendEvidence {
   source: string
   /** Decoded from the platform's post id when it carries one; otherwise the date Claude stated, marked as such. */
   publishedAt: string | null
-  dateSource: 'platform_id' | 'claude_stated' | 'none'
+  /** platform_id: decoded from a post id · arxiv_id: the submission month an arXiv id encodes (YYMM) · claude_stated · none. */
+  dateSource: 'platform_id' | 'arxiv_id' | 'claude_stated' | 'none'
+  /** Claude's evidence_summary. */
+  summary: string
 }
 
+/** One trend from the research session, in the system prompt's output schema, after the bridge's checks. */
 export interface ClaudeTrend {
   topic: string
+  /** emerging | active | established | news_event */
   trendType: string
+  /** emerging | active | established | declining */
+  trendStatus: string
   platform: string
   relatedKeywords: string[]
   hashtags: string[]
   whyTrending: string
+  observedSignals: string[]
   evidence: ClaudeTrendEvidence[]
+  brandRelevance: { relevance: 'high' | 'medium' | 'low' | 'unknown'; reason: string }
   confidence: 'high' | 'medium' | 'low'
-  /** current_month: evidence from the window · latest_available: the newest found, older than the window. Checked against decoded dates. */
-  windowStatus: 'current_month' | 'latest_available' | 'unstated'
-  /** True when Claude said current_month but every decoded date was older, so the bridge relabelled it. */
-  windowStatusCorrected: boolean
-  /** The corpus theme (A–E, KEYWORD_INSTRUCTION_MAP.md) Claude matched it to, or null when it gave none. */
-  corpusTheme: string | null
+  /** current_month: some evidence is dated inside the window · unverified: no evidence date could be read. */
+  windowStatus: 'current_month' | 'unverified'
   /** Evidence Claude cited that no search in the session returned: dropped, and counted here. */
   unverifiedEvidenceDropped: number
 }

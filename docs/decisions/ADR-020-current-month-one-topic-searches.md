@@ -52,3 +52,13 @@ At the operator's request, the Claude Code session no longer runs a fixed list o
 - **The month in words.** The brief's time window now reads "September 2026 — the current month: 1 September 2026 to 24 September 2026 (today), Asia/Kolkata". Before, it gave UTC dates, and midnight on the 1st in India printed as "2026-08-31".
 - **Instructions added to the brief.** A "Current month" section tells Claude to name the month in its searches. Hashtags get their own line instead of appearing as a raw query in the topic list. Each trend carries a `corpus_theme` (A–E).
 - **LinkedIn instructions** (`research.platform_notes.linkedin`). Cite individual post URLs, never profiles, company pages, jobs or `/pulse` articles. When no current-month post exists, report that rather than cite an older one as current.
+
+## Amendment 3 (2026-09-24): the enhanced system prompt, and the bridge aligned to it
+
+The operator replaced the system prompt with an enhanced "Trend Intelligence Acquisition Agent" prompt, 32 sections long. It is stored word for word in `adapters/claude-code.ts` (`SYSTEM_PROMPT`), and a test confirms the string sent at run time matches it. The bridge was brought into line with its rules:
+
+- **§1 input files.** The three reference documents are passed in role order, each labelled: File 1 — Keywords (`KEYWORD_INSTRUCTION_MAP.md`), File 2 — Knowledge Base (`CORPUS_SUMMARY.md`), File 3 — Brand Voice (`BRAND_VOICE_INSTRUCTION_MAP.md`). They appear under "INPUT FILES PROVIDED" after the prompt.
+- **§31 output schema ("use exactly").** The session prompt no longer asks for fields outside the schema (`corpus_theme`, `window_status`). The parser reads `trend_type`, `trend_status`, `observed_signals`, `evidence_summary`, `brand_relevance` and `search_limitations`.
+- **§4–5 current month.** Checked by the bridge, not trusted. A trend whose every dated piece of evidence predates the window is dropped and counted in the platform's notes. In the bridge's own layer, previous-month posts are `supporting_context`: they stay in the discovery record and are **no longer passed to the Validation Agent**.
+- **§8 and §15, platform trend vs platform activity.** A group of current-month posts is a `platform_trend` only when `platform_trend_min_authors` (2) independent authors posted it. Otherwise it is `platform_activity`. Several URLs from one author count as one source.
+- **LinkedIn strategy.** Rewritten to fit §5, §7 and §8. Search linkedin.com first. An older LinkedIn post is supporting context only. Current-month web evidence may describe what the LinkedIn audience is discussing when LinkedIn-native evidence is insufficient, but is never called trending on LinkedIn. The earlier "latest available" trend part is withdrawn.

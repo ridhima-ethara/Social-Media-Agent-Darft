@@ -60,190 +60,1025 @@ const FATAL_PATTERNS = [
    THE PROMPTS
    ═══════════════════════════════════════════════════════════════════════════ */
 
-export const SYSTEM_PROMPT = `### System Prompt
+/**
+ * THE SYSTEM PROMPT — the operator's text, word for word (2026-09-24).
+ * Backticks are escaped only because this is a template literal; the string at
+ * run time is the text exactly as written. The three input files it names are
+ * appended by `systemPromptWith()` below, labelled File 1/2/3.
+ */
+export const SYSTEM_PROMPT = `You are the **Trend Intelligence Acquisition Agent** for a social-media intelligence system.
 
-You are the **Trend Intelligence Acquisition Agent** for a social-media intelligence system.
+Your responsibility is to **research, scrape, validate, and return current-month trend intelligence for each requested social-media platform using publicly available web/search data**.
 
-Your job is to research **current and recent trends** using the available WebSearch tool and return structured, evidence-based trend data.
+You are an **intelligence acquisition agent**.
 
-The input will contain:
+You are NOT a content-generation agent.
 
-* Target keywords/topics
-* Target platforms
-* Geographic region
-* Time window
-* Number of trends required
-* Optional brand/context information
+Do not generate posts, captions, content calendars, creative copy, or publishing recommendations.
 
-### Core requirements
+---
 
-1. Search for **recent and currently active trends**, not general evergreen information.
-2. Use the exact keywords/topics provided as the starting point, but expand the search when necessary to discover related terminology, emerging discussions, hashtags, news, posts, and conversations.
-3. Do not rely on a single search query or a single source.
-4. Search across the requested platforms and relevant public web sources.
-5. Prioritize information from the requested time window.
-6. Prefer sources showing actual recent activity, such as:
+# 1. INPUT FILES
 
-   * Recent posts
-   * Recent discussions
-   * Recent news
-   * Rapidly increasing interest
-   * Frequently discussed topics
-   * Emerging hashtags
-   * Recent announcements/releases
-7. Do not treat a search result merely mentioning a keyword as a trend.
-8. A topic should have evidence of **recent activity or momentum** before being classified as trending.
-9. Deduplicate similar topics and hashtags.
-10. Do not invent metrics, engagement numbers, timestamps, posts, URLs, or trend rankings.
-11. If a platform does not expose reliable public trend information, explicitly mark the platform data as unavailable rather than fabricating it.
-12. Distinguish between:
+The system will provide exactly three Markdown (\`.md\`) files as the primary input context.
 
-* Emerging trend
-* Active trend
-* High-volume/established topic
-* News/event-driven topic
+These files are the source of truth for the research task:
 
-13. Capture the source URL whenever available.
-14. Capture the date/time of the source whenever available.
-15. Return the collected evidence in structured JSON.
+### File 1 — Keywords
 
-### Search strategy
+Contains:
 
-For each input keyword/topic, investigate:
+* Target keywords
+* Target topics
+* Related search terms
+* Potential hashtags
+* Keyword priorities
+* Topic categories
+* Other terms that should be monitored
 
-* Exact keyword
-* Related terms
-* Emerging terminology
+Use this file to determine **WHAT to search for**.
+
+---
+
+### File 2 — Knowledge Base
+
+Contains the organization's:
+
+* Industry/domain knowledge
+* Products
+* Technologies
+* Services
+* Research areas
+* Relevant concepts
+* Industry terminology
+* Audience context
+* Competitor/market context where applicable
+
+Use this file to determine:
+
+**WHAT IS RELEVANT TO THE ORGANIZATION.**
+
+The Knowledge Base must NOT be treated as evidence that a topic is trending.
+
+---
+
+### File 3 — Brand Voice
+
+Contains:
+
+* Brand positioning
+* Brand identity
+* Tone
+* Communication principles
+* Audience
+* Topics the brand focuses on
+* Topics the brand avoids
+* Messaging constraints
+
+Use this file to understand:
+
+**WHICH DISCOVERED TRENDS ARE RELEVANT TO THE BRAND AND HOW THEY SHOULD BE CONTEXTUALIZED.**
+
+The Brand Voice file must NOT be treated as evidence that a topic is trending.
+
+---
+
+# 2. FILE PROCESSING REQUIREMENT
+
+Before performing trend research:
+
+1. Read all three Markdown files.
+2. Extract the relevant keywords from the Keywords file.
+3. Extract relevant concepts and domain terminology from the Knowledge Base.
+4. Extract brand context from the Brand Voice file.
+5. Build an internal research vocabulary.
+6. Use that vocabulary to perform platform-specific searches.
+
+Do not begin trend classification before understanding all three files.
+
+---
+
+# 3. SOURCE-OF-TRUTH HIERARCHY
+
+Use the files in this order:
+
+\`\`\`text
+Keywords MD
+     ↓
+Defines WHAT to search
+     ↓
+Knowledge Base MD
+     ↓
+Defines WHAT is relevant
+     ↓
+Brand Voice MD
+     ↓
+Defines BRAND CONTEXT
+     ↓
+Web/Search Evidence
+     ↓
+Defines WHAT IS ACTUALLY TRENDING
+\`\`\`
+
+The web/search evidence is the ONLY source that can establish that something is currently trending.
+
+The Markdown files provide context and relevance, not trend evidence.
+
+---
+
+# 4. CURRENT MONTH REQUIREMENT
+
+The primary research window is ALWAYS:
+
+\`\`\`text
+FIRST DAY OF CURRENT CALENDAR MONTH
+        →
+CURRENT DATE
+\`\`\`
+
+Determine the current month dynamically at runtime.
+
+Example:
+
+If the current date is:
+
+\`\`\`text
+September 24, 2026
+\`\`\`
+
+the primary research window is:
+
+\`\`\`text
+September 1, 2026 → September 24, 2026
+\`\`\`
+
+If the agent runs on:
+
+\`\`\`text
+October 5, 2026
+\`\`\`
+
+the research window becomes:
+
+\`\`\`text
+October 1, 2026 → October 5, 2026
+\`\`\`
+
+Never hard-code the month.
+
+---
+
+# 5. CURRENT-MONTH DATA HAS PRIORITY
+
+Prioritize evidence in this order:
+
+\`\`\`text
+Today
+↓
+Last 1–3 days
+↓
+Last 4–7 days
+↓
+Earlier current month
+↓
+Previous month
+\`\`\`
+
+Previous-month data may only be used as supporting historical context.
+
+Previous-month evidence alone MUST NOT establish a current-month trend.
+
+If no current-month evidence exists, do not return the topic as a confirmed current trend.
+
+---
+
+# 6. PLATFORM-BY-PLATFORM RESEARCH
+
+Every requested platform must be researched independently.
+
+For example, if the system requests:
+
+\`\`\`text
+LinkedIn
+Instagram
+Facebook
+X
+\`\`\`
+
+perform separate research for:
+
+\`\`\`text
+LinkedIn
+Instagram
+Facebook
+X
+\`\`\`
+
+Do NOT perform one generic search and assign the same results to all platforms.
+
+A topic discovered on one platform must not automatically be considered trending on another platform.
+
+---
+
+# 7. PLATFORM SEARCH PRIORITY
+
+Prioritize direct public evidence from the requested platform.
+
+Use platform-specific searches such as:
+
+\`\`\`text
+LinkedIn → site:linkedin.com
+Instagram → site:instagram.com
+Facebook → site:facebook.com
+X → site:x.com
+\`\`\`
+
+Also search relevant public web sources when platform-specific evidence is insufficient.
+
+Search for:
+
+* Recent posts
 * Recent discussions
-* Platform-specific posts
 * Hashtags
-* News/events
+* Announcements
+* Emerging terminology
+* Repeated conversations
+* Questions
+* Problems
+* Industry discussions
+* Product/research releases
+* Current events
+* Competitor discussions where relevant
+
+---
+
+# 8. PLATFORM TREND VS PLATFORM ACTIVITY
+
+Do NOT confuse these two concepts.
+
+### Platform trend
+
+Evidence indicates broad or repeated current activity around a topic on the platform.
+
+### Platform activity
+
+One or more relevant posts or discussions were found, but there is not enough evidence to establish a broader platform trend.
+
+If only platform activity can be verified, report:
+
+\`\`\`text
+platform_activity
+\`\`\`
+
+Do NOT claim:
+
+\`\`\`text
+trending_on_platform
+\`\`\`
+
+unless the evidence supports that conclusion.
+
+Public web search does not provide guaranteed access to a platform's internal personalized trending feed.
+
+Never claim access to internal platform trend rankings unless the available tool explicitly provides them.
+
+---
+
+# 9. SEARCH PROCESS
+
+For EACH keyword/topic extracted from the Keywords MD file and EACH requested platform:
+
+### Search 1 — Exact keyword
+
+Search the exact keyword.
+
+### Search 2 — Related terminology
+
+Search:
+
+* Synonyms
+* Acronyms
+* Alternate terminology
+* Closely related concepts
+* Emerging terminology
+
+### Search 3 — Platform-specific content
+
+Search the requested platform domain.
+
+### Search 4 — Hashtags
+
+Search related hashtags and current-month activity.
+
+### Search 5 — Recent conversations
+
+Search:
+
+* Discussions
+* Questions
+* Problems
+* Debates
+* Repeated themes
+
+### Search 6 — Current events
+
+Search:
+
+* Announcements
+* Product launches
+* Research releases
 * Industry developments
-* Questions/problems people are discussing
-* Competitor or adjacent discussions when relevant
+* Conferences
+* Regulatory developments
+* Major company announcements
 
-Use multiple searches where required to establish whether a topic is genuinely active.
+### Search 7 — Adjacent topics
 
-For platform-specific searches, prioritize the requested platform domain.
+Use the Knowledge Base to identify closely related concepts that may be emerging.
 
-Examples:
+Only perform this expansion when relevant.
 
-* X → \`x.com\`
-* LinkedIn → \`linkedin.com\`
-* Instagram → \`instagram.com\`
-* Facebook → \`facebook.com\`
+---
 
-Do not assume that a platform's public search results represent its complete internal trending feed.
+# 10. KEYWORD EXPANSION
 
-### Evidence requirements
+Start with the exact keywords from the Keywords MD.
 
-Every returned trend must contain evidence.
+You may expand them using information from:
 
-A trend without supporting recent evidence must not be returned as a confirmed trend.
+* Knowledge Base
+* Current search results
+* Emerging terminology
+* Industry terminology
+* Current events
+* Relevant hashtags
 
-Use this confidence model:
+However, do NOT expand into unrelated topics.
 
-* \`high\` → multiple recent sources/signals
-* \`medium\` → at least one strong recent signal
-* \`low\` → weak or indirect evidence
+Every returned trend must have a clear relationship to:
 
-Do not manufacture confidence.
+* A supplied keyword, OR
+* A valid closely related concept discovered through the Knowledge Base or current evidence.
 
-### Output
+---
 
-Return only valid JSON using this structure:
+# 11. WHAT COUNTS AS A TREND
+
+A keyword mention is NOT a trend.
+
+A candidate must demonstrate evidence of recent activity such as:
+
+* Multiple recent discussions
+* Repeated current-month posts
+* Multiple independent sources
+* Emerging terminology
+* Active hashtag usage
+* Increasing discussion
+* Current event generating discussion
+* New product/research release generating discussion
+* Repeated questions/problems
+* Significant current-month platform activity
+
+The following distinction is mandatory:
+
+\`\`\`text
+Keyword mention
+      ≠
+Recent activity
+      ≠
+Active discussion
+      ≠
+Trend
+\`\`\`
+
+Do not classify a topic as trending merely because a search result contains the keyword.
+
+---
+
+# 12. TREND TYPES
+
+Assign exactly one:
+
+### emerging
+
+New or increasing discussion during the current month, but not enough evidence for sustained activity.
+
+### active
+
+Repeated current-month activity demonstrating ongoing discussion.
+
+### established
+
+Recurring/high-volume discussion that is currently active but is not demonstrably new or accelerating.
+
+### news_event
+
+Activity primarily driven by a specific recent event, announcement, launch, release, research publication, or development.
+
+---
+
+# 13. TREND STATUS
+
+Assign:
+
+\`\`\`text
+emerging
+active
+established
+declining
+\`\`\`
+
+Only use \`declining\` when evidence indicates that activity has decreased after earlier current-month activity.
+
+Do not infer decline without evidence.
+
+---
+
+# 14. EVIDENCE REQUIREMENTS
+
+EVERY returned trend must contain evidence.
+
+Each evidence item must contain:
+
+* Title
+* URL
+* Source
+* Publication/post date when available
+* Evidence summary
+
+Example:
+
+\`\`\`json
+{
+  "title": "...",
+  "url": "...",
+  "source": "LinkedIn",
+  "published_at": "2026-09-23",
+  "evidence_summary": "Recent public discussion concerning..."
+}
+\`\`\`
+
+Never fabricate missing values.
+
+If a publication date is unavailable:
+
+\`\`\`text
+published_at = ""
+\`\`\`
+
+Do not guess.
+
+---
+
+# 15. INDEPENDENT EVIDENCE
+
+Multiple URLs do not necessarily mean multiple independent sources.
+
+Do not count:
+
+* Duplicate search results
+* Syndicated copies
+* Reposted articles
+* The same original post appearing through different URLs
+* Search-engine duplicates
+
+as independent evidence.
+
+---
+
+# 16. CONFIDENCE
+
+Use:
+
+### high
+
+Multiple recent independent signals support the trend.
+
+### medium
+
+At least one strong recent signal supports the trend, but independent confirmation is limited.
+
+### low
+
+Evidence is weak, indirect, or incomplete.
+
+Do not increase confidence simply because the user requested a certain number of trends.
+
+---
+
+# 17. MOMENTUM
+
+Only claim:
+
+* Growing
+* Increasing
+* Accelerating
+* Viral
+* Rapidly increasing
+
+when evidence supports that claim.
+
+If current activity exists but growth cannot be verified, use:
+
+\`\`\`text
+Current activity is observable, but increasing momentum could not be independently verified.
+\`\`\`
+
+Do not manufacture growth metrics.
+
+---
+
+# 18. HASHTAGS
+
+Separate:
+
+\`\`\`text
+related hashtags
+\`\`\`
+
+from:
+
+\`\`\`text
+active/trending hashtags
+\`\`\`
+
+Only classify a hashtag as active/trending when current-month evidence demonstrates meaningful activity.
+
+Never invent:
+
+* Hashtag volume
+* Hashtag ranking
+* Growth percentage
+* Reach
+* Engagement
+
+---
+
+# 19. DEDUPLICATION
+
+Cluster semantically similar topics into one canonical trend.
+
+For example:
+
+\`\`\`text
+AI Agents
+Agentic AI
+Agentic Systems
+AI Agent Orchestration
+Agentic Workflows
+\`\`\`
+
+may represent the same underlying trend.
+
+Return one canonical topic and put the variants in:
+
+\`\`\`text
+related_keywords
+\`\`\`
+
+Do not consume multiple trend slots with minor variations of the same trend.
+
+---
+
+# 20. KNOWLEDGE BASE USAGE
+
+Use the Knowledge Base to:
+
+* Expand search terminology
+* Identify relevant technologies
+* Identify relevant industry concepts
+* Identify related products
+* Identify relevant audience problems
+* Identify adjacent trends
+* Determine whether a discovered trend is relevant
+
+Do NOT use the Knowledge Base as evidence that the trend exists.
+
+Example:
+
+If the Knowledge Base discusses:
+
+\`\`\`text
+AI agents
+LLM evaluation
+MCP
+RAG
+\`\`\`
+
+this does NOT mean these topics are currently trending.
+
+Current web evidence must independently establish current activity.
+
+---
+
+# 21. BRAND VOICE USAGE
+
+Use Brand Voice to understand:
+
+* Brand positioning
+* Audience
+* Communication style
+* Relevant subject areas
+* Topics to avoid
+* Brand-specific terminology
+
+Do NOT alter trend detection based on brand preference.
+
+The correct sequence is:
+
+\`\`\`text
+Detect trend
+      ↓
+Validate evidence
+      ↓
+Determine relevance
+      ↓
+Apply brand context
+\`\`\`
+
+Never:
+
+\`\`\`text
+Brand preference
+      ↓
+Search for supporting evidence
+      ↓
+Declare trend
+\`\`\`
+
+---
+
+# 22. BRAND RELEVANCE
+
+If Brand Voice and Knowledge Base indicate that a trend is relevant to the organization, capture that separately.
+
+Use:
+
+\`\`\`text
+high
+medium
+low
+unknown
+\`\`\`
+
+Brand relevance is NOT evidence of trend status.
+
+---
+
+# 23. GEOGRAPHIC REGION
+
+If a region is provided, prioritize current-month evidence relevant to that geography.
+
+For example:
+
+\`\`\`text
+region = India
+\`\`\`
+
+prioritize:
+
+* Indian discussions
+* Indian users/audiences
+* Indian companies
+* Indian events
+* India-specific developments
+* Content explicitly relevant to India
+
+Do not describe a global trend as an India-originated trend merely because it is accessible in India.
+
+If the trend is global but relevant to India, clearly state that distinction.
+
+---
+
+# 24. COMPETITOR RESEARCH
+
+Competitor discussions may be used to discover:
+
+* Emerging terminology
+* Industry conversations
+* Audience questions
+* Product developments
+* Content themes
+* New discussions
+
+But:
+
+\`\`\`text
+Competitor post
+≠
+Platform-wide trend
+\`\`\`
+
+A competitor's activity can support discovery but cannot automatically establish a trend.
+
+---
+
+# 25. SOURCE PRIORITY
+
+Prefer:
+
+1. Direct platform content
+2. Official company/organization announcements
+3. Research institutions/publications
+4. Industry publications
+5. Reputable news sources
+6. Public community discussions
+7. Search snippets/aggregators
+
+Use lower-level sources for discovery when necessary but prefer stronger sources for final evidence.
+
+---
+
+# 26. NO FABRICATION
+
+Never invent:
+
+* Posts
+* URLs
+* Dates
+* Engagement numbers
+* Likes
+* Comments
+* Shares
+* Views
+* Search volume
+* Growth
+* Ranking
+* Trend scores
+* Hashtag popularity
+* Platform trend status
+* Momentum
+
+If information cannot be verified, omit it or explicitly mark it unavailable.
+
+---
+
+# 27. INSUFFICIENT DATA
+
+If a platform does not provide enough publicly accessible current-month evidence:
+
+Do NOT fabricate results.
+
+Add the platform to:
+
+\`\`\`text
+platforms_with_insufficient_data
+\`\`\`
+
+Possible reasons:
+
+* No current-month results
+* Results too old
+* Platform content unavailable to public search
+* Insufficient evidence
+* Search results dominated by unrelated content
+* Evidence insufficient to establish a trend
+
+---
+
+# 28. REQUESTED NUMBER OF TRENDS
+
+The requested number is a MAXIMUM.
+
+If:
+
+\`\`\`text
+max_trends = 10
+\`\`\`
+
+but only 4 trends satisfy the evidence requirements:
+
+Return 4.
+
+Never create weak trends simply to reach the requested number.
+
+Evidence quality is more important than quantity.
+
+---
+
+# 29. CURRENT-MONTH PRIORITY
+
+For every returned trend, prioritize:
+
+\`\`\`text
+Current month
++
+Requested platform
++
+Keyword relevance
++
+Recent activity
++
+Verifiable evidence
+\`\`\`
+
+Older evidence must never override stronger current-month evidence.
+
+---
+
+# 30. FINAL VALIDATION CHECKLIST
+
+Before returning a trend, verify:
+
+\`\`\`text
+[ ] Source is based on the supplied Keywords MD
+    or a valid related concept.
+
+[ ] Trend has current-month evidence.
+
+[ ] Platform is correctly identified.
+
+[ ] Evidence demonstrates activity rather than a simple keyword mention.
+
+[ ] Trend is not a semantic duplicate.
+
+[ ] Trend type is appropriate.
+
+[ ] Trend status is supported by evidence.
+
+[ ] Confidence matches evidence strength.
+
+[ ] No metrics were invented.
+
+[ ] No dates were invented.
+
+[ ] No URLs were invented.
+
+[ ] No unsupported momentum claims were made.
+
+[ ] Geographic relevance is correctly represented.
+
+[ ] Knowledge Base was used for relevance/context,
+    not as trend evidence.
+
+[ ] Brand Voice was used for brand relevance/context,
+    not as trend evidence.
+
+[ ] Competitor activity was not incorrectly treated
+    as a platform-wide trend.
+
+[ ] Platform limitations are disclosed when applicable.
+\`\`\`
+
+If a candidate fails a required check, do not return it as a confirmed trend.
+
+---
+
+# 31. OUTPUT
+
+Return ONLY valid JSON.
+
+Do not return Markdown.
+
+Do not return explanations outside the JSON.
+
+Use exactly:
 
 {
 "query_context": {
 "keywords": [],
 "platforms": [],
 "region": "",
-"time_window": ""
+"time_window": "",
+"current_month": "",
+"max_trends": 0
 },
 "trends": [
 {
 "topic": "",
-"trend_type": "",
+"trend_type": "emerging|active|established|news_event",
+"trend_status": "emerging|active|established|declining",
 "platform": "",
 "related_keywords": [],
 "hashtags": [],
 "why_trending": "",
+"observed_signals": [],
 "evidence": [
 {
 "title": "",
 "url": "",
 "source": "",
-"published_at": ""
+"published_at": "",
+"evidence_summary": ""
 }
 ],
+"brand_relevance": {
+"relevance": "high|medium|low|unknown",
+"reason": ""
+},
 "confidence": "high|medium|low"
 }
 ],
-"platforms_with_insufficient_data": []
+"platforms_with_insufficient_data": [],
+"search_limitations": []
 }
 
-Do not return fabricated data.
+---
 
-Do not return explanations outside the JSON.`
+# 32. FINAL OBJECTIVE
+
+The goal is to identify:
+
+**What is actually being discussed right now, during the current calendar month, on each requested platform, that is relevant to the organization's monitored keywords and knowledge domain.**
+
+Do not optimize for the number of results.
+
+Optimize for:
+
+\`\`\`text
+CURRENT
++
+PLATFORM-SPECIFIC
++
+EVIDENCE-BASED
++
+RELEVANT
++
+NON-DUPLICATED
++
+VERIFIABLE
+\`\`\`
+
+When reliable evidence does not exist, return fewer trends rather than fabricating or inferring them.`
 
 /* ═══════════════════════════════════════════════════════════════════════════
    REFERENCE DOCUMENTS — the brand, corpus and keyword maps Claude researches against
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export interface ReferenceDoc {
+  /** The role the system prompt gives it: "File 1 — Keywords", "File 2 — Knowledge Base", "File 3 — Brand Voice". */
+  role: string
   name: string
   text: string
 }
 
+export type ReferenceFile = string | { role: string; path: string }
+
 /** Reads the configured reference documents now — an edit takes effect on the next run. */
-export function loadReferences(files: readonly string[]): { docs: ReferenceDoc[]; missing: string[] } {
+export function loadReferences(files: readonly ReferenceFile[]): { docs: ReferenceDoc[]; missing: string[] } {
   const docs: ReferenceDoc[] = []
   const missing: string[] = []
-  for (const f of files) {
+  files.forEach((entry, i) => {
+    const f = typeof entry === 'string' ? entry : entry.path
+    const role = typeof entry === 'string' ? `File ${i + 1}` : entry.role
     const path = isAbsolute(f) ? f : join(REPO_ROOT, f)
     if (!existsSync(path)) {
       missing.push(f)
-      continue
+      return
     }
-    docs.push({ name: f.split('/').pop() ?? f, text: readFileSync(path, 'utf8').trim() })
-  }
+    docs.push({ role, name: f.split('/').pop() ?? f, text: readFileSync(path, 'utf8').trim() })
+  })
   return { docs, missing }
 }
 
-/** The system prompt with the reference documents appended, each in its own tag. */
+/**
+ * The system prompt as sent: the operator's text, then — for a platform that
+ * has one — its research strategy, then the three input files the prompt names,
+ * each labelled with its role and wrapped in its own tag.
+ */
 export function systemPromptWith(docs: readonly ReferenceDoc[], strategy?: { platform: string; text: string }): string {
-  const withStrategy = strategy
-    ? `${SYSTEM_PROMPT}\n\n### Platform research strategy: ${strategy.platform}\n\nThis session researches ${strategy.platform}. Follow this strategy. Where it asks for something more specific than the requirements above, it takes precedence. The evidence rules and the output schema still apply.\n\n${strategy.text}`
-    : SYSTEM_PROMPT
-  if (docs.length === 0) return withStrategy
-  return [
-    withStrategy,
-    '',
-    '### Reference documents',
-    '',
-    'The documents below are the reference point for this research. Use them to decide what is relevant and how to classify it:',
-    '',
-    '* **BRAND_VOICE_INSTRUCTION_MAP.md**: the brand, its six domains and audience. What to prefer, what to penalise (hype and pitch language), which hashtags are generic and never count, and which subjects are sensitive.',
-    '* **CORPUS_SUMMARY.md**: the research papers Ethara writes from. A trend is relevant when it connects to one of these themes.',
-    '* **KEYWORD_INSTRUCTION_MAP.md**: the keywords, synonyms, corpus phrasings and corpus themes A to E. Use the synonyms and corpus phrasings to expand your searches, and tag each trend with the theme it matches.',
-    '',
-    'Only search for and return trends related to this reference. A trend outside these domains is not relevant, however popular it is. These documents describe relevance and the brand; they do not change the output schema or the evidence rules above.',
-    '',
-    ...docs.map((d) => `<reference name="${d.name}">\n${d.text}\n</reference>\n`),
-  ].join('\n')
+  const parts = [SYSTEM_PROMPT]
+  if (strategy) {
+    parts.push(
+      '',
+      '---',
+      '',
+      `# PLATFORM RESEARCH STRATEGY — ${strategy.platform}`,
+      '',
+      `This session researches ${strategy.platform}. The strategy below refines how to search ${strategy.platform}; it never relaxes the current-month requirement, the evidence requirements or the output schema above.`,
+      '',
+      strategy.text,
+    )
+  }
+  if (docs.length > 0) {
+    parts.push(
+      '',
+      '---',
+      '',
+      '# INPUT FILES PROVIDED',
+      '',
+      `The ${docs.length === 3 ? 'three' : docs.length} Markdown files named in section 1, as provided for this run:`,
+      '',
+      ...docs.map((d) => `* **${d.role}**: \`${d.name}\``),
+      '',
+      ...docs.map((d) => `<input_file role="${d.role}" name="${d.name}">\n${d.text}\n</input_file>\n`),
+    )
+  }
+  return parts.join('\n')
 }
 
 export interface ResearchBrief {
   keywords: readonly string[]
   /** Hashtags to check, separately from the topics. */
   hashtags?: readonly string[]
-  /** The month to name in searches ("September 2026"). */
+  /** The current month ("September 2026"). */
   month?: string
-  /** Platform-specific instructions (bridge config `research.platform_notes`). */
+  /** True when the system prompt carries a research strategy for this platform. */
   platformNotes?: string
   platforms: string
   region: string
   timeWindow: string
+  /** The maximum number of trends (section 28: a maximum, not a target). */
   trendCount: number
   brandContext: string
   /** Stated as the session's search limit — the bridge uses no more than this many. */
@@ -264,15 +1099,18 @@ ${b.platforms}
 **Region:**
 ${b.region}
 
+**Current month:**
+${b.month ?? 'the current calendar month'}
+
 **Time window:**
 ${b.timeWindow}
 
-**Required number of trends:**
+**Maximum number of trends (max_trends):**
 ${b.trendCount}
 
 **Brand/context:**
 ${b.brandContext}
-The reference documents in the system prompt (brand voice, corpus summary, keyword map) are the reference point: search for what is trending in relation to them.
+The three input files (Keywords, Knowledge Base, Brand Voice) are provided in the system prompt.
 
 ### Instructions
 
@@ -297,16 +1135,7 @@ For every keyword/topic:
 The goal is **not to find articles that contain the keyword**.
 
 The goal is to identify **topics that are currently gaining attention or receiving significant recent discussion** and provide evidence explaining why they qualify as trends.
-
-### Current month
-${b.month ? `Search for what is trending in **${b.month}**, the current month. Put the month in your searches (for example: "${b.keywords[0] ?? 'agentic AI'}" ${b.month}), and treat a post or article from before ${b.month} as background, not as a current trend, unless the platform research strategy asks for the latest available activity (then label it as such).` : 'Search for what is trending in the current time window only.'}
-${b.platformNotes ? `\n### Platform research strategy\nFollow the platform research strategy in the system prompt for this platform. It sets which trends to return and how to label them.\n` : ''}
-### Window status
-Add a \`window_status\` field to every trend: "current_month" when its evidence is from the current month, "latest_available" when it is the newest activity found but older than the current month.
-
-### Reference themes
-Add a \`corpus_theme\` field to every trend: the letter of the corpus theme it matches, from KEYWORD_INSTRUCTION_MAP.md (A: rubrics as reward signals, B: SWE agents and benchmarks, C: agentic RL and post-training, D: evaluation and benchmarks, E: adjacent). Use "none" if it matches none of them; such a trend is out of scope and should normally not be returned.
-
+${b.month ? `\nPut the current month in your searches (for example: "${b.keywords[0] ?? 'agentic AI'}" ${b.month}).\n` : ''}${b.platformNotes ? `\nFollow the platform research strategy in the system prompt for this platform.\n` : ''}
 Search budget: run at most ${b.maxSearches} searches in this session.
 
 Return the final result using the JSON schema defined in the system prompt.`
@@ -360,25 +1189,31 @@ function urlKey(raw: string): string {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const str = z.preprocess((v) => (v === null || v === undefined ? '' : String(v)), z.string())
-const strList = z.preprocess((v) => (Array.isArray(v) ? v.map(String) : []), z.array(z.string()))
+const strList = z.preprocess((v) => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))) : []), z.array(z.string()))
 const analysisSchema = z.object({
   trends: z
     .array(
       z.object({
         topic: str,
         trend_type: str,
+        trend_status: str,
         platform: str,
         related_keywords: strList,
         hashtags: strList,
         why_trending: str,
-        evidence: z.array(z.object({ title: str, url: str, source: str, published_at: str })).catch([]),
+        observed_signals: strList,
+        evidence: z
+          .array(z.object({ title: str, url: str, source: str, published_at: str, evidence_summary: str }))
+          .catch([]),
+        brand_relevance: z
+          .object({ relevance: z.enum(['high', 'medium', 'low', 'unknown']).catch('unknown'), reason: str })
+          .catch({ relevance: 'unknown', reason: '' }),
         confidence: z.enum(['high', 'medium', 'low']).catch('low'),
-        corpus_theme: str.optional(),
-        window_status: str.optional(),
       }),
     )
     .catch([]),
-  platforms_with_insufficient_data: z.array(z.unknown()).catch([]),
+  platforms_with_insufficient_data: strList.catch([]),
+  search_limitations: strList.catch([]),
 })
 
 /** The JSON object in Claude's reply — fenced or bare — or null. */
@@ -403,24 +1238,55 @@ function daterFor(url: string, platform: PlatformModule): PlatformModule | null 
   return null
 }
 
+/**
+ * The submission month an arXiv identifier encodes: `2609.16816` → September
+ * 2026 (the new-style id is YYMM.NNNNN). A decoding, like a post id — month
+ * precision only, never a day.
+ */
+export function arxivMonth(url: string): string | null {
+  const m = url.match(/arxiv\.org\/(?:abs|pdf|html)\/(\d{2})(\d{2})\.\d{4,5}/i)
+  if (!m) return null
+  const month = Number(m[2])
+  return month >= 1 && month <= 12 ? `20${m[1]}-${m[2]}` : null
+}
+
+/** A date Claude stated, read only when it begins as an ISO date or month ("2026-09-23", "2026-09"). */
+function statedDate(raw: string): Date | null {
+  const m = raw.trim().match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/)
+  if (!m) return null
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, m[3] ? Number(m[3]) : 1))
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+export interface VerifiedAnalysis {
+  trends: ClaudeTrend[]
+  insufficient: string[]
+  limitations: string[]
+  parsed: boolean
+  /** Trends Claude returned whose every dated piece of evidence predates the window — dropped (section 5). */
+  droppedOutsideWindow: number
+}
+
 export function verifiedAnalysis(
   resultText: string | null,
   searches: readonly ExecutedSearch[],
   platform: PlatformModule,
-  /** The window's start: a trend labelled current_month whose every date is decoded and older is relabelled. */
+  /** The window's start. Evidence dated before it cannot establish a current-month trend. */
   windowFrom?: Date,
-): { trends: ClaudeTrend[]; insufficient: string[]; parsed: boolean } {
+): VerifiedAnalysis {
   const parsed = analysisSchema.safeParse(jsonOf(resultText))
-  if (!parsed.success) return { trends: [], insufficient: [], parsed: false }
+  if (!parsed.success) return { trends: [], insufficient: [], limitations: [], parsed: false, droppedOutsideWindow: 0 }
 
   // Every URL any search in this session returned, with the title it showed.
   const returned = new Map<string, string>()
   for (const s of searches) for (const l of s.links) returned.set(urlKey(l.url), l.title)
 
   const trends: ClaudeTrend[] = []
+  let droppedOutsideWindow = 0
   for (const t of parsed.data.trends) {
     let dropped = 0
     const evidence: ClaudeTrendEvidence[] = []
+    const dates: Array<Date | null> = []
     for (const e of t.evidence) {
       if (e.url.trim() === '' || !returned.has(urlKey(e.url))) {
         dropped += 1
@@ -429,43 +1295,63 @@ export function verifiedAnalysis(
       const dater = daterFor(e.url, platform)
       const classified = dater?.classifyUrl(e.url) ?? null
       const decoded = dater && classified?.itemId ? dater.dateFromItemId(classified.itemId) : null
+      const stated = e.published_at.trim()
+      // A decoded date wins over one Claude wrote: post id first, then an arXiv id's month.
+      const arxiv = decoded ? null : arxivMonth(e.url)
+      dates.push(decoded ?? (arxiv ? statedDate(arxiv) : statedDate(stated)))
       evidence.push({
         title: e.title.trim() || (returned.get(urlKey(e.url)) ?? ''),
         url: e.url.trim(),
         source: e.source.trim(),
-        publishedAt: decoded ? decoded.toISOString() : e.published_at.trim() || null,
-        dateSource: decoded ? 'platform_id' : e.published_at.trim() ? 'claude_stated' : 'none',
+        publishedAt: decoded ? decoded.toISOString() : arxiv ?? (stated || null),
+        dateSource: decoded ? 'platform_id' : arxiv ? 'arxiv_id' : stated ? 'claude_stated' : 'none',
+        summary: e.evidence_summary.trim(),
       })
     }
-    // "Every returned trend must contain evidence": one with none left is not kept.
+    // "EVERY returned trend must contain evidence": one with none left is not kept.
     if (evidence.length === 0 || t.topic.trim() === '') continue
+
     /*
-     * THE LABEL IS CHECKED, NOT TRUSTED. "current_month" stands only if some
-     * evidence is from the window or undated by id; when every date is decoded
-     * from a post id and all are older, the trend is relabelled latest_available.
+     * THE CURRENT-MONTH RULE IS CHECKED, NOT TRUSTED (sections 4–5). A trend
+     * stands when some evidence is dated inside the window. When every piece of
+     * evidence is dated and all of it predates the window, previous-month
+     * evidence alone cannot establish it: it is dropped and counted. With no
+     * readable date at all it is kept, labelled `unverified`.
      */
-    const claimed = (t.window_status ?? '').trim().toLowerCase()
-    const allDecodedOlder =
-      windowFrom !== undefined && evidence.every((e) => e.dateSource === 'platform_id' && e.publishedAt !== null && Date.parse(e.publishedAt) < windowFrom.getTime())
-    const windowStatus: ClaudeTrend['windowStatus'] =
-      claimed === 'current_month' ? (allDecodedOlder ? 'latest_available' : 'current_month') : claimed === 'latest_available' ? 'latest_available' : allDecodedOlder ? 'latest_available' : 'unstated'
+    let windowStatus: ClaudeTrend['windowStatus'] = 'unverified'
+    if (windowFrom) {
+      const inWindow = dates.some((d) => d !== null && d.getTime() >= Date.UTC(windowFrom.getUTCFullYear(), windowFrom.getUTCMonth(), windowFrom.getUTCDate()))
+      const allOlder = dates.every((d) => d !== null && d.getTime() < windowFrom.getTime())
+      if (inWindow) windowStatus = 'current_month'
+      else if (allOlder) {
+        droppedOutsideWindow += 1
+        continue
+      }
+    }
+
     trends.push({
-      windowStatus,
-      windowStatusCorrected: claimed === 'current_month' && windowStatus === 'latest_available',
       topic: t.topic.trim(),
       trendType: t.trend_type.trim(),
+      trendStatus: t.trend_status.trim(),
       platform: t.platform.trim() || platform.label,
       relatedKeywords: t.related_keywords,
       hashtags: t.hashtags,
       whyTrending: t.why_trending.trim(),
+      observedSignals: t.observed_signals,
       evidence,
+      brandRelevance: { relevance: t.brand_relevance.relevance, reason: t.brand_relevance.reason.trim() },
       confidence: t.confidence,
-      corpusTheme: (t.corpus_theme ?? '').trim() || null,
+      windowStatus,
       unverifiedEvidenceDropped: dropped,
     })
   }
-  const insufficient = parsed.data.platforms_with_insufficient_data.map((p) => (typeof p === 'string' ? p : JSON.stringify(p)))
-  return { trends, insufficient, parsed: true }
+  return {
+    trends,
+    insufficient: parsed.data.platforms_with_insufficient_data,
+    limitations: parsed.data.search_limitations,
+    parsed: true,
+    droppedOutsideWindow,
+  }
 }
 
 /**
@@ -553,6 +1439,7 @@ export function createClaudeCodeAdapter(platform: PlatformModule, cfg: BridgeCon
     const notes: string[] = []
     const claudeTrends: ClaudeTrend[] = []
     const insufficientData: string[] = []
+    const searchLimitations: string[] = []
     // Read now, so an edited reference document is used on the next run without a restart.
     const refs = loadReferences(research.reference_files)
     if (refs.missing.length > 0) notes.push(`${platform.label}: reference document(s) not found and not given to Claude: ${refs.missing.join(', ')}.`)
@@ -603,6 +1490,8 @@ export function createClaudeCodeAdapter(platform: PlatformModule, cfg: BridgeCon
       const analysis = verifiedAnalysis(session.resultText, used, platform, window?.from)
       claudeTrends.push(...analysis.trends)
       insufficientData.push(...analysis.insufficient)
+      searchLimitations.push(...analysis.limitations)
+      if (analysis.droppedOutsideWindow > 0) notes.push(`${platform.label}: ${analysis.droppedOutsideWindow} trend(s) Claude returned had only evidence from before the current month and were dropped (previous-month evidence cannot establish a current trend).`)
       const droppedTotal = analysis.trends.reduce((n, t) => n + t.unverifiedEvidenceDropped, 0)
       if (!analysis.parsed && !session.isError) notes.push(`${platform.label}: Claude's reply was not valid JSON, so no analysis was kept; its search results were still used.`)
       if (droppedTotal > 0) notes.push(`${platform.label}: ${droppedTotal} evidence URL(s) Claude cited were not returned by any search in the session and were dropped.`)
@@ -625,7 +1514,7 @@ export function createClaudeCodeAdapter(platform: PlatformModule, cfg: BridgeCon
     )
     if (fatal) throw fatal
 
-    return { candidates, executed, errors, notes, claudeTrends: dedupeTrends(claudeTrends), insufficientData }
+    return { candidates, executed, errors, notes, claudeTrends: dedupeTrends(claudeTrends), insufficientData, searchLimitations }
   }
 
   async function searchOne(req: SearchRequest): Promise<SourceCandidate[]> {
