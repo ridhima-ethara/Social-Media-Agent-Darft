@@ -4,9 +4,10 @@
  * The seven fields every agent conforms to, plus the skill that specifies its
  * behaviour, the tools it may hold, and the runtime skills it executes.
  *
- * Stage: Discover · Read LinkedIn, Instagram, X and Facebook through Apify
- *                    actors, and the open web through crawl4ai, for movement
- *                    across the keyword set.
+ * Stage: Discover · Find what is trending THIS MONTH, relevant to Ethara's
+ *                    Knowledge Base, brand and keywords, on LinkedIn,
+ *                    Instagram, Facebook and X — through the Claude Bridge on
+ *                    every run — and hand it to the Validation Agent.
  *
  * Related files:
  *   spec      packages/skills/content-scraper/SKILL.md          — the behavioural specification
@@ -21,15 +22,16 @@ export const spec: AgentSpec = {
   id: 'scraping',
   name: 'Sherlock',
   stage: 'discover',
-  role: 'Scraping Agent · Captures public activity for the keyword set across four platforms via Apify actors, and the open web via crawl4ai.',
+  role: 'Scraping Agent · The Claude Bridge agent: discovers what is trending this month on LinkedIn, Instagram, Facebook and X, relevant to Ethara\u2019s Knowledge Base, brand and keywords.',
   description:
-    'Gathers. Does not judge. Reads each platform lane through its Apify actor, which states real engagement figures, and falls back to a crawl4ai search when no token is configured — the same lane, read through a search engine, stamped as carrying no figures rather than as carrying zeros. Admits only what aligns with the brand topic set and the Knowledge Base, wraps every captured body as untrusted evidence before it reaches a model, and counts every exclusion rather than silently dropping it. A lane that returns nothing returns nothing — there is no corpus behind it.',
+    'Gathers. Does not judge. On every run, through the Claude Bridge, discovers platform by platform what is being posted this month about Ethara\u2019s field \u2014 the Knowledge Base, the research corpus, the brand topics and every keyword are the reference: one quoted topic per search with the month named, keeping only posts whose date is verified inside the window and that are relevant to Ethara, grouped into trends with their hashtags, URLs and authors, newest first. Facebook, whose posts cannot be dated, is listed for reference only. Rows state no engagement, stamped as carrying no figures rather than as carrying zeros. Writes no content and no calendar; wraps every captured body as untrusted evidence before it reaches a model, and counts every exclusion rather than silently dropping it. A platform that returns nothing returns nothing — there is no corpus behind it.',
   consumes: [
     'keyword set',
     'knowledge base',
   ],
   produces: [
-    'captured pages, per platform',
+    'platform trends (topic, hashtags, post URLs, dates, authors, matched Ethara keywords, reason)',
+    'captured posts, per platform, newest first',
     'hashtag candidates',
   ],
   handsOffTo: [

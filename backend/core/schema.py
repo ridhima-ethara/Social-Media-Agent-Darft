@@ -168,7 +168,8 @@ class ContentIdea(BaseModel):
     scheduled_time: str
     confidence: int
     priority_score: int
-    calendar_slot: Literal["primary", "suggestion"] = "suggestion"
+    # Every placed idea is a dated calendar topic; there is no suggestion list.
+    calendar_slot: Literal["primary"] = "primary"
     platform_rank: int | None = None
     slot_reasons: list[str] = Field(default_factory=list)
 

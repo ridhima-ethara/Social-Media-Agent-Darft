@@ -1,0 +1,19 @@
+# Ethara SocialAI — web tier: the built bundle (`npm run build` → dist/) served by
+# `vite preview` on :3010, which nginx fronts as https://sma.ethara.ai and which
+# proxies /api to the API same-origin. Rebuild after a frontend change, then
+# `sudo systemctl restart ethara-web`.
+[Unit]
+Description=Ethara SocialAI web (vite preview :3010)
+After=network-online.target ethara-api.service
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+Environment=HOME=/home/ec2-user
+Environment=PATH=/home/ec2-user/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash -c 'cd "/home/ec2-user/Social-Media-Agent-2/Social Media Agent 2" && exec npx vite preview --host 127.0.0.1 --port 3010 --strictPort'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

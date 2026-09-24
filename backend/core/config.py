@@ -31,11 +31,14 @@ REGISTRY: dict[str, list[Knob]] = {
         Knob(key="max_keywords_per_run", label="Keywords per run", default=12, minimum=1, maximum=20,
              description="How many keywords a single run scans, taken in descending weight order."),
         Knob(key="max_items_per_keyword", label="Items per keyword", default=50, minimum=5, maximum=200,
-             description="Ceiling on posts captured per keyword per source. Caps cost as well as noise."),
+             description="Kept for compatibility. The Claude Bridge caps capture itself: its search "
+                         "budget per platform and five posts per trend."),
         Knob(key="min_occurrences", label="Hashtag floor", default=2, minimum=1, maximum=10,
              description="A tag seen fewer times than this in a run is noise, not signal."),
-        Knob(key="window_days", label="Recency window", default=14, minimum=1, maximum=90, unit="days",
-             description="How far back a source is read. Older posts are excluded, not down-weighted."),
+        Knob(key="window_days", label="Recency window", default=0, minimum=0, maximum=90, unit="days",
+             description="How far back platform trend discovery looks. 0 (the default) is the current month so far: what is trending this month, today's posts first. Any other value is a rolling window of that many days. A post "
+                         "is kept only when its date is verified inside the window; older or undated "
+                         "posts are excluded, not down-weighted."),
     ],
     "validation_agent": [
         Knob(key="top_keywords", label="Top keywords", default=5, minimum=1, maximum=20,
@@ -77,7 +80,7 @@ REGISTRY: dict[str, list[Knob]] = {
         Knob(key="similarity_cap", label="Visual similarity cap", default=85, minimum=0, maximum=100, unit="%",
              description="Above this similarity to a shipped concept, the treatment repeats itself. Looser than the caption cap on purpose: two posts on one subject should look related."),
         Knob(key="background_model", label="Background painter", default="brand-svg",
-             description="Which model paints the background: `brand-svg` or `flux2-klein`. brand-svg is the local renderer — needs no service and cannot fail. flux2-klein runs the local FLUX.2 model over Ollama or mflux, and falls back to the brand renderer with a stated reason when neither is set. The brand layer is drawn locally whatever this is set to, so no model ever renders brand text."),
+             description="Which model paints the background: `brand-svg` or `flux2-klein`. brand-svg is the local renderer — needs no service and cannot fail. flux2-klein runs the local FLUX.2 model over mflux, and falls back to the brand renderer with a stated reason when MFLUX_PYTHON is not set. The brand layer is drawn locally whatever this is set to, so no model ever renders brand text."),
     Knob(key="placement", label="Placement", default="auto",
              description="Which configured canvas the creative is drawn on. `auto` takes the platform's default placement; otherwise name one: `linkedin:square`, `linkedin:landscape`, `linkedin:portrait`, `linkedin:carousel`, `linkedin:banner`, `instagram:primary`, `instagram:square`, `instagram:story`, `youtube:thumbnail`, `youtube:video`, `x:feed`, `facebook:feed`. Skill rule 15 makes these configured references rather than constants in the renderer. An unknown name falls back to the platform default and says so."),
         Knob(key="min_differing_dimensions", label="Option distinctness", default=2, minimum=1, maximum=4,
@@ -89,7 +92,7 @@ REGISTRY: dict[str, list[Knob]] = {
         ],
     "calendar_agent": [
         Knob(key="top_per_platform", label="Calendar slots per platform", default=5, minimum=1, maximum=30,
-             description="How many ideas take a calendar slot per platform. The rest go to More suggestions with their rank."),
+             description="How many validated topics take a calendar date per platform. An idea ranked below the cap is not placed — there is no suggestion list; the run reports how many and the cut-off."),
         Knob(key="spacing_hours", label="Minimum spacing", default=6, minimum=1, maximum=48, unit="hours",
              description="Two posts on one platform inside this window split reach rather than compounding it."),
         Knob(key="window_start", label="Posting window opens", default=8, minimum=0, maximum=23, unit="h",

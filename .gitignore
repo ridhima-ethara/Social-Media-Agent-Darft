@@ -64,3 +64,8 @@ corpus/*
 # Not shared: approving a project-scoped MCP server is a per-person trust
 # decision, and committing it would approve it for everyone who clones.
 .claude/settings.local.json
+
+# Competitor Intelligence raw scrapes / SEO responses (audit data, regenerated per run)
+server/data/competitor-profiles/
+# Corpus topics derived by the Claude Bridge (cache, recomputed when corpus/ changes)
+server/data/corpus-topics.json

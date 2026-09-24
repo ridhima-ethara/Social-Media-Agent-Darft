@@ -1,11 +1,18 @@
 /**
  * THE CALENDAR & IDEAS AGENT — stage `plan`
  *
- * Turns ranked opportunities into dated, timed, platform-assigned ideas, then
- * applies the per-platform cap: independently for each platform, the strongest
- * ideas up to `topPerPlatform` take a calendar slot and everything else sits in
- * More suggestions with its rank intact. The cap belongs to the calendar, so a
- * platform found over it is repaired rather than left as earlier runs left it.
+ * Turns validated opportunities into dated, timed, platform-assigned TOPICS,
+ * then applies the per-platform cap: independently for each platform, the
+ * strongest ideas up to `topPerPlatform` per week take a date on the calendar.
+ * There is no suggestion list — an idea below the cut-off is not placed, and a
+ * stored topic displaced from the calendar is withdrawn with its reason. The
+ * cap belongs to the calendar, so a platform found over it is repaired rather
+ * than left as earlier runs left it.
+ *
+ * This agent places topics; it writes no post. Which placed topics become
+ * written posts now (today, and tomorrow when the schedule requires it) and
+ * which wait in the Topic Queue is `shared/calendar-horizon.ts`, applied by the
+ * orchestrator after this stage.
  *
  * Nothing here is random. Slot choice is a lookup in an hour-weight table
  * filtered by the window knobs, spread deterministically, and every choice
@@ -17,7 +24,7 @@ import { PLATFORMS } from '../../../../shared/agent-contract'
 import { similarity } from '../../../../shared/brand-voice'
 // Aliased: `IdeaRow` below is the shape a model returns for a batch of ideas,
 // which is a different thing from a stored row and must not shadow it.
-import { listIdeas, listPosts, updateIdea, type IdeaRow as StoredIdea } from '../../db/repo'
+import { listIdeas, listPosts, updateIdea, withdrawIdea, type IdeaRow as StoredIdea } from '../../db/repo'
 import { textAdapter, textChain, textModelIdFor, withChainFallback } from '../../integrations'
 import {
   addDays,
@@ -33,11 +40,13 @@ import {
   inPlanningWindow,
   planningDays,
   planningStart,
+  workspaceDay,
   weekdayName,
   type EditorialFormat,
 } from '../corpus'
 import { registerSkill } from '../runtime'
 import type { PipelinePayload, PlannedIdea } from '../skills/index'
+import { resolveCalendarHorizon } from '../../calendar-horizon'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    1 · calendar.idea.form
@@ -61,12 +70,14 @@ registerSkill<PipelinePayload>('calendar.idea.form', async (payload, ctx) => {
     // Placeholders until `platform.select` and `slot.optimize` decide.
     platform: 'linkedin',
     altPlatforms: [],
-    scheduledDate: isoDate(new Date()),
+    scheduledDate: isoDate(workspaceDay()),
     scheduledTime: '10:30 AM',
     confidence: clamp(Math.round((opportunity.brandRelevance + opportunity.predictedEngagement) / 2), 0, 100),
     priorityScore: 0,
     platformRank: null,
-    calendarSlot: 'suggestion',
+    // Every idea is a calendar topic; rank selection decides which are placed
+    // and drops the rest rather than keeping a suggestion list.
+    calendarSlot: 'primary',
     isNewTrend: markNewTrends && opportunity.isNewTrend,
     format: opportunity.format,
     angle: opportunity.angle,
@@ -348,8 +359,18 @@ registerSkill<PipelinePayload>('calendar.idea.dedupe', async (payload, ctx) => {
 
   const kept: PlannedIdea[] = []
   const dropped: string[] = []
+  const onePerTopic = ctx.bool('onePerTopic', true)
+  const topicKey = (t: string): string => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '').replace(/s$/, '')
 
-  for (const idea of ideas) {
+  // Strongest first, so "one per trend" keeps the best idea of each trend.
+  for (const idea of [...ideas].sort((a, b) => b.trendScore + b.brandRelevance - (a.trendScore + a.brandRelevance))) {
+    if (onePerTopic) {
+      const sameTopic = kept.find((other) => topicKey(other.sourceTopic) === topicKey(idea.sourceTopic))
+      if (sameTopic) {
+        dropped.push(`“${idea.title}” is a second idea on “${idea.sourceTopic}”`)
+        continue
+      }
+    }
     const priorTwin = priorTitles.find((title) => similarity(title, idea.title) >= threshold)
     if (priorTwin) {
       dropped.push(`“${idea.title}” repeats “${priorTwin}”`)
@@ -423,6 +444,20 @@ registerSkill<PipelinePayload>('calendar.platform.select', (payload, ctx) => {
 
   const ideas = payload.ideas ?? []
 
+  /*
+   * WHERE IT IS TRENDING DECIDES WHERE IT GOES.
+   *
+   * Each platform's calendar is built from that platform's own trends: a topic
+   * the Claude Bridge found trending on X is planned for X, one from LinkedIn
+   * for LinkedIn — when that platform is in play. The format-fit matrix still
+   * scores every platform, supplies the alternates, and decides for a topic
+   * whose source platform is unknown or not in play.
+   */
+  const preferTrendPlatform = ctx.bool('preferTrendPlatform', true)
+  const sourcePlatform = new Map(
+    (payload.posts ?? []).filter((p) => p.platform).map((p) => [p.externalId, p.platform as Platform]),
+  )
+
   for (const idea of ideas) {
     const fit = FORMAT_PLATFORM_FIT[idea.format as EditorialFormat] ?? FORMAT_PLATFORM_FIT['Thought Leadership']
 
@@ -435,10 +470,18 @@ registerSkill<PipelinePayload>('calendar.platform.select', (payload, ctx) => {
       }))
       .sort((a, b) => b.score - a.score)
 
-    const winner = scored[0] as { platform: Platform; score: number }
+    const trendedOn = preferTrendPlatform && idea.sourceExternalId ? sourcePlatform.get(idea.sourceExternalId) : undefined
+    const fromTrend = trendedOn && inPlay.includes(trendedOn) ? scored.find((s) => s.platform === trendedOn) : undefined
+    const winner = fromTrend ?? (scored[0] as { platform: Platform; score: number })
+    if (fromTrend) {
+      idea.slotReasons = [
+        ...idea.slotReasons,
+        `Planned for ${PLATFORM_LABEL[fromTrend.platform]} because that is where the topic was found trending (format fit ${fromTrend.score}%).`,
+      ]
+    }
     idea.platform = winner.platform
     idea.altPlatforms = scored
-      .slice(1)
+      .filter((s) => s.platform !== winner.platform)
       .filter((s) => s.score >= alternateThreshold)
       .map((s) => ({ platform: s.platform, score: s.score }))
 
@@ -456,7 +499,7 @@ registerSkill<PipelinePayload>('calendar.platform.select', (payload, ctx) => {
       ` · alternates listed above ${alternateThreshold}%`,
   )
 
-  return { ideas }
+  return { ideas, platformsInPlay: inPlay }
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -604,7 +647,7 @@ registerSkill<PipelinePayload>('calendar.cadence.balance', (payload, ctx) => {
 
       // Every postable day in the window is full: keep the placed date rather
       // than escape the window. Rank selection then decides which ideas keep a
-      // calendar slot and which wait in suggestions.
+      // date on the calendar and which are not placed.
       if (guard >= days.length) {
         idea.scheduledDate = placed
         idea.slotReasons = [
@@ -701,6 +744,59 @@ registerSkill<PipelinePayload>('calendar.crossplatform.adapt', (payload, ctx) =>
   const variants: PlannedIdea[] = []
   let outsideWindow = 0
 
+  /*
+   * EVERY PLATFORM, EVERY TOPIC.
+   *
+   * With `everyPlatform` on, each planned topic is planned for every platform
+   * in play on the same day — LinkedIn, X, Facebook and Instagram — so the
+   * week has a recommendation for each channel, not only the one the format
+   * fits best. Facebook and Instagram share ONE post (`shareMetaPost`): the
+   * two entries point at each other, and whichever is written second reuses
+   * the first one's caption; each still gets its own image size. The
+   * per-platform cap (`calendar.rank.select`) then keeps each platform's week
+   * to its target.
+   */
+  if (ctx.bool('everyPlatform', true)) {
+    const inPlay = payload.platformsInPlay ?? [...PLATFORMS]
+    const shareMeta = ctx.bool('shareMetaPost', true) && inPlay.includes('facebook') && inPlay.includes('instagram')
+    const POSTING_HOUR: Record<Platform, number> = { linkedin: 9, x: 12, facebook: 16, instagram: 18 }
+    const metaTwin = (p: Platform): Platform | undefined => (shareMeta ? (p === 'facebook' ? 'instagram' : p === 'instagram' ? 'facebook' : undefined) : undefined)
+    for (const idea of ideas) {
+      if (idea.variantOf) continue
+      const own = metaTwin(idea.platform)
+      if (own) idea.sharesPostWith = own
+      for (const platform of inPlay.filter((p) => p !== idea.platform)) {
+        const fit = idea.altPlatforms.find((a) => a.platform === platform)?.score ?? null
+        const twin = metaTwin(platform)
+        variants.push({
+          ...idea,
+          key: `${idea.key}-alt-${platform}`,
+          platform,
+          altPlatforms: [],
+          scheduledTime: nearestPostingTime(POSTING_HOUR[platform]),
+          confidence: fit === null ? idea.confidence : clamp(Math.round((fit + idea.brandRelevance) / 2), 0, 100),
+          calendarSlot: 'primary',
+          platformRank: null,
+          variantOf: idea.key,
+          ...(twin ? { sharesPostWith: twin } : {}),
+          slotReasons: [
+            `The same topic as the ${PLATFORM_LABEL[idea.platform]} post, planned for ${PLATFORM_LABEL[platform]} on the same day so every platform has a post.`,
+            ...(twin ? [`Shares one post with its ${PLATFORM_LABEL[twin]} twin — the caption is written once and reused.`] : []),
+          ],
+          conflicts: [],
+        })
+      }
+    }
+    const tally = new Map<Platform, number>()
+    for (const i of [...ideas, ...variants]) tally.set(i.platform, (tally.get(i.platform) ?? 0) + 1)
+    ctx.log(
+      `Every platform: ${variants.length} variant(s) added · ` +
+        [...tally.entries()].map(([p, n]) => `${n} × ${PLATFORM_LABEL[p]}`).join(', ') +
+        (shareMeta ? ' · Facebook and Instagram share one post' : ''),
+    )
+    return { ideas: [...ideas, ...variants] }
+  }
+
   // Only the strongest ideas earn a second channel; adapting everything would
   // fill the calendar with echoes.
   const eligible = [...ideas]
@@ -739,7 +835,7 @@ registerSkill<PipelinePayload>('calendar.crossplatform.adapt', (payload, ctx) =>
       scheduledDate: date,
       scheduledTime: nearestPostingTime(alt.platform === 'x' ? 9 : 16),
       confidence: clamp(Math.round((alt.score + idea.brandRelevance) / 2), 0, 100),
-      calendarSlot: 'suggestion',
+      calendarSlot: 'primary',
       platformRank: null,
       variantOf: idea.key,
       slotReasons: [
@@ -816,7 +912,7 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
    * everything already stored and everything this run produced are ranked
    * together, and the top `topPerPlatform` take the slots.
    *
-   * TWO RULES BOUND IT.
+   * THREE RULES BOUND IT.
    *
    *   Nothing a human has touched is moved. From `in_review` onward a person has
    *   acted on the idea, so it keeps its slot and consumes a slot.
@@ -824,22 +920,25 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
    *   Nothing already WRITTEN is moved either. `drafted` used to be demotable,
    *   so a post whose caption and creative were done could be pushed off the
    *   calendar by a higher-scoring newcomer from a later run — this week's
-   *   finished posts were the ones at risk. Only `suggested` ideas, which hold
-   *   no caption yet, are promoted, demoted or re-dated by an agent. A written
+   *   finished posts were the ones at risk. Only `suggested` topics, which hold
+   *   no caption yet, are placed, withdrawn or re-dated by an agent. A written
    *   post keeps its slot and date and counts against the cap.
    *
-   *   Nothing is deleted. A demoted idea keeps its title, rank, reasons and
-   *   lineage and sits in More suggestions, where it can be promoted again.
+   *   Nothing is deleted, and nothing is kept aside either. There is no
+   *   suggestion list: an idea from this run that ranks below the cut-off is
+   *   not placed (and so not stored), and a stored topic with no post that a
+   *   stronger one displaces is withdrawn with its rank and the cut-off as the
+   *   reason. Its lineage survives on the row.
    */
   const reconcile = ctx.bool('reconcileOverCap', true)
-  const DEMOTABLE: readonly IdeaStatus[] = ['suggested']
+  const MOVABLE: readonly IdeaStatus[] = ['suggested']
 
   const onCalendar = await listIdeas(ctx.workspaceId, { limit: 600 })
   // Title plus platform is how a stored idea is recognised — `persistIdeas`
   // upserts on it, so it is the same identity the write path uses.
   const own = new Set(ideas.map((i) => `${i.title.toLowerCase()}|${i.platform}`))
 
-  /** One candidate for a slot, from either source, with a common score. */
+  /** One candidate for a date, from either source, with a common score. */
   interface Candidate {
     key: string
     score: number
@@ -848,7 +947,9 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
     row?: StoredIdea
     /** Set for an idea this run produced. */
     idea?: PlannedIdea
-    slot: 'primary' | 'suggestion'
+    /** Already dated on the calendar (a stored topic or post). */
+    placed: boolean
+    /** Only a topic with no post yet may be re-dated or withdrawn by an agent. */
     movable: boolean
   }
 
@@ -860,13 +961,16 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
     // carries the fresher score. Counting the stored copy too would let one idea
     // occupy two slots.
     if (own.has(`${row.title.toLowerCase()}|${row.platform}`)) continue
+    const movable = MOVABLE.includes(row.status)
     candidates.push({
       key: `row:${row.id}`,
       score: Number(row.priority_score ?? 0),
       platform: row.platform,
       row,
-      slot: row.calendar_slot === 'primary' ? 'primary' : 'suggestion',
-      movable: DEMOTABLE.includes(row.status),
+      // A written or reviewed post is on the calendar whatever slot an older
+      // release stored for it.
+      placed: row.calendar_slot === 'primary' || !movable,
+      movable,
     })
   }
 
@@ -876,31 +980,30 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
       score: idea.priorityScore,
       platform: idea.platform,
       idea,
-      slot: 'suggestion',
+      placed: false,
       movable: true,
     })
   }
 
-  const primaries: string[] = []
-  /** Dates already carrying a primary for a platform, so a promotion lands free. */
+  const placedKeys = new Set<string>()
+  /** Dates already carrying a topic for a platform, so a new placement lands free. */
   const bookedByPlatform = new Map<Platform, Set<string>>()
   for (const c of candidates) {
-    if (c.slot !== 'primary') continue
-    const date = c.row?.scheduled_date ?? c.idea?.scheduledDate ?? ''
+    if (!c.placed || !c.row) continue
+    const date = String(c.row.scheduled_date ?? '').slice(0, 10)
     if (date === '') continue
     const set = bookedByPlatform.get(c.platform) ?? new Set<string>()
-    set.add(String(date).slice(0, 10))
+    set.add(date)
     bookedByPlatform.set(c.platform, set)
   }
 
   /**
-   * The first weekday from today that this platform has no primary on.
+   * The first weekday from today that this platform has no topic on.
    *
-   * A promoted idea keeps whatever date the cadence balancer gave it, and that
+   * A placed idea keeps whatever date the cadence balancer gave it, and that
    * balancer pushes one post per platform per day — so the sixteenth LinkedIn
-   * idea is dated sixteen days out. Promoting it without re-dating it puts a
-   * primary outside the week the calendar renders, which looks exactly like the
-   * agent having produced nothing at all.
+   * idea is dated sixteen days out. Placing it without re-dating it puts a
+   * topic outside the weeks the calendar renders.
    */
   function nextFreeDate(platform: Platform): string {
     const booked = bookedByPlatform.get(platform) ?? new Set<string>()
@@ -917,10 +1020,14 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
     return days[0] as string
   }
 
+  let notPlacedTotal = 0
+
   for (const platform of PLATFORMS) {
+    // A topic planned natively for this platform (where it trended) before another platform's topic adapted to it.
+    const native = (c: Candidate): number => (c.idea && !c.idea.variantOf ? 1 : 0)
     const forPlatform = candidates
       .filter((c) => c.platform === platform)
-      .sort((a, b) => b.score - a.score || a.key.localeCompare(b.key))
+      .sort((a, b) => native(b) - native(a) || b.score - a.score || a.key.localeCompare(b.key))
 
     if (forPlatform.length === 0) continue
 
@@ -929,10 +1036,9 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
      *
      * It used to be `topPerPlatform` across the whole horizon. With a fortnight
      * of planning that meant five LinkedIn slots spread over fourteen days —
-     * about two a week — so a freshly scraped week rendered almost empty while
-     * twenty-odd ideas sat in More suggestions. The cap was being read as "five
-     * on the calendar" when the operator-facing label says "slots per platform
-     * on the week".
+     * about two a week — so a freshly scraped week rendered almost empty. The
+     * cap was being read as "five on the calendar" when the operator-facing
+     * label says "slots per platform on the week".
      *
      * So the effective allowance is the weekly cap multiplied by the number of
      * weeks being planned. `nextFreeDate` then spreads the winners one per
@@ -941,66 +1047,78 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
      */
     const weeklyCap = topPerPlatform * Math.max(1, planningWeeks)
 
-    // Slots a person already owns. Counted first and never touched.
-    const locked = forPlatform.filter((c) => c.slot === 'primary' && !c.movable)
+    // Dates a post or a person already owns. Counted first and never touched.
+    const locked = forPlatform.filter((c) => c.placed && !c.movable)
     const headroom = Math.max(0, weeklyCap - locked.length)
 
-    const contestable = forPlatform.filter((c) => !(c.slot === 'primary' && !c.movable))
-    const winners = reconcile ? contestable.slice(0, headroom) : contestable.filter((c) => c.slot === 'primary').slice(0, headroom)
+    const contestable = forPlatform.filter((c) => !(c.placed && !c.movable))
+    // Off, topics already on the calendar keep their dates even over the cap,
+    // and only the headroom they leave is contested.
+    const kept = reconcile ? [] : contestable.filter((c) => c.placed)
+    const open = contestable.filter((c) => !kept.includes(c))
+    const winners = [...kept, ...open.slice(0, Math.max(0, headroom - kept.length))]
     const winnerKeys = new Set(winners.map((c) => c.key))
+    const cutOff = winners[winners.length - 1]?.score ?? null
 
-    let promoted = 0
-    let demoted = 0
+    let placedNew = 0
+    let notPlaced = 0
+    let withdrawn = 0
     let rank = locked.length
 
     for (const c of contestable) {
-      const shouldBePrimary = winnerKeys.has(c.key)
+      const onCalendarNow = winnerKeys.has(c.key)
       rank += 1
 
       if (c.idea) {
         c.idea.platformRank = rank
-        c.idea.calendarSlot = shouldBePrimary ? 'primary' : 'suggestion'
-        if (shouldBePrimary) {
-          primaries.push(c.idea.key)
-          promoted += 1
-          const current = String(c.idea.scheduledDate ?? '').slice(0, 10)
-          const booked = bookedByPlatform.get(platform) ?? new Set<string>()
-          const withinWindow = current !== '' && inPlanningWindow(current, planningWeeks * 7)
-          if (!withinWindow || booked.has(current)) {
-            c.idea.scheduledDate = nextFreeDate(platform)
-            c.idea.slotReasons = [
-              ...c.idea.slotReasons,
-              `Moved to ${weekdayName(c.idea.scheduledDate)} on promotion to the calendar — its queued date sat outside the planning window, where a primary would not have been visible.`,
-            ]
-          } else {
-            booked.add(current)
-            bookedByPlatform.set(platform, booked)
-          }
+        if (!onCalendarNow) {
+          notPlaced += 1
+          continue
+        }
+        c.idea.calendarSlot = 'primary'
+        placedKeys.add(c.idea.key)
+        placedNew += 1
+        const current = String(c.idea.scheduledDate ?? '').slice(0, 10)
+        const booked = bookedByPlatform.get(platform) ?? new Set<string>()
+        const withinWindow = current !== '' && inPlanningWindow(current, planningWeeks * 7)
+        if (!withinWindow || booked.has(current)) {
+          c.idea.scheduledDate = nextFreeDate(platform)
+          c.idea.slotReasons = [
+            ...c.idea.slotReasons,
+            `Moved to ${weekdayName(c.idea.scheduledDate)} when it was placed — its balanced date sat outside the planning window or already held a ${PLATFORM_LABEL[platform]} topic.`,
+          ]
+        } else {
+          booked.add(current)
+          bookedByPlatform.set(platform, booked)
         }
         continue
       }
 
       const row = c.row
       if (!row) continue
-      if (shouldBePrimary && c.slot !== 'primary') {
-        const date = nextFreeDate(platform)
+      if (!onCalendarNow) {
+        // A topic with no post, displaced by stronger ones. Withdrawn with the
+        // evidence, never deleted and never parked in a side list.
+        await withdrawIdea(
+          ctx.workspaceId,
+          row.id,
+          `Ranked #${rank} on ${PLATFORM_LABEL[platform]} with a priority of ${Number(row.priority_score ?? 0)}; ` +
+            `the calendar holds ${weeklyCap} (${topPerPlatform}/week × ${planningWeeks})` +
+            (cutOff !== null ? ` and its cut-off was ${cutOff}` : '') +
+            '. It had no post yet.',
+        )
+        withdrawn += 1
+      } else if (!c.placed) {
         await updateIdea(ctx.workspaceId, row.id, {
           calendarSlot: 'primary',
           platformRank: rank,
-          scheduledDate: date,
+          scheduledDate: nextFreeDate(platform),
         })
-        promoted += 1
-      } else if (!shouldBePrimary && c.slot === 'primary') {
-        await updateIdea(ctx.workspaceId, row.id, { calendarSlot: 'suggestion', platformRank: rank })
-        demoted += 1
-      } else if (
-        shouldBePrimary &&
-        c.movable &&
-        !inPlanningWindow(String(row.scheduled_date ?? ''), planningWeeks * 7)
-      ) {
-        // A primary an earlier run dated past the window — or one the window
-        // has since moved away from — is brought back inside it. Only an
-        // agent-placed idea: a human's placement is never moved.
+        placedNew += 1
+      } else if (!inPlanningWindow(String(row.scheduled_date ?? ''), planningWeeks * 7)) {
+        // A topic an earlier run dated past the window — or one the window has
+        // since moved away from — is brought back inside it. Only a topic with
+        // no post: a written post or a human's placement is never moved.
         await updateIdea(ctx.workspaceId, row.id, {
           platformRank: rank,
           scheduledDate: nextFreeDate(platform),
@@ -1010,36 +1128,167 @@ registerSkill<PipelinePayload>('calendar.rank.select', async (payload, ctx) => {
       }
     }
 
+    notPlacedTotal += notPlaced
     const held = locked.length
     ctx.emit(
       'idea.ranked',
       `${PLATFORM_LABEL[platform]}: ${Math.min(weeklyCap, held + winners.length)} on the calendar of ${weeklyCap} (${topPerPlatform}/week × ${planningWeeks})` +
-        (promoted > 0 ? ` · ${promoted} promoted` : '') +
-        (demoted > 0 ? ` · ${demoted} moved to suggestions` : '') +
+        (placedNew > 0 ? ` · ${placedNew} new topic(s) placed` : '') +
+        (notPlaced > 0 ? ` · ${notPlaced} ranked below the cut-off, not placed` : '') +
+        (withdrawn > 0 ? ` · ${withdrawn} withdrawn for stronger topics` : '') +
         (held > 0 ? ` · ${held} kept in place — already written or in review` : ''),
-      { platform, promoted, demoted, locked: held, cap: weeklyCap, perWeek: topPerPlatform, weeks: planningWeeks },
+      { platform, placed: placedNew, notPlaced, withdrawn, locked: held, cap: weeklyCap, perWeek: topPerPlatform, weeks: planningWeeks },
     )
 
-    if (demoted > 0 || promoted > 0) {
+    if (withdrawn > 0 || placedNew > 0 || notPlaced > 0) {
       ctx.log(
-        `${PLATFORM_LABEL[platform]} reconciled against ${forPlatform.length} candidate(s): ` +
-          `${promoted} promoted, ${demoted} demoted, ${held} kept in place (written or in review). ` +
-          `Cut-off score ${winners[winners.length - 1]?.score ?? 0}.`,
+        `${PLATFORM_LABEL[platform]} ranked ${forPlatform.length} candidate(s): ` +
+          `${placedNew} placed, ${notPlaced} not placed, ${withdrawn} withdrawn, ${held} kept in place (written or in review). ` +
+          `Cut-off score ${cutOff ?? '—'}.`,
       )
     }
   }
 
-  const counts = PLATFORMS.map((p) => ({
-    platform: p,
-    primary: ideas.filter((i) => i.platform === p && i.calendarSlot === 'primary').length,
-    suggestions: ideas.filter((i) => i.platform === p && i.calendarSlot === 'suggestion').length,
-  }))
+  /*
+   * FRESHEST TRENDS ONTO THE POST-READY DATES.
+   *
+   * Today's post, and tomorrow's when the schedule requires it, are the only
+   * ones written now, so they should come from what is trending NOW. Per
+   * platform, this run's placed topics keep the same set of dates and times —
+   * the cadence the balancer chose — but the freshest source posts take the
+   * earliest of them: a topic from a post published today lands on today or
+   * tomorrow, and last week's topics fill the later dates in the Topic Queue.
+   * Only this run's topics move; a stored post or a person's placement never does.
+   */
+  if (ctx.bool('freshestFirst', true)) {
+    const horizon = await resolveCalendarHorizon(ctx.workspaceId)
+    const postedAt = new Map((payload.posts ?? []).map((p) => [p.externalId, p.postedAt ?? '']))
+    const sourceDate = (idea: PlannedIdea): string => (idea.sourceExternalId ? (postedAt.get(idea.sourceExternalId) ?? '') : '')
+    let reordered = 0
+    for (const platform of PLATFORMS) {
+      const mine = ideas.filter((i) => placedKeys.has(i.key) && i.platform === platform)
+      if (mine.length < 2) continue
+      const slots = mine
+        .map((i) => ({ date: String(i.scheduledDate).slice(0, 10), time: i.scheduledTime }))
+        .sort((a, b) => a.date.localeCompare(b.date) || labelToMinutes(a.time) - labelToMinutes(b.time))
+      const byFreshness = [...mine].sort(
+        (a, b) => sourceDate(b).localeCompare(sourceDate(a)) || b.priorityScore - a.priorityScore,
+      )
+      byFreshness.forEach((idea, index) => {
+        const slot = slots[index]
+        if (!slot || (slot.date === String(idea.scheduledDate).slice(0, 10) && slot.time === idea.scheduledTime)) return
+        idea.scheduledDate = slot.date
+        idea.scheduledTime = slot.time
+        const published = sourceDate(idea).slice(0, 10)
+        if (horizon.postReadyDates.includes(slot.date)) {
+          idea.slotReasons = [
+            ...idea.slotReasons,
+            `Placed on ${weekdayName(slot.date)}, a post-ready day, because its source post${published ? ` (${published})` : ''} is among the freshest this run found — today's trends are written first.`,
+          ]
+        }
+        reordered += 1
+      })
+    }
+    if (reordered > 0) {
+      ctx.log(`${reordered} topic(s) re-dated so the freshest trends take today and tomorrow (${horizon.postReadyDates.join(', ')})`)
+    }
+  }
+
+  /*
+   * THE BEST TOPIC IS TODAY'S POST. Each platform's top-ranked topic from this
+   * run takes today's date when today is a posting day in the window and the
+   * platform has nothing on it yet — so the one post per platform is written
+   * now, not left for a later day.
+   */
+  if (ctx.bool('leadOnToday', true)) {
+    const horizon = await resolveCalendarHorizon(ctx.workspaceId)
+    const today = horizon.today
+    if (horizon.postReadyDates.includes(today)) {
+      for (const platform of PLATFORMS) {
+        const mine = ideas.filter((i) => placedKeys.has(i.key) && i.platform === platform).sort((a, b) => (a.platformRank ?? 1e9) - (b.platformRank ?? 1e9))
+        const top = mine[0]
+        if (!top || String(top.scheduledDate).slice(0, 10) === today) continue
+        const bookedToday = bookedByPlatform.get(platform)?.has(today) && !mine.some((i) => String(i.scheduledDate).slice(0, 10) === today)
+        if (bookedToday) continue
+        const other = mine.find((i) => String(i.scheduledDate).slice(0, 10) === today)
+        if (other) other.scheduledDate = top.scheduledDate
+        top.scheduledDate = today
+        top.slotReasons = [...top.slotReasons, `Today’s post on ${PLATFORM_LABEL[platform]}: the strongest topic this run found for it.`]
+      }
+    }
+  }
+
+  /*
+   * FACEBOOK AND INSTAGRAM TWINS ON THE SAME DAY.
+   *
+   * A topic's Facebook and Instagram entries share one post, so they belong on
+   * the same date. The balancer and the freshness pass date each platform on
+   * its own; here the Instagram twin moves to its Facebook twin's date when
+   * Instagram is free that day, else Facebook moves to Instagram's, else the
+   * two swap with another of this run's Instagram topics. When none of that
+   * is possible (a written post holds the day) the pair is unlinked and each
+   * is written on its own — stated in the log, never hidden.
+   */
+  {
+    const placed = ideas.filter((i) => placedKeys.has(i.key))
+    const groupOf = (i: PlannedIdea): string => i.variantOf ?? i.key
+    const day = (i: PlannedIdea): string => String(i.scheduledDate ?? '').slice(0, 10)
+    const booked = (p: Platform): Set<string> => {
+      const set = bookedByPlatform.get(p) ?? new Set<string>()
+      bookedByPlatform.set(p, set)
+      return set
+    }
+    const move = (i: PlannedIdea, to: string): void => {
+      booked(i.platform).delete(day(i))
+      booked(i.platform).add(to)
+      i.scheduledDate = to
+    }
+    let aligned = 0
+    let unlinked = 0
+    for (const ig of placed.filter((i) => i.platform === 'instagram' && i.sharesPostWith === 'facebook')) {
+      const fb = placed.find((i) => i.platform === 'facebook' && groupOf(i) === groupOf(ig))
+      if (!fb) {
+        delete ig.sharesPostWith
+        unlinked += 1
+        continue
+      }
+      if (day(fb) === day(ig)) continue
+      const target = day(fb)
+      const occupant = placed.find((i) => i !== ig && i.platform === 'instagram' && day(i) === target)
+      if (!booked('instagram').has(target)) move(ig, target)
+      else if (!booked('facebook').has(day(ig))) move(fb, day(ig))
+      else if (occupant) {
+        const from = day(ig)
+        occupant.scheduledDate = from
+        ig.scheduledDate = target
+      } else {
+        delete ig.sharesPostWith
+        delete fb.sharesPostWith
+        unlinked += 1
+        continue
+      }
+      ig.slotReasons = [...ig.slotReasons, `On ${weekdayName(day(ig))} with its Facebook twin — the two share one post.`]
+      aligned += 1
+    }
+    for (const fb of placed.filter((i) => i.platform === 'facebook' && i.sharesPostWith === 'instagram')) {
+      if (!placed.some((i) => i.platform === 'instagram' && i.sharesPostWith === 'facebook' && groupOf(i) === groupOf(fb))) delete fb.sharesPostWith
+    }
+    if (aligned > 0 || unlinked > 0) {
+      ctx.log(`Facebook/Instagram twins: ${aligned} moved onto the same day` + (unlinked > 0 ? ` · ${unlinked} could not share a day and are written separately` : ''))
+    }
+  }
+
+  // Only what the calendar placed goes on to be stored. There is no second
+  // list for the rest; their count and the cut-off are in the log above.
+  const placedIdeas = ideas.filter((i) => placedKeys.has(i.key))
 
   ctx.log(
-    counts
-      .map((c) => `${PLATFORM_LABEL[c.platform]} ${c.primary}/${topPerPlatform * Math.max(1, planningWeeks)} + ${c.suggestions}`)
-      .join(' · ') + (balance ? '' : ' · cross-platform balancing off'),
+    PLATFORMS.map(
+      (p) => `${PLATFORM_LABEL[p]} ${placedIdeas.filter((i) => i.platform === p).length} placed`,
+    ).join(' · ') +
+      (notPlacedTotal > 0 ? ` · ${notPlacedTotal} not placed` : '') +
+      (balance ? '' : ' · cross-platform balancing off'),
   )
 
-  return { ideas }
+  return { ideas: placedIdeas }
 })

@@ -18,9 +18,6 @@ pydantic==2.13.5
 crawl4ai==0.9.3
 
 # ── Models ──────────────────────────────────────────────────────────────────
-# Ollama needs nothing: `core/llm.py` talks to it over urllib from the standard
-# library, deliberately, so a local model adds no dependency at all.
-#
 # anthropic is optional. It is imported lazily inside `run_loop`, and its
 # absence degrades to the deterministic pipeline rather than failing.
 anthropic==1.4.0

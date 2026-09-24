@@ -18,7 +18,6 @@
 
 import { planLocally } from './assistant'
 import { requiresConfirmation } from '../../shared/tool-registry'
-import { PLATFORMS } from '../../shared/agent-contract'
 import { agentDisplayName } from '../components/orchestration-diagram'
 import type { Idea, Keyword, PageId } from '../types'
 
@@ -49,16 +48,6 @@ export interface BarContext {
 }
 
 const PUBLISHING_TOOLS = new Set(['idea.publish', 'idea.approve.leadership'])
-
-/** A primary slot still open on at least one platform, counted from the calendar itself. */
-function freeSlot(ctx: BarContext): boolean {
-  return PLATFORMS.some((platform) => {
-    const taken = ctx.ideas.filter(
-      (i) => i.platform === platform && i.calendar_slot === 'primary' && i.status !== 'rejected',
-    ).length
-    return taken < ctx.topPerPlatform
-  })
-}
 
 /**
  * What an utterance would do, before it is sent. Uses the same grammar the
@@ -97,7 +86,6 @@ export function describeUtterance(text: string, ctx: BarContext): Pick<BarSugges
       plan: chain + tail,
     }
   }
-  if (lead === 'idea.promote') return { kind: 'do', note: freeSlot(ctx) ? 'FREE SLOT' : 'NO FREE SLOT', plan: chain + tail }
   return { kind: 'do', note: 'CHANGES STATE', plan: chain + tail }
 }
 
@@ -136,7 +124,7 @@ function openPage(page: PageId, label: string, what: string): BarSuggestion {
 /** Five things for this screen, ranked. Empty query only; a typed query is matched by the grammar instead. */
 export function screenSuggestions(ctx: BarContext): BarSuggestion[] {
   const term = ctx.keywords.find((k) => k.active)?.term
-  const hasSuggestion = ctx.ideas.some((i) => i.calendar_slot === 'suggestion' && i.status !== 'rejected')
+  const hasTopic = ctx.ideas.some((i) => i.calendar_slot === 'primary' && i.status === 'suggested')
   const list: Array<BarSuggestion | null> = []
 
   switch (ctx.page) {
@@ -151,7 +139,7 @@ export function screenSuggestions(ctx: BarContext): BarSuggestion[] {
       break
     case 'calendar':
       list.push(
-        hasSuggestion ? utterance('promote', 'promote that suggestion to the calendar', ctx) : null,
+        hasTopic ? utterance('generate', 'generate the post for that topic', ctx) : null,
         utterance('on-calendar', 'what is on the calendar', ctx),
         ctx.reviewIdeaId ? utterance('brand', 'check this against the brand rules', ctx) : null,
         utterance('reshuffle', 'reshuffle the calendar', ctx),

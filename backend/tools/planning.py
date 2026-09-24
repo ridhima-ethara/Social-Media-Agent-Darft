@@ -24,6 +24,26 @@ FORMAT_FIT: dict[str, dict[str, int]] = {
 }
 
 
+def post_ready_dates(
+    horizon: str = "today-and-tomorrow",
+    avoid_weekends: bool = True,
+    now: datetime | None = None,
+) -> list[str]:
+    """
+    The dates whose placed topics become written posts now — the same rule as
+    `shared/calendar-horizon.ts`. Today always; tomorrow only under
+    `today-and-tomorrow` and only when tomorrow is a posting day. Every later
+    date holds its topic only, until someone presses Generate Post.
+    """
+    today = (now or datetime.now(timezone.utc)).date()
+    dates = [today.isoformat()]
+    if horizon == "today-and-tomorrow":
+        tomorrow = today + timedelta(days=1)
+        if not (avoid_weekends and tomorrow.weekday() >= 5):
+            dates.append(tomorrow.isoformat())
+    return dates
+
+
 def place_ideas(
     ideas: list[dict[str, Any]],
     window_start: int = 8,
@@ -88,7 +108,9 @@ def rank_ideas(ideas: list[dict[str, Any]], top_per_platform: int = 10) -> dict[
     Ranks by priority, then applies the slot cap PER PLATFORM independently.
 
     A platform with fewer ideas than the cap fills what it has — it never
-    borrows a slot from another platform.
+    borrows a slot from another platform. There is no suggestion list: an idea
+    ranked below the cap is not placed on the calendar and is not returned as a
+    topic; only its count and the cut-off score are reported.
     """
     scored = []
     for idea in ideas:
@@ -105,20 +127,22 @@ def rank_ideas(ideas: list[dict[str, Any]], top_per_platform: int = 10) -> dict[
         by_platform.setdefault(idea.get("platform", "linkedin"), []).append(idea)
 
     ranked: list[dict[str, Any]] = []
-    demoted: list[str] = []
+    not_placed = 0
+    cut_off: dict[str, int] = {}
     for platform, rows in by_platform.items():
         rows.sort(key=lambda r: r["priority_score"], reverse=True)
         for index, row in enumerate(rows):
             row["platform_rank"] = index + 1
-            row["calendar_slot"] = "primary" if index < top_per_platform else "suggestion"
-            if row["calendar_slot"] == "suggestion":
-                demoted.append(row.get("title", ""))
+            if index >= top_per_platform:
+                not_placed += 1
+                continue
+            row["calendar_slot"] = "primary"
+            cut_off[platform] = row["priority_score"]
             ranked.append(row)
 
-    primary = [r for r in ranked if r["calendar_slot"] == "primary"]
     return {
         "ranked_ideas": ranked,
-        "primary_count": len(primary),
-        "suggestion_count": len(ranked) - len(primary),
-        "suggestions": demoted,
+        "primary_count": len(ranked),
+        "not_placed_count": not_placed,
+        "cut_off_by_platform": cut_off,
     }

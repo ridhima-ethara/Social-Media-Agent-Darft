@@ -28,6 +28,7 @@ from .content import (
 )
 from .planning import (
     place_ideas,
+    post_ready_dates,
     rank_ideas,
 )
 from .imagery import (
@@ -60,7 +61,7 @@ __all__ = [
     "available_sources", "fetch_posts", "harvest_hashtags",
     "score_keywords", "rank_hashtags", "route_verdict", "consolidate_hashtags", "similarity_check",
     "draft_caption", "check_brand_voice", "derive_hashtags",
-    "place_ideas", "rank_ideas",
+    "place_ideas", "rank_ideas", "post_ready_dates",
     "derive_concept", "derive_options", "compose_prompt", "render_image", "write_alt_text",
     "check_visual_compliance", "check_visual_similarity", "check_option_distinctness",
     "check_forbidden_imagery", "check_palette", "check_logo_clear_space",

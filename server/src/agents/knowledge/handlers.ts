@@ -11,7 +11,7 @@
  * recorded — not quietly written with a shrug.
  */
 
-import { SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
+import { DISCOVERED_HASHTAG_CATEGORY, SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
 import type { Confidence } from '../../../../shared/agent-contract'
 import { BRAND_RULE_TAG, similarity } from '../../../../shared/brand-voice'
 import {
@@ -442,7 +442,7 @@ export async function retrieveKnowledge(
     // Dropped BEFORE scoring, not after: the `maxResults` budget is spent on what
     // survives here, and filtering downstream would leave a caption with the
     // slots consumed by signal records and nothing citable left.
-    .filter((row) => opts.includeSignals === true || row.category !== SIGNALS_CATEGORY)
+    .filter((row) => opts.includeSignals === true || (row.category !== SIGNALS_CATEGORY && row.category !== DISCOVERED_HASHTAG_CATEGORY))
     .map((row) => ({ ...row, score: scoreEntryAgainstQuery(row, opts.query) }))
     .filter((row) => {
       if (opts.minConfidence !== undefined && confidenceRank(row.confidence) < opts.minConfidence) {

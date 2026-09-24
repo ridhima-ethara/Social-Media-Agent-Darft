@@ -84,7 +84,7 @@ names a package that does not exist yet, say so rather than guessing.
 | `packages/contracts` | **Narrowed** | holds only the folder-level `AgentSpec` + `StageId` that `packages/agents/*/spec.ts` declare. Everything both tiers share lives in `shared/agent-contract.ts` — zero dependencies, keep it that way |
 | `packages/mcp/similarity` | **Equivalent** | `similarity()` in `shared/brand-voice.ts` — Dice over content-word bigrams, computed never judged |
 | `packages/agents/NN-<id>/{spec,prompt}.ts` | **Done** — twelve folders, roster assembled from them, `graph.ts` derives the order | handlers live beside them in `server/src/agents/<id>/handlers.ts`; `agent:check` enforces folder↔registry↔handlers agreement |
-| `packages/mcp/{kb,research-sources,render,publisher,similarity}` | **Deleted** — a parallel connector layer nothing imported | the connectors that actually run are `server/src/integrations/` (`capture` · `apify` · `crawl4ai` · `parallel` · `gcp-llm` · `ollama`), each behind `ServiceAdapter` and swept by `integrationReport()` |
+| `packages/mcp/{kb,research-sources,render,publisher,similarity}` | **Deleted** — a parallel connector layer nothing imported | the connectors that actually run are `server/src/integrations/` (`capture` · `apify` · `crawl4ai` · `parallel` · `gcp-llm` · `embeddings`), each behind `ServiceAdapter` and swept by `integrationReport()` |
 | `packages/orchestrator` | **Not started** | `server/src/orchestrator.ts` — sequential, in-process (phase 1 shape already) |
 | `evals/suites/` | **Not started** | every SKILL.md now has the `Boundaries` list the suites derive from |
 | `docs/architecture-v2.md`, `docs/agent-contract.md` | **Not started** | generated equivalents in `specs/architecture.md` and `specs/agents/` |
@@ -166,8 +166,12 @@ server/src/
   agents/<id>/handlers.ts   the 91 handlers, one file per agent, registered by id
   agents/skills/_register.ts one import per agent, in pipeline order; index.ts holds the payload types
   assistant/            perceive → interpret → plan → confirm → dispatch → narrate → verify → remember
-  integrations/      capture.ts routes each lane · Apify (platform lanes) · crawl4ai (open web
-                     and the platform fallback) · Parallel · GCP · Ollama · image models
+  integrations/      capture.ts routes every lane to the Claude Bridge · Parallel (Knowledge
+                     research only) · GCP · image models
+  bridges/claude-bridge/  ALL scraping, via Claude Code web search (ADR-013/014/015): the
+                     Scraping Agent's platform-level trend discovery (both tiers; ≤3 searches per
+                     platform, last 48 h, newest first), the `claude-bridge` MCP tools in .mcp.json,
+                     and POST /api/bridges/{linkedin-trends,platform-trends}. See its README.
   db/                raw SQL only — no ORM, no query builder
 
 src/               the web app
@@ -190,10 +194,11 @@ src/               the web app
 3. **Every external service is behind an adapter** with `isConfigured()` and
    `unavailableReason()`. Where a degraded path exists it is another real
    implementation, stamped `{ source, fallbackReason }` — never invented data.
-   Scraping has exactly one degradation and no fixture: a platform lane falls
-   back from its Apify actor to a crawl4ai search, which answers the same lane
-   with `metricsAvailable: false`. With neither source configured nothing is
-   captured and the run reports what it could not capture.
+   Scraping has no fixture and no fallback scraper: capture is platform-level
+   trend discovery through the Claude Bridge (ADR-013/014/015), which states
+   `metricsAvailable: false`. A lane that cannot run reports why; if the
+   bridge cannot run, nothing is captured and the run says so. The Scraping
+   Agent uses neither Apify nor Parallel.
 4. **Nothing is ever deleted.** Rejections keep their reason; duplicates set
    `duplicate_of_id`; knowledge deactivates; ideas are withdrawn; drafts
    increment `revision`.
@@ -206,12 +211,11 @@ src/               the web app
 8. **State is server-truth; events are notifications.** The client reconciles by
    refetching `/state`, never by replaying the SSE log.
 9. **Degrade honestly, never fabricate.** No image model → the local brand
-   renderer, labelled. No research key → crawl4ai reads the open web, labelled.
-   No Apify token → the platform lanes read search-indexed pages through
-   crawl4ai, stamped as stating no engagement so the trend score runs on volume
-   alone and says so. Neither capture source → nothing is captured, and the run
-   says so. An empty screen is a correct answer; a plausible one nothing
-   measured is not. The mode is always visible.
+   renderer, labelled. No Claude Code binary → every capture lane reports
+   itself unavailable and nothing is captured, and the run says so. A post the bridge
+   cannot date is left out of capture, never given the capture time. An empty
+   screen is a correct answer; a plausible one nothing measured is not. The mode
+   is always visible.
 10. **Every motion respects `prefers-reduced-motion`, and no colour is
     hard-coded in a component.**
 11. **Real TypeScript.** `strict: true`, no `any` in an exported signature, no
@@ -239,10 +243,14 @@ src/               the web app
 ## The numbers that define the product
 
 Top **5** trending keywords · top **5** hashtags per keyword · consolidated top
-**25** hashtags · top **5** calendar slots per platform (everything else goes to
-"More suggestions" with a rank badge). These are knobs (`topKeywords`,
-`topHashtagsPerKeyword`, `hashtagCount`, `topPerPlatform`) but the defaults are
-load-bearing across the UI copy and the seed data.
+**25** hashtags · top **5** calendar topics per platform per week (an idea below
+the cut is not placed — there is no suggestion list, ADR-016). Only **today's**
+post, and **tomorrow's** when the posting schedule requires it, is written by a
+run; every later date holds its validated topic in the **Topic Queue** until
+someone presses Generate Post (`postReadyHorizon`, `shared/calendar-horizon.ts`).
+These are knobs (`topKeywords`, `topHashtagsPerKeyword`, `hashtagCount`,
+`topPerPlatform`, `postReadyHorizon`) but the defaults are load-bearing across
+the UI copy and the seed data.
 
 ## Working on this codebase
 

@@ -1,0 +1,77 @@
+{
+  "keywords": [
+    {
+      "term": "AI agent evaluation",
+      "weight": 90,
+      "category": "Core",
+      "synonyms": [
+        "agent evaluation",
+        "agent evals"
+      ],
+      "scheduled": "constant"
+    },
+    {
+      "term": "RLVR",
+      "weight": 90,
+      "category": "Core",
+      "synonyms": [
+        "verifiable rewards"
+      ],
+      "scheduled": "constant"
+    },
+    {
+      "term": "reinforcement learning environments",
+      "weight": 90,
+      "category": "Core",
+      "synonyms": [
+        "RL environments"
+      ],
+      "scheduled": "constant"
+    },
+    {
+      "term": "LLM post-training",
+      "weight": 88,
+      "category": "Core",
+      "synonyms": [
+        "post-training"
+      ],
+      "scheduled": "this_week"
+    },
+    {
+      "term": "long-horizon AI agents",
+      "weight": 85,
+      "category": "Core",
+      "synonyms": [
+        "long-horizon agents"
+      ],
+      "scheduled": null
+    },
+    {
+      "term": "AI agents",
+      "weight": 80,
+      "category": "Core",
+      "synonyms": [
+        "LLM agents"
+      ],
+      "scheduled": null
+    },
+    {
+      "term": "model evaluation",
+      "weight": 80,
+      "category": "Core",
+      "synonyms": [
+        "evaluation harness"
+      ],
+      "scheduled": null
+    },
+    {
+      "term": "synthetic data",
+      "weight": 78,
+      "category": "Core",
+      "synonyms": [
+        "synthetic datasets"
+      ],
+      "scheduled": null
+    }
+  ]
+}

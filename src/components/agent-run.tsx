@@ -128,7 +128,6 @@ export function AgentRunPanel() {
           <Metric label="Keywords trending" value={num(summary, 'keywords_trending')} className="min-w-28" />
           <Metric label="Hashtags" value={num(summary, 'hashtags_consolidated')} className="min-w-24" />
           <Metric label="On the calendar" value={num(summary, 'ideas_on_calendar')} className="min-w-28" />
-          <Metric label="In suggestions" value={num(summary, 'ideas_in_suggestions')} className="min-w-28" />
           <Metric label="Lessons learned" value={num(summary, 'knowledge_learned')} className="min-w-28" />
         </div>
       ) : null}

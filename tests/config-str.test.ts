@@ -18,8 +18,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 const KEYS = [
-  'OLLAMA_TEXT_MODEL',
-  'OLLAMA_BASE_URL',
+  'GCP_TEXT_MODEL',
+  'GCP_API_KEY',
+  'GCP_SERVICE_ACCOUNT_JSON',
   'APIFY_API_TOKEN',
   'PARALLEL_API_KEY',
   'EMBEDDING_MODEL',
@@ -45,15 +46,15 @@ describe('config.str() — blank is absent', () => {
   it('falls back to the default when a key is blank, exactly as when it is unset', async () => {
     const { config } = await import('../server/src/config')
 
-    process.env.OLLAMA_TEXT_MODEL = 'some-other-model'
-    expect(config.ollama.textModel).toBe('some-other-model')
+    process.env.GCP_TEXT_MODEL = 'some-other-model'
+    expect(config.gcp.textModel).toBe('some-other-model')
 
     // Blank — the case that matters. A bare `KEY=` line in a .env file.
-    process.env.OLLAMA_TEXT_MODEL = ''
-    const whenBlank = config.ollama.textModel
+    process.env.GCP_TEXT_MODEL = ''
+    const whenBlank = config.gcp.textModel
 
-    delete process.env.OLLAMA_TEXT_MODEL
-    const whenUnset = config.ollama.textModel
+    delete process.env.GCP_TEXT_MODEL
+    const whenUnset = config.gcp.textModel
 
     expect(whenBlank).toBe(whenUnset)
     expect(whenBlank).not.toBe('')
@@ -69,21 +70,18 @@ describe('config.str() — blank is absent', () => {
   it('reports a blank credential as NOT configured', async () => {
     const { config } = await import('../server/src/config')
 
-    process.env.APIFY_API_TOKEN = ''
-    expect(config.apify.configured).toBe(false)
-
     process.env.PARALLEL_API_KEY = ''
     expect(config.parallel.configured).toBe(false)
 
-    process.env.APIFY_API_TOKEN = 'a-real-looking-token'
-    expect(config.apify.configured).toBe(true)
+    process.env.PARALLEL_API_KEY = 'a-real-looking-key'
+    expect(config.parallel.configured).toBe(true)
   })
 
   it('strips a trailing inline comment, which dotenv preserves for unquoted values', async () => {
     const { config } = await import('../server/src/config')
 
-    process.env.EMBEDDING_MODEL = 'nomic-embed-text # the local embedder'
-    expect(config.embeddings.model).toBe('nomic-embed-text')
+    process.env.EMBEDDING_MODEL = 'gemini-embedding-001 # the hosted embedder'
+    expect(config.embeddings.model).toBe('gemini-embedding-001')
   })
 
   it('falls back to the default for an unparseable integer rather than NaN', async () => {
@@ -99,10 +97,11 @@ describe('config.str() — blank is absent', () => {
   it('reads lazily, so a key filled in after boot is seen without a restart', async () => {
     const { config } = await import('../server/src/config')
 
-    delete process.env.OLLAMA_BASE_URL
-    expect(config.ollama.configured).toBe(false)
+    delete process.env.GCP_API_KEY
+    delete process.env.GCP_SERVICE_ACCOUNT_JSON
+    expect(config.embeddings.configured).toBe(false)
 
-    process.env.OLLAMA_BASE_URL = 'http://127.0.0.1:11434'
-    expect(config.ollama.configured).toBe(true)
+    process.env.GCP_API_KEY = 'a-real-looking-key'
+    expect(config.embeddings.configured).toBe(true)
   })
 })

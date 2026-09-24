@@ -1,7 +1,7 @@
 # Going live — what each agent needs
 
 Every agent already runs. There is no demo dataset anywhere in the product: what a screen shows is
-what a run captured, or nothing. Scraping is live today via crawl4ai and needs no key; the remaining
+what a run captured, or nothing. Scraping is live today through the Claude Bridge (Claude Code web search on this host) and needs no scraping key; the remaining
 connectors below improve what the pipeline does with what it captured, and each one says on the
 artefact whether it answered.
 
@@ -11,7 +11,7 @@ Check what is live right now: `GET /api/health` → `integrations`, or **Setting
 
 | Agent | What it needs live | Connector / key | Cost | Status today |
 |---|---|---|---|---|
-| **Scraping** | Posts across LinkedIn, Instagram, X, Facebook and the open web | Apify · `APIFY_API_TOKEN` for the four platform lanes; crawl4ai · `CRAWL4AI_PYTHON` for the open web and as the platform fallback | Apify bills per result, capped by `APIFY_MAX_ITEMS_PER_KEYWORD`; crawl4ai is free — a headless browser on this machine | **Live already** — Apify states real engagement, crawl4ai states none and says so |
+| **Scraping** | The latest relevant trends on LinkedIn, Instagram, Facebook and X | The Claude Bridge · the Claude Code CLI on the host (`CLAUDE_CODE_BIN` if not on PATH); one source adapter per platform in `bridge.config.json` | Claude Code usage, capped at 3 searches per platform per run and a per-session budget | **Live already**. A search result states no engagement, so none is shown |
 | **Validation** | Nothing external. Scores what Scraping captured | — | — | Live already |
 | **Analysis** | Nothing external | — | — | Live already |
 | **Knowledge** | Deep research on the top 25 hashtags | Parallel · `PARALLEL_API_KEY`; crawl4ai reads the open web when it is absent | Parallel paid; crawl4ai free | **Live already** on crawl4ai; Parallel adds synthesis |
@@ -66,7 +66,8 @@ renderer produces data URIs today, so live publishing to those two also needs an
 | Skill / server | What it does here |
 |---|---|
 | `packages/skills/*/SKILL.md` | The behavioural spec each agent runs under — built into `packages/runtime/.claude/skills/` by `npm run build-skills` |
-| `server/src/integrations/*` | The typed connectors: `capture` (lane routing), `apify` (platform lanes), `crawl4ai` (open web and platform fallback), `parallel`, `gcp-llm`, `ollama` |
+| `server/src/integrations/*` | The typed connectors: `capture` (lane routing to the Claude Bridge), `parallel` (Knowledge research only), `gcp-llm`, `embeddings` |
+| `server/src/bridges/claude-bridge/` | All scraping: per-platform trend discovery, the `claude-bridge` MCP server in `.mcp.json`, and `/api/bridges/*` |
 | `GET /api/health` | Proves reachability instead of asserting it — every adapter's `configured` and the reason it is not |
 
 ## What "live" changes in the UI

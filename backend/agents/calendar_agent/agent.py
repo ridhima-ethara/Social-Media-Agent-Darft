@@ -19,7 +19,7 @@ from typing import Any
 from agents.names import identity_for
 from core.agent import Agent
 from core.llm import Reasoning, ToolSpec
-from tools import place_ideas, rank_ideas
+from tools import place_ideas, post_ready_dates, rank_ideas
 
 PLATFORM_CYCLE = ["linkedin", "linkedin", "facebook", "linkedin", "instagram", "x"]
 
@@ -263,15 +263,22 @@ class CalendarAgent(Agent):
         # and nothing was setting them, so it was asked to write a caption for
         # "" on the topic of "" and — correctly — refused.
         #
-        # The top-ranked primary idea is the one that ships. If nothing took a
-        # primary slot the keys stay absent rather than empty: an agent that
-        # reports it has no idea to write about is right, and a blank title
-        # dressed up as an idea is the thing that would be wrong.
+        # The top-ranked POST-READY topic is the one that ships: today's, or
+        # tomorrow's when the posting schedule requires it. A topic on a later
+        # date is not written — it waits in the Topic Queue for Generate Post.
+        # If nothing post-ready was placed the keys stay absent rather than
+        # empty: an agent that reports it has no idea to write about is right,
+        # and a blank title dressed up as an idea is the thing that would be wrong.
+        ready = set(post_ready_dates())
         chosen = min(
-            (i for i in output.get("ranked_ideas", []) if i.get("calendar_slot") == "primary"),
+            (
+                i for i in output.get("ranked_ideas", [])
+                if i.get("calendar_slot") == "primary" and i.get("scheduled_date") in ready
+            ),
             key=lambda i: i.get("platform_rank", 99),
             default=None,
         )
+        output["post_ready_dates"] = sorted(ready)
         if chosen:
             output["chosen_idea"] = chosen
             for key in ("title", "topic", "description", "platform"):
@@ -283,7 +290,9 @@ class CalendarAgent(Agent):
     def summarise(self, result: dict[str, Any]) -> str:
         spread = ", ".join(f"{p} {n}" for p, n in sorted(result.get("per_platform", {}).items())) or "none"
         return (
-            f"{result.get('primary_count', 0)} ideas took a calendar slot ({spread}) and "
-            f"{result.get('suggestion_count', 0)} went to suggestions with their ranks intact, "
-            f"against a cap of {self.config['top_per_platform']} per platform."
+            f"{result.get('primary_count', 0)} validated topics took a calendar date ({spread}) and "
+            f"{result.get('not_placed_count', 0)} ranked below the cap were not placed, "
+            f"against a cap of {self.config['top_per_platform']} per platform. "
+            "Only today's post (and tomorrow's when the schedule requires it) is written; "
+            "later dates hold the topic until Generate Post."
         )

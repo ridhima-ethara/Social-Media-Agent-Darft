@@ -1,0 +1,409 @@
+{
+  "$comment": "The seed Competitor Universe (P0/P1). Written to the `competitors` table the first time a workspace has none; after that the table is the source of truth and is edited in the app or through the API — never here.",
+  "competitors": [
+    {
+      "slug": "openai",
+      "name": "OpenAI",
+      "tier": "P0",
+      "category": "Frontier / Category",
+      "description": "Frontier models, agents, reasoning, RL, evaluations",
+      "website_url": "https://openai.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/OpenAI"
+      ],
+      "keywords": [
+        "frontier models",
+        "agents",
+        "reasoning",
+        "reinforcement learning",
+        "evaluations"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "anthropic",
+      "name": "Anthropic",
+      "tier": "P0",
+      "category": "Frontier / Category",
+      "description": "Agent evaluation, reliability, alignment",
+      "website_url": "https://www.anthropic.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Anthropic"
+      ],
+      "keywords": [
+        "agent evaluation",
+        "reliability",
+        "alignment"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "google-deepmind",
+      "name": "Google DeepMind",
+      "tier": "P0",
+      "category": "Frontier / Category",
+      "description": "RL, reasoning, agents, frontier research",
+      "website_url": "https://deepmind.google",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Google_DeepMind"
+      ],
+      "keywords": [
+        "reinforcement learning",
+        "reasoning",
+        "agents",
+        "frontier research"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "scale-ai",
+      "name": "Scale AI",
+      "tier": "P0",
+      "category": "Training / Evaluations",
+      "description": "Training data, evaluations, RLHF",
+      "website_url": "https://scale.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Scale_AI"
+      ],
+      "keywords": [
+        "training data",
+        "evaluations",
+        "RLHF"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "surge-ai",
+      "name": "Surge AI",
+      "tier": "P0",
+      "category": "Training / Evaluations",
+      "description": "Training data, human feedback, benchmark adjacency",
+      "website_url": "https://www.surgehq.ai",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Surge_AI"
+      ],
+      "keywords": [
+        "training data",
+        "human feedback",
+        "benchmarks"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "metr",
+      "name": "METR",
+      "tier": "P0",
+      "category": "Evaluation",
+      "description": "Long-horizon frontier-model evaluation",
+      "website_url": "https://metr.org",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/METR"
+      ],
+      "keywords": [
+        "long-horizon evaluation",
+        "frontier model evaluation"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "langchain",
+      "name": "LangChain",
+      "tier": "P0",
+      "category": "Agents",
+      "description": "Agent engineering, evaluations, observability",
+      "website_url": "https://www.langchain.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/LangChain"
+      ],
+      "keywords": [
+        "agent engineering",
+        "evaluations",
+        "observability"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "hugging-face",
+      "name": "Hugging Face",
+      "tier": "P0",
+      "category": "Models / Data",
+      "description": "Models, datasets, benchmarks, open AI ecosystem",
+      "website_url": "https://huggingface.co",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Hugging_Face"
+      ],
+      "keywords": [
+        "open models",
+        "datasets",
+        "benchmarks",
+        "open-source AI"
+      ],
+      "status": "active",
+      "monitoring_frequency": "weekly"
+    },
+    {
+      "slug": "cognition",
+      "name": "Cognition",
+      "tier": "P1",
+      "category": "Agents",
+      "description": "Autonomous software engineering agents",
+      "website_url": "https://cognition.ai",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Cognition_AI"
+      ],
+      "keywords": [
+        "software engineering agents",
+        "autonomous coding"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "cursor",
+      "name": "Cursor",
+      "tier": "P1",
+      "category": "Agents",
+      "description": "Coding agents and engineering workflows",
+      "website_url": "https://cursor.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Cursor_(code_editor)"
+      ],
+      "keywords": [
+        "coding agents",
+        "engineering workflows"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "meta",
+      "name": "Meta",
+      "tier": "P1",
+      "category": "Frontier / Open",
+      "description": "Open models, AI research, agents",
+      "website_url": "https://ai.meta.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Meta_AI"
+      ],
+      "keywords": [
+        "open models",
+        "AI research",
+        "agents"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "mistral-ai",
+      "name": "Mistral AI",
+      "tier": "P1",
+      "category": "Frontier / Open",
+      "description": "Frontier/open-weight models",
+      "website_url": "https://mistral.ai",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Mistral_AI"
+      ],
+      "keywords": [
+        "open-weight models",
+        "frontier models"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "weights-and-biases",
+      "name": "Weights & Biases",
+      "tier": "P1",
+      "category": "Evaluation / Observability",
+      "description": "Evaluation, experimentation, observability",
+      "website_url": "https://wandb.ai",
+      "social_urls": [],
+      "keywords": [
+        "evaluation",
+        "experiment tracking",
+        "observability"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "together-ai",
+      "name": "Together AI",
+      "tier": "P1",
+      "category": "Infrastructure",
+      "description": "Training, fine-tuning, inference infrastructure",
+      "website_url": "https://www.together.ai",
+      "social_urls": [],
+      "keywords": [
+        "training infrastructure",
+        "fine-tuning",
+        "inference"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "nvidia",
+      "name": "NVIDIA",
+      "tier": "P1",
+      "category": "Infrastructure",
+      "description": "Compute, training, inference and agent infrastructure",
+      "website_url": "https://www.nvidia.com/en-us/ai/",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Nvidia"
+      ],
+      "keywords": [
+        "compute",
+        "training",
+        "inference",
+        "agent infrastructure"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "cohere",
+      "name": "Cohere",
+      "tier": "P1",
+      "category": "Enterprise AI",
+      "description": "Enterprise models and agentic AI",
+      "website_url": "https://cohere.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Cohere"
+      ],
+      "keywords": [
+        "enterprise AI",
+        "agentic AI"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "replit",
+      "name": "Replit",
+      "tier": "P1",
+      "category": "Coding",
+      "description": "Coding agents and autonomous development",
+      "website_url": "https://replit.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Replit"
+      ],
+      "keywords": [
+        "coding agents",
+        "autonomous development"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "github",
+      "name": "GitHub",
+      "tier": "P1",
+      "category": "Developer Ecosystem",
+      "description": "Coding agents and developer ecosystem",
+      "website_url": "https://github.com/features/copilot",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/GitHub_Copilot"
+      ],
+      "keywords": [
+        "coding agents",
+        "Copilot",
+        "developer ecosystem"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "databricks",
+      "name": "Databricks",
+      "tier": "P1",
+      "category": "Data / AI Platform",
+      "description": "Enterprise AI, data and model infrastructure",
+      "website_url": "https://www.databricks.com",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Databricks"
+      ],
+      "keywords": [
+        "enterprise AI",
+        "data platform",
+        "model infrastructure"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "fireworks-ai",
+      "name": "Fireworks AI",
+      "tier": "P1",
+      "category": "Inference",
+      "description": "Inference and model infrastructure",
+      "website_url": "https://fireworks.ai",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Fireworks_AI"
+      ],
+      "keywords": [
+        "inference",
+        "model infrastructure"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "epoch-ai",
+      "name": "Epoch AI",
+      "tier": "P1",
+      "category": "Research",
+      "description": "AI capabilities, compute and research analysis",
+      "website_url": "https://epoch.ai",
+      "social_urls": [],
+      "keywords": [
+        "AI capabilities",
+        "compute trends",
+        "research analysis"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "ai2",
+      "name": "AI2",
+      "tier": "P1",
+      "category": "Research",
+      "description": "Open models, research and evaluation",
+      "website_url": "https://allenai.org",
+      "social_urls": [
+        "https://en.wikipedia.org/wiki/Allen_Institute_for_AI"
+      ],
+      "keywords": [
+        "open models",
+        "AI research",
+        "evaluation"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    },
+    {
+      "slug": "stanford-hai",
+      "name": "Stanford HAI",
+      "tier": "P1",
+      "category": "Research",
+      "description": "AI research and industry discussion",
+      "website_url": "https://hai.stanford.edu",
+      "social_urls": [],
+      "keywords": [
+        "AI research",
+        "AI policy",
+        "AI Index"
+      ],
+      "status": "active",
+      "monitoring_frequency": "monthly"
+    }
+  ]
+}

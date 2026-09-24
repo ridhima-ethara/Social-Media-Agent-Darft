@@ -122,80 +122,87 @@ Copy `server/.env.example` to `server/.env`. Every key may be left blank.
 
 | Blank key | What happens |
 |---|---|
-| `APIFY_API_TOKEN` | The four platform lanes fall back to crawl4ai — the same lanes, read through a search engine, which states no engagement figures. The trend score then runs on volume alone and says so on every keyword |
-| `CRAWL4AI_PYTHON` | The open-web lane cannot run at all, and a platform lane has nothing to fall back to. With both keys blank, nothing is captured — there is no corpus behind either |
+| `CLAUDE_CODE_BIN` (no Claude Code on the host) | Scraping cannot run: every platform reports itself unavailable, nothing is captured, and the run says so. There is no fallback scraper |
 | Platform publishing credentials | None exist yet. `PUBLISH_MODE=live` refuses with a specific message; demo mode simulates every call and stamps `demo` permanently on the receipt |
 | `PARALLEL_API_KEY` | Research reads the open web with crawl4ai instead, with the reason on every entry |
-| `OLLAMA_BASE_URL` (with `AGENT_MODEL_PROVIDER=ollama`) | Captions, calendar copy and analytics prose come from the deterministic template writer instead of `qwen3.5:latest` |
-| `MFLUX_PYTHON` | Ollama refuses image generation over HTTP, so nothing tries mflux; creatives render locally with the brand SVG renderer instead of FLUX.2 Klein |
+| `GCP_API_KEY` / `GCP_SERVICE_ACCOUNT_JSON` | Captions, calendar copy and analytics prose come from the deterministic template writer instead of Gemini |
+| `MFLUX_PYTHON` | Nothing paints backgrounds; creatives render locally with the brand SVG renderer instead of FLUX.2 Klein |
 | `ASSISTANT_MODEL_PROVIDER` | Ethara runs on the built-in grammar parser — blunter, fully working |
-| `EMBEDDINGS_ENABLED=false` (or no `OLLAMA_BASE_URL`) | Retrieval runs on the lexical scorer alone. Rows still store — they keep a `NULL` vector until `npm run db:embed` reaches them — so nothing is lost, only paraphrase recall |
+| `EMBEDDINGS_ENABLED=false` (or no Google credential) | Retrieval runs on the lexical scorer alone. Rows still store — they keep a `NULL` vector until `npm run db:embed` reaches them — so nothing is lost, only paraphrase recall |
 
-`GCP_API_KEY` is the hosted alternative to the two Ollama keys above. Text generation is a **chain**,
-primary first, exactly as a platform capture lane is Apify then crawl4ai: `TEXT_MODEL_PROVIDER=gcp`
-runs Gemini with the local Qwen behind it, `=ollama` runs Qwen with Gemini behind it, and `=auto`
-prefers whichever local model is configured and keeps the hosted one as the backup. The backup is
-entered only when the primary is configured *and* fails — with one provider configured the chain is
-one link and a failure goes straight to the deterministic writer. Whichever provider answered is
-stamped on the artefact, and a run that fell through to the backup records what it stood in for, so a
-rotated credential cannot hide behind a working fallback. `/api/health` reports the resolved chain.
-`AGENT_MODEL_PROVIDER` governs the Python tier the same way, over its own two bindings (Ollama and
-Claude — that tier has no Gemini client).
+Text generation runs on **Gemini** (`GCP_API_KEY` or `GCP_SERVICE_ACCOUNT_JSON`), with the
+deterministic template writer as the floor beneath it when no Google credential is set. Whichever
+writer produced an artefact is stamped on it, and `/api/health` reports the resolved provider.
+`AGENT_MODEL_PROVIDER` governs the Python tier the same way, over Claude (`ANTHROPIC_API_KEY`) with
+the deterministic pipeline beneath it.
 
 Every fallback is **labelled in the UI**, on the card it affected. The mode is always visible: the
 health endpoint reports the database, the publish mode and the command plane provider, and the header, the
 telemetry ticker and Settings all surface it.
 
-### Scraping — Apify for the platforms, crawl4ai for the open web
+### Scraping — the Claude Bridge, one source adapter per platform
 
-Two sources, one shape. Both answer the same `RawPost` contract in
-`server/src/integrations/capture.ts`, and `captureFor(platform)` decides which one serves a lane, so
-the source is a property of the configuration rather than of the code.
+There is one scraper: the **Claude Bridge** (`server/src/bridges/claude-bridge/`, ADR-013/014/015).
+Apify, Parallel (for capture) and the crawl4ai crawler are gone. The flow is:
 
-**Apify reads the platforms themselves.** One actor per lane, each slug env-overridable, because an
-actor is a third-party artefact that can be deprecated or repriced without notice. Actors return real
-reaction, comment and repost counts — which matters more than convenience: three of the four
-components of `trend_score` are engagement maths, and they are inert without figures.
-
-**crawl4ai reads the open web.** `CRAWL4AI_PYTHON` points at the interpreter of `backend/.venv`, and
-the Scraping Agent spawns `backend/tools/crawl.py` as a sidecar — a headless browser is a local
-process, not an endpoint. It is also the fallback for a platform lane when no Apify token is set.
-
-Each keyword is captured once **per lane**:
-
-| Lane | With `APIFY_API_TOKEN` | Without it |
-|---|---|---|
-| LinkedIn | actor post search — real engagement | `<keyword> site:linkedin.com`, no figures |
-| Instagram | actor hashtag search — real engagement | `<keyword> site:instagram.com` — very little; Instagram is login-walled to a logged-out crawl |
-| X | actor post search — real engagement | `<keyword> (site:x.com OR site:twitter.com)` |
-| Facebook | actor post search — real engagement | `<keyword> site:facebook.com`; likewise thin |
-| Open web | no actor — always crawl4ai | unscoped, platform domains excluded |
-
-Three things this deliberately does **not** do. It does not invent engagement figures: a
-search-indexed page states no reaction count, so `metricsAvailable` is false and the count fields
-stay at zero meaning *not applicable*, never *performed badly*. It does not average those zeros into
-a measured average either — the Validation Agent computes engagement, velocity and growth over the
-metric-bearing rows only, drops the three weights from the divisor when a keyword has none, and
-appends the caveat to `trendReason` so a volume-only score is never mistaken for a measured one. And
-it does not fill an empty lane: Instagram returning nothing for a keyword is a real finding about
-Instagram, and it is reported as one.
-
-Every captured page is scored at capture against the brand topic set **and** the live Knowledge
-Base, and anything aligning with neither is dropped with the count recorded. That score travels on
-the record as `brandRelevance`, so the Validation Agent inherits the evidence rather than
-re-deriving it.
-
-```bash
-# The open-web lane and the platform fallback:
-backend/.venv/bin/pip install -r backend/requirements.txt
-backend/.venv/bin/python -m playwright install chromium
-# One lane, by hand:
-backend/.venv/bin/python -m tools.crawl --keywords "RLHF" --platform linkedin --max-pages 3
+```
+Knowledge Base + Brand Voice + Keywords
+                ↓
+          Claude Bridge
+                ↓
+ LinkedIn | Instagram | Facebook | X
+                ↓
+          Scraping Agent
+                ↓
+ Topic + Date + Hashtags + Post URL + Platform   → Validation Agent → Calendar Agent
 ```
 
-Posts per keyword, the recency window and the ranking order are knobs on Sherlock's capture skill in
-Agent Studio. `APIFY_MAX_ITEMS_PER_KEYWORD` caps them at the deployment level, because actors bill
-per result and a slider must not be able to run up a bill.
+- **What it searches for** comes from the live Knowledge Base, the Ethara brand voice and topics,
+  and the configured keywords. It runs at most 3 focused searches per platform, per run.
+- **Each platform has its own source adapter**, chosen in `platform_trends.source_adapters` in
+  `server/src/bridges/claude-bridge/config/bridge.config.json`. Every platform defaults to
+  `claude_code`: a headless Claude Code session that may only run web search. Replacing one
+  platform's source (for example with an official API adapter) is a config change plus an adapter,
+  and the other platforms are untouched. Each platform module (`platforms/*.ts`) decides what counts
+  as a post on that platform and how to date it.
+- **Only verifiable posts are kept.** The date is decoded from the platform's own post id
+  (LinkedIn activity id, X snowflake, Instagram shortcode). A post outside the recency window
+  (default: the past week) or with no provable date is left out and counted. Each post and trend is
+  labelled **trending today** (published on the current date) or from earlier in the week, and today's
+  come first. Facebook post ids carry no
+  date, so Facebook is skipped with that reason.
+- **Relevance is computed.** A post must mention an Ethara keyword and clear the brand-relevance
+  floor. Posts are grouped into trends, at most 5 posts per trend, newest first.
+- **Nothing is fabricated or bypassed.** URLs come only from raw search results. There is no login,
+  no CAPTCHA or rate-limit evasion, and no fetching of social pages. A search result states no
+  engagement, so `metricsAvailable` is false and no figure is invented.
+
+When scraping and validation finish, the app opens a **Discovery results** popup. It lists each post's
+Topic, Date, Hashtags, Post URL and Platform, with the matched keyword, the trend reason and the
+Validation Agent's verdict, newest first. It is recorded on the run as `summary.discoveryResults`,
+announced with the `discovery.results` event, and can be reopened from the scraping panel
+("View results"). An empty run shows each platform's own reason instead of rows.
+
+The calendar then writes **today's and tomorrow's posts from the freshest trends**, today's first.
+Every later date holds a topic in the Topic Queue. Search engines index social posts late (often by
+days), so "today" is often thin; that is reported with the newest date seen, never filled in. The window is the `datePosted` knob on Sherlock's
+capture skill in Agent Studio. Details: [the bridge README](server/src/bridges/claude-bridge/README.md).
+
+### Analysis — the Social Media Listener (SocialFetch)
+
+The Analysis Agent's `analysis.social.listen` answers **what is happening around Ethara.AI on its
+own social channels, and what are people saying about it**. It reads Ethara.AI's LinkedIn
+(`ethara-ai`), Instagram (`ethara.ai`), X (`@EtharaAi`) and Facebook (its `Ethara-AI` page) through
+**SocialFetch**, its only data source (`SOCIALFETCH_API_KEY` in `server/secrets.env`).
+
+- Engagement, rate, rankings and topics are computed. Unstated metrics stay unstated.
+- Claude reads each comment's sentiment and feedback, and writes the insights from the computed
+  facts.
+- The report is shown on the Dashboard's **Analysis** card, and in full under Content Intelligence
+  → AI Analysis. **Run listener** fetches it fresh.
+- Every report states its sample size and the SocialFetch credits it cost. A run stops calling
+  SocialFetch once credits run out.
+- Spec: `packages/skills/social-media-listener/SKILL.md`. Decision record: ADR-017.
 
 Every trending keyword and hashtag carries the URLs to open it, and the strongest page that carried
 it. They show on Content Intelligence, come back from `GET /api/trends`, and export as CSV from
@@ -255,7 +262,7 @@ The Python tier is where the local models live:
 
 | Stage | Agent | What it does |
 |---|---|---|
-| Scrape | Sherlock | crawl4ai, headless Chromium, keyless — the Python tier has no Apify path |
+| Scrape | Sherlock | the Claude Bridge (`backend/tools/sources.py` calls its CLI once per run, platform-level discovery) |
 | Validate | Dexter | keyword/hashtag scoring, four verdicts |
 | Plan | Dora | weekly calendar slots |
 | Create | SpongeBob, Minnie | captions (`qwen3.5:latest`) and images (`x/flux2-klein:latest` via mflux, brand layer always local SVG) |
@@ -263,10 +270,10 @@ The Python tier is where the local models live:
 | Measure | Jerry, Velma | baseline comparison, lesson write-back |
 
 It reads its configuration from `server/.env` only — inherited through the Node spawn, not a
-separate `backend/.env` — so `AGENT_MODEL_PROVIDER=ollama` and the `OLLAMA_*` keys above govern
-both engines at once. Run it standalone with `backend/.venv/bin/python scripts/run-agents-api.py
+separate `backend/.env` — so `AGENT_MODEL_PROVIDER` and `ANTHROPIC_API_KEY` govern the Python
+tier. Run it standalone with `backend/.venv/bin/python scripts/run-agents-api.py
 "<keyword>"`, which holds the SSE connection open so closing a shell does not orphan the run (the
-API kills the child process on client disconnect, by design). A full 8-agent run on Qwen takes
+API kills the child process on client disconnect, by design). A full 8-agent run on Claude takes
 roughly 9–12 minutes.
 
 ### Going live, agent by agent

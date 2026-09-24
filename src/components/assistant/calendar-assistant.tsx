@@ -62,17 +62,13 @@ export function CalendarAssistant() {
   /*
    * Both groups are targetable, and the grouping says which is which.
    *
-   * The calendar now carries only drafted posts, so listing just those would
-   * make the twenty-odd ideas still waiting on a caption unreachable — and
-   * "draft this one" is exactly the instruction they need.
+   * Written posts, and the topics with no post yet — the Topic Queue's future
+   * topics and any post-ready date still being written. "Generate the post for
+   * this one" is exactly the instruction a topic needs.
    */
-  const live = ideas.filter((idea) => idea.status !== 'rejected')
-  const onCalendar = live.filter(
-    (idea) => idea.calendar_slot === 'primary' && idea.status !== 'suggested',
-  )
-  const waiting = live.filter(
-    (idea) => idea.calendar_slot === 'suggestion' || idea.status === 'suggested',
-  )
+  const live = ideas.filter((idea) => idea.status !== 'rejected' && idea.calendar_slot === 'primary')
+  const onCalendar = live.filter((idea) => idea.status !== 'suggested')
+  const waiting = live.filter((idea) => idea.status === 'suggested')
   const targets = [...onCalendar, ...waiting]
   const target = targets.find((idea) => idea.id === targetId) ?? null
 
@@ -205,7 +201,7 @@ export function CalendarAssistant() {
               ...waiting.map((idea) => ({
                 value: idea.id,
                 label: `${PLATFORM_LABEL[idea.platform]} · ${idea.scheduled_date} · ${idea.title.slice(0, 34)}`,
-                group: 'Waiting on a caption',
+                group: 'Topics with no post yet',
               })),
             ]}
           />

@@ -12,6 +12,7 @@ import {
   ChevronLeft,
   CalendarDays,
   Gauge,
+  Radio,
   LayoutDashboard,
   LogOut,
   Network,
@@ -83,7 +84,10 @@ export const MARKETING_NAV: NavGroup[] = [
   },
   {
     label: 'Pipeline',
-    items: [{ page: 'intelligence', label: 'Content Intelligence', icon: Gauge }],
+    items: [
+      { page: 'intelligence', label: 'Content Intelligence', icon: Gauge },
+      { page: 'listener', label: 'Analysis', icon: Radio },
+    ],
   },
   {
     label: 'Work',
@@ -115,7 +119,10 @@ export const LEADERSHIP_NAV: NavGroup[] = [
   },
   {
     label: 'Pipeline',
-    items: [{ page: 'orchestration', label: 'Agent Orchestration', icon: Network }],
+    items: [
+      { page: 'orchestration', label: 'Agent Orchestration', icon: Network },
+      { page: 'listener', label: 'Analysis', icon: Radio },
+    ],
   },
 ]
 

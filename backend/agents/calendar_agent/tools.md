@@ -15,11 +15,18 @@ something you should override.
 Computes priority from confidence, brand relevance and trend score, then applies the slot cap **per
 platform independently**.
 
-Returns every idea with `priority_score`, `platform_rank` and `calendar_slot` — either `primary`
-(on the calendar) or `suggestion` (ranked and waiting).
+Returns the placed topics with `priority_score`, `platform_rank` and `calendar_slot: primary`, plus
+`not_placed_count` and the cut-off score per platform. There is no suggestion list: an idea below the
+cap is not returned as a topic.
 
 `top_per_platform` comes from the resolved settings. Never choose a cap yourself: it is the number
 the operator tunes to decide how much the calendar holds.
+
+## `post_ready_dates()`
+
+Not a tool you call. It is the rule the agent applies after ranking: today, and tomorrow only when it
+is a posting day. Only a topic on one of these dates is handed to the Content Agent. Every later
+topic stays a topic in the Topic Queue until Generate Post is pressed.
 
 ## `recall_knowledge(topic, limit)`
 

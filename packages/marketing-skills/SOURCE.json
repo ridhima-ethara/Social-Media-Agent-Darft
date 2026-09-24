@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/coreyhaines31/marketingskills",
+  "commit": "5b2c0007766c6a1cf1d53fd8fc73e979e0821022",
+  "committed_at": "2026-09-04T21:48:02-07:00",
+  "synced_at": "2026-09-24T01:32:44.219Z",
+  "skills": [
+    {
+      "name": "competitor-profiling",
+      "path": "skills/competitor-profiling",
+      "version": "2.0.1"
+    },
+    {
+      "name": "competitors",
+      "path": "skills/competitors",
+      "version": "2.0.1"
+    }
+  ]
+}

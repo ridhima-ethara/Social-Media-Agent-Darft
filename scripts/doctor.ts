@@ -15,7 +15,7 @@
  *
  * Exit 0 when nothing blocks a run, 1 when something does. A degraded
  * integration is NOT a failure — the product is designed to run with an empty
- * `.env` — so an absent Apify token reports as a stated degradation and does not
+ * `.env` — so an absent optional key reports as a stated degradation and does not
  * fail the command. Only things that stop the product working do.
  */
 
@@ -23,12 +23,6 @@ import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 
-import { allIndexedActorIds } from '../server/src/services/scraping/actor-index'
-import {
-  actorInputSchema,
-  cliAuthenticated,
-  cliInstalled,
-} from '../server/src/services/scraping/apify-cli'
 
 const RESET = '\u001B[0m'
 const RED = '\u001B[31m'
@@ -231,164 +225,82 @@ async function main(): Promise<void> {
   /* ── 4 · MODELS ─────────────────────────────────────────────────────────── */
   section('Models')
 
-  if (!config.ollama.configured) {
-    degraded(
-      'Ollama is not configured',
-      'OLLAMA_BASE_URL is not set. Captions, calendar copy and analytics prose come from ' +
-        'the deterministic template writer, and retrieval is lexical only.',
-    )
+  // Text generation and embeddings both run on the Google credential now that
+  // Ollama has been removed. No local daemon to probe.
+  if (config.gcp.configured) {
+    ok('GCP credential', 'present — Gemini writes captions, calendar copy and analytics prose')
   } else {
-    let pulled: string[] | null = null
-    try {
-      const response = await fetch(`${config.ollama.baseUrl}/api/tags`, {
-        signal: AbortSignal.timeout(4000),
-      })
-      const body = (await response.json()) as { models?: Array<{ name: string }> }
-      pulled = (body.models ?? []).map((m) => m.name)
-    } catch {
-      pulled = null
-    }
-
-    if (pulled === null) {
-      blocked(
-        'OLLAMA_BASE_URL is set but no daemon answered',
-        `Nothing responded at ${config.ollama.baseUrl}.`,
-        'ollama serve   (or unset OLLAMA_BASE_URL to use the deterministic writer)',
-      )
-    } else {
-      ok('daemon', `${config.ollama.baseUrl} · ${pulled.length} model(s)`)
-
-      /** A configured tag counts as present if it or its `:latest` form is pulled. */
-      const has = (tag: string): boolean =>
-        pulled.includes(tag) || pulled.includes(`${tag}:latest`)
-
-      const wanted: Array<{ key: string; tag: string; blocking: boolean; pull: string }> = [
-        { key: 'OLLAMA_TEXT_MODEL', tag: config.ollama.textModel, blocking: true, pull: config.ollama.textModel.split(':')[0] as string },
-        { key: 'OLLAMA_IMAGE_MODEL', tag: config.ollama.imageModel, blocking: false, pull: config.ollama.imageModel.split(':')[0] as string },
-      ]
-      if (config.embeddings.enabled) {
-        wanted.push({
-          key: 'EMBEDDING_MODEL',
-          tag: config.embeddings.model,
-          blocking: false,
-          pull: config.embeddings.model,
-        })
-      }
-
-      for (const model of wanted) {
-        if (has(model.tag)) {
-          ok(`${model.key}`, model.tag)
-        } else if (model.blocking) {
-          blocked(
-            `${model.key} names a model that is not pulled`,
-            `${model.key}=${model.tag}, and \`ollama list\` does not have it. ` +
-              'Generation would fail per call rather than degrade cleanly.',
-            `ollama pull ${model.pull}`,
-          )
-        } else {
-          degraded(
-            `${model.key}=${model.tag} is not pulled`,
-            `That path falls back with a stated reason. \`ollama pull ${model.pull}\` enables it.`,
-          )
-        }
-      }
-    }
+    degraded(
+      'no GCP credential',
+      'Neither GCP_API_KEY nor GCP_SERVICE_ACCOUNT_JSON is set. Captions, calendar copy and ' +
+        'analytics prose come from the deterministic template writer.',
+    )
   }
 
-  if (config.gcp.configured) ok('GCP credential', 'present — the hosted chain link is available')
-  else degraded('no GCP credential', 'The text chain is one link; a failure goes to the template writer.')
+  if (config.embeddings.enabled) {
+    if (config.embeddings.configured) {
+      ok('EMBEDDING_MODEL', `${config.embeddings.model} (${config.embeddings.dimensions} dims) on the Google credential`)
+    } else {
+      degraded(
+        'embeddings have no Google credential',
+        'Semantic retrieval falls back to the lexical scorer with the reason stated. ' +
+          'Set GCP_API_KEY or GCP_SERVICE_ACCOUNT_JSON to enable it.',
+      )
+    }
+  } else {
+    degraded('EMBEDDINGS_ENABLED is false', 'Retrieval is lexical only, by choice.')
+  }
+
+  if (config.mflux.configured) {
+    ok('MFLUX_PYTHON', `${config.mflux.model} — FLUX.2 Klein paints backgrounds locally`)
+  } else {
+    degraded(
+      'MFLUX_PYTHON is not set',
+      'FLUX.2 Klein has no transport, so image backgrounds fall back to the local brand renderer with a stated reason.',
+    )
+  }
 
   /* ── 5 · CAPTURE ────────────────────────────────────────────────────────── */
   section('Capture')
 
-  if (!config.apify.configured && !config.parallel.configured) {
+  /*
+   * Every Scraping Agent lane is the Claude Bridge — the four platforms and the
+   * open web. Neither Apify nor Parallel is a capture source, and neither is
+   * probed here. Nothing below spends money: readiness is a binary lookup and a
+   * config read, not a search.
+   */
+  const { platformLaneUnavailableReason, openWebLaneUnavailableReason } = await import(
+    '../server/src/integrations/capture'
+  )
+  const { bridgeUnavailableReason } = await import('../server/src/bridges/claude-bridge/capture-source')
+  const platformReason = platformLaneUnavailableReason()
+  const webReason = openWebLaneUnavailableReason()
+
+  if (platformReason !== '' && webReason !== '') {
     blocked(
-      'no capture source is configured',
-      'Neither APIFY_API_TOKEN nor PARALLEL_API_KEY is set, so a discovery run captures ' +
-        'nothing at all — there is no fixture behind either lane.',
-      'set APIFY_API_TOKEN for the four platform lanes, and PARALLEL_API_KEY for the open web',
+      'no capture lane can run',
+      `The Claude Bridge cannot run (${platformReason}), so a discovery run captures nothing at all — ` +
+        'there is no fixture and no second scraper behind it.',
+      'install Claude Code, or set CLAUDE_CODE_BIN in server/.env to the `claude` executable',
     )
   } else {
-    if (config.apify.configured) {
-      ok('Apify', 'the four platform lanes read the platforms themselves, with engagement')
-    } else {
-      /*
-       * No longer a degradation — it is a lane that does not run.
-       *
-       * This used to report the lanes falling back to the crawler, which made a
-       * volume-only score sound like a lesser version of the same measurement.
-       * With no fallback the honest report is that the platform lanes produce
-       * nothing, and the open web is all that remains.
-       */
-      blocked(
-        'no Apify token — the four platform lanes cannot run',
-        'APIFY_API_TOKEN is not set. The platform lanes read LinkedIn, Instagram, X and ' +
-          'Facebook directly, and nothing else can state a reaction count, so no substitute ' +
-          'is attempted. Without it a run captures the open web only, and the trend score ' +
-          'has no engagement, velocity or growth to compute.',
-        'put APIFY_API_TOKEN in server/secrets.env (gitignored). Apify console → Settings → ' +
-          'API & Integrations → Personal API tokens',
-      )
+    for (const lane of ['linkedin', 'instagram', 'x', 'facebook', undefined] as const) {
+      const reason = bridgeUnavailableReason(lane)
+      const name = lane === undefined ? 'open web' : lane
+      if (reason === '') ok(`Claude Bridge · ${name}`, 'captured through Claude Code web search')
+      else degraded(`Claude Bridge · ${name} is skipped`, reason)
     }
+  }
 
-    /*
-     * ═══ THE APIFY SKILL / CLI PATH (§20) ═══
-     *
-     * Four states, reported distinctly, because the fixes are different and a
-     * single "unavailable" would send an operator to the wrong one. Nothing
-     * below reports success it has not actually observed: the CLI is asked for
-     * its version, asked who it is logged in as, and asked to resolve a real
-     * actor id. Execution is deliberately NOT attempted — it bills per result,
-     * and a doctor command must not be able to spend money.
-     */
-    if (!cliInstalled()) {
-      degraded(
-        'Apify CLI NOT CONFIGURED — the official skill workflow cannot run',
-        'apify-cli is not in node_modules. The HTTP client still serves the platform lanes, ' +
-          'so capture is unaffected; only the skill-driven actor selection and live schema ' +
-          'discovery are unavailable. Fix: npm i -D apify-cli',
-      )
-    } else {
-      const authed = await cliAuthenticated()
-      if (!authed) {
-        degraded(
-          'Apify CLI UNAVAILABLE — installed but holding no credentials',
-          'The CLI does not read APIFY_TOKEN from the environment; it authenticates from a ' +
-            'stored credential. Until it is logged in, capture falls back to the HTTP client. ' +
-            'Fix: npx apify login -t $APIFY_API_TOKEN, or set APIFY_API_TOKEN and the server ' +
-            'establishes the login itself at first use.',
-        )
-      } else {
-        // Resolve one indexed actor for real, so "AVAILABLE" means the chain
-        // actually answered rather than that a binary exists on disk.
-        const probe = allIndexedActorIds()[0] ?? 'apify/instagram-hashtag-scraper'
-        try {
-          const schema = await actorInputSchema(probe, 8_000)
-          const fields = Object.keys(schema.properties ?? {}).length
-          ok(
-            'Apify CLI AVAILABLE',
-            `logged in, and \`actors info --input\` resolved ${probe} with ${fields} input field(s)`,
-          )
-        } catch (error) {
-          degraded(
-            'Apify CLI FAILED — logged in, but actor discovery did not answer',
-            `Resolving ${probe} failed: ${error instanceof Error ? error.message.slice(0, 160) : String(error)}. ` +
-              'Fix: check network access to api.apify.com, then re-run doctor.',
-          )
-        }
-      }
-    }
-
-    if (config.parallel.configured) {
-      ok('Parallel', 'the open-web lane reads cited pages, which state no engagement')
-    } else {
-      degraded(
-        'no PARALLEL_API_KEY — the open-web lane cannot run',
-        'The four platform lanes are unaffected. Research for the Knowledge Base also ' +
-          'depends on this key, and without it a build finds nothing citable rather than ' +
-          'substituting a weaker source.',
-      )
-    }
+  if (config.parallel.configured) {
+    ok('Parallel', 'Knowledge Base research only — not a scraping source')
+  } else {
+    degraded(
+      'no PARALLEL_API_KEY — Knowledge Base research cannot run',
+      'Scraping is unaffected (every lane is the Claude Bridge). The Knowledge Agent’s hashtag ' +
+        'research uses this key, and without it a build finds nothing citable rather than ' +
+        'substituting a weaker source.',
+    )
   }
 
   /* ── 6 · PORTS ──────────────────────────────────────────────────────────── */

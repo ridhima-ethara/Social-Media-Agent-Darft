@@ -25,6 +25,7 @@ import {
 import { enforceAssistantVoice, NARRATION_TEMPLATES, pickOpener } from '@shared/assistant-persona'
 import type { AssistantPlan, PlanStep, StatePayload } from '../types'
 import { API_BASE } from './api'
+import { isQueuedTopic, resolveHorizon } from './calendar-horizon'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    FRAMES
@@ -161,8 +162,6 @@ const READ_BEFORE_WRITE: Record<string, string[]> = {
   'draft.instruct': ['idea.list'],
   'image.render': ['idea.list'],
   'idea.move': ['idea.list'],
-  'idea.promote': ['idea.list'],
-  'idea.demote': ['idea.list'],
   'hashtag.verdict.set': ['hashtag.list'],
   'review.resolve': ['review.queue.list'],
   'knowledge.build': ['hashtag.top'],
@@ -272,6 +271,9 @@ function num(value: unknown): number {
  */
 export function dispatchLocally(toolId: string, state: StatePayload): LocalResult {
   const ideas = state.ideas
+  // The same post-ready rule the Calendar uses; there is no suggestion list.
+  const horizon = resolveHorizon(state.calendarHorizon)
+  const onCalendar = ideas.filter((i) => i.calendar_slot === 'primary' && i.status !== 'rejected')
   const queue = state.reviewQueue.filter((q) => !q.resolved)
 
   switch (toolId) {
@@ -355,17 +357,17 @@ export function dispatchLocally(toolId: string, state: StatePayload): LocalResul
 
     case 'idea.list':
       return {
-        summary: `${ideas.filter((i) => i.calendar_slot === 'primary').length} ideas on the calendar, ${ideas.filter((i) => i.calendar_slot === 'suggestion').length} in More suggestions.`,
+        summary: `${onCalendar.length} on the calendar — ${onCalendar.filter((i) => isQueuedTopic(i, horizon)).length} future topic(s) in the Topic Queue with no post yet.`,
         render: 'table',
         data: {
-          columns: ['Title', 'Platform', 'When', 'Slot', 'Confidence'],
-          rows: ideas
+          columns: ['Title', 'Platform', 'When', 'Post', 'Confidence'],
+          rows: onCalendar
             .slice(0, 12)
             .map((i) => [
               i.title,
               i.platform,
               `${i.scheduled_date} ${i.scheduled_time}`,
-              i.calendar_slot,
+              isQueuedTopic(i, horizon) ? 'topic only' : i.draft?.body ? 'written' : 'due',
               `${i.confidence}%`,
             ]),
         },

@@ -18,6 +18,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:py": "backend/.venv/bin/pytest backend/tests -q",
+    "test:linkedin-trends": "vitest run tests/claude-bridge && tsx server/src/bridges/claude-bridge/cli.ts --sample",
+    "linkedin-trends": "tsx server/src/bridges/claude-bridge/cli.ts",
+    "mcp:claude-bridge": "tsx server/src/bridges/claude-bridge/server/bridge-server.ts",
     "db:up": "docker compose up -d db",
     "db:migrate": "npm --prefix server run db:migrate",
     "db:seed": "npm --prefix server run db:seed",
@@ -27,8 +30,6 @@
     "agent:check": "tsx scripts/check-agents.ts",
     "specs:build": "tsx scripts/build-specs.ts",
     "doctor": "tsx scripts/doctor.ts",
-    "deploy:tunnel": "bash deploy/cloudflare/tunnel.sh",
-    "deploy:pages": "npm run build && npx wrangler pages deploy dist --project-name ethara-socialai",
     "brand:check": "tsx scripts/check-brand-voice.ts",
     "brand:check:db": "tsx server/scripts/check-alignment-vocabulary.ts",
     "agent:new": "node scripts/new-agent.mjs",
@@ -39,7 +40,8 @@
     "agents:seed": "backend/.venv/bin/python backend/seed_brain.py",
     "agents:brain": "backend/.venv/bin/python backend/api.py brain",
     "verify": "tsx scripts/verify.ts",
-    "buffer:channels": "tsx server/scripts/buffer-channels.ts"
+    "buffer:channels": "tsx server/scripts/buffer-channels.ts",
+    "marketing-skills:sync": "tsx scripts/sync-marketing-skills.ts"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",
@@ -60,7 +62,6 @@
     "@types/react-dom": "19.2.7",
     "@types/three": "^0.180.0",
     "@vitejs/plugin-react": "5.2.0",
-    "apify-cli": "^1.10.0",
     "concurrently": "9.2.4",
     "oxlint": "1.82.0",
     "tailwindcss": "4.3.3",

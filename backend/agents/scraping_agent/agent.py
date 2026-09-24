@@ -70,13 +70,16 @@ class ScrapingAgent(Agent):
         return [
             ToolSpec(
                 name="available_sources",
-                description="Which sources are reachable now, and why the others are not.",
+                description="Which platforms the Claude Bridge can discover on now, and why any other cannot.",
                 input_schema={"type": "object", "properties": {}},
                 handler=available_sources,
             ),
             ToolSpec(
                 name="fetch_posts",
-                description="Capture posts for each keyword from every reachable source.",
+                description=(
+                    "Discover what is trending on LinkedIn, Instagram, Facebook and X through the Claude "
+                    "Bridge — one call with the full keyword list. Returns the trends and their posts, newest first."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -111,10 +114,11 @@ class ScrapingAgent(Agent):
     def task(self, payload: dict[str, Any]) -> str:
         keywords = payload.get("keywords", [])[: self.config["max_keywords_per_run"]]
         return (
-            f"Capture what is being discussed about these {len(keywords)} keywords: "
+            f"Discover what is trending, relevant to Ethara, for these {len(keywords)} keywords: "
             f"{', '.join(keywords)}.\n\n"
-            "Check which sources are reachable, capture posts for every keyword, then harvest the "
-            "hashtags those posts used. Report what you captured, from where, and what failed."
+            "Check which platforms the Claude Bridge can reach, run one discovery with the full keyword "
+            "list, then harvest the hashtags those posts used. Report the trends and posts per platform, "
+            "newest first, and why any platform came back empty."
         )
 
     def finalise(self, reasoning: Reasoning, payload: dict[str, Any]) -> dict[str, Any]:

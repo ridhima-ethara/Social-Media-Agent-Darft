@@ -15,17 +15,12 @@ import html
 import json
 import os
 import re
-import urllib.parse
-import urllib.request
+import subprocess
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from core.schema import HashtagCandidate, Platform, RawPost
-
-TIMEOUT = 20
-
-# A named agent string. Public APIs reject generic ones.
-UA = "python:ethara-socialai:1.0 (by /u/ethara-ai)"
 
 GENERIC = {
     "ai", "tech", "innovation", "future", "digital", "business", "growth",
@@ -34,187 +29,88 @@ GENERIC = {
 }
 
 
-def _get_json(url: str, headers: dict[str, str] | None = None) -> Any:
-    request = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:  # noqa: S310 — fixed hosts
-        return json.loads(response.read().decode("utf-8"))
+# ── Sources: platform-level trend discovery through the Claude Bridge ─────
+#
+# Capture is ONE call to the Claude Bridge (server/src/bridges/claude-bridge/,
+# ADR-013/014) — the same platform-level discovery the Node tier's Scraping
+# Agent runs: for each of LinkedIn, Instagram, Facebook and X, one quoted topic
+# per search (the current month named), built from the Knowledge Base, research
+# corpus, brand context and keywords;
+# only posts whose date is verifiable inside the window and that mention an
+# Ethara keyword are kept; newest first. No other scraping service is used.
+#
+# What a row states: a real post URL, a verified date (decoded from the post
+# id), the text the search result showed, the hashtags written in it, and the
+# author handle the URL carries. It states no engagement, so the counts stay at
+# the RawPost default of 0 — "not stated", never "performed badly".
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BRIDGE_CLI = REPO_ROOT / "server" / "src" / "bridges" / "claude-bridge" / "cli.ts"
+TSX = REPO_ROOT / "node_modules" / ".bin" / "tsx"
+
+#: One discovery drives a Claude Code session per platform, all at once.
+BRIDGE_TIMEOUT = int(os.environ.get("CLAUDE_BRIDGE_TIMEOUT_S", "600"))
+
+LANES: dict[str, str] = {
+    "linkedin": "LinkedIn",
+    "instagram": "Instagram",
+    "facebook": "Facebook",
+    "x": "X",
+}
 
 
-# ── Sources ────────────────────────────────────────────────────────────────
-
-def _fetch_hackernews(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
-    """Hacker News via Algolia. Keyless and free."""
-    since = int((datetime.now(timezone.utc) - timedelta(days=window_days)).timestamp())
-    url = (
-        f"https://hn.algolia.com/api/v1/search?query={urllib.parse.quote(keyword)}"
-        f"&tags=story&numericFilters=created_at_i>{since}&hitsPerPage={max_items}"
+def _run_bridge(args: list[str]) -> dict[str, Any]:
+    """Runs the bridge CLI and returns its JSON. Raises with the bridge's own reason."""
+    if not TSX.exists():
+        raise RuntimeError(f"tsx is not installed at {TSX} — run `npm install` in the repository root")
+    proc = subprocess.run(  # noqa: S603 — fixed executable, arguments are data
+        [str(TSX), str(BRIDGE_CLI), *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=BRIDGE_TIMEOUT,
+        check=False,
     )
-    payload = _get_json(url)
-
-    posts: list[RawPost] = []
-    for hit in payload.get("hits", []):
-        text = clean_text(f"{hit.get('title', '')}\n\n{hit.get('story_text') or ''}").strip()
-        if not text:
-            continue
-        posts.append(RawPost(
-            external_id=str(hit.get("objectID", "")),
-            text=text[:4000],
-            url=hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}",
-            author_name=hit.get("author", ""),
-            author_headline="Hacker News",
-            posted_at=hit.get("created_at", ""),
-            reactions=int(hit.get("points") or 0),
-            comments=int(hit.get("num_comments") or 0),
-            hashtags=extract_hashtags(text),
-            keyword=keyword,
-            source_name="Hacker News",
-        ))
-    return posts
-
-
-def _crawl4ai_configured() -> bool:
-    """
-    crawl4ai needs no key, so presence of the package is the whole test. It is
-    checked by import rather than by env var because there is no env var that
-    would make an absent package work.
-    """
     try:
-        import crawl4ai  # noqa: F401
-    except ImportError:
-        return False
-    return True
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as error:
+        tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+        raise RuntimeError(f"the Claude Bridge returned no JSON (exit {proc.returncode}): {tail}") from error
 
 
-def _crawl(keyword: str, max_items: int, platform: str | None) -> list[RawPost]:
-    """
-    One crawl4ai capture, scoped to `platform` or unscoped for the open web.
-
-    Keyless: it searches, then reads the results.
-
-    ON THE ENGAGEMENT FIELDS. A web page has no reaction count. `RawPost`
-    defaults the trio to 0 and this function leaves them there rather than
-    inventing plausible numbers — `source_name` records that the capture came
-    from a website, so nothing downstream reads those zeros as a performance
-    reading (constraint 2 — N/A is never 0).
-
-    Recency is not filtered here: a search engine decides its own, and
-    pretending to filter on a date the page may not state would be a fabricated
-    constraint. That is why `window_days` never reaches this function.
-    """
-    import asyncio
-
-    from .crawl import crawl_keywords
-
-    pages = int(os.environ.get("CRAWL4AI_MAX_PAGES_PER_KEYWORD", "6"))
-    chars = int(os.environ.get("CRAWL4AI_MAX_CHARS_PER_PAGE", "6000"))
-    engines = [
-        e.strip().lower()
-        for e in os.environ.get("CRAWL4AI_SEARCH_ENGINES", "duckduckgo,bing").split(",")
-        if e.strip()
-    ]
-
-    result = asyncio.run(
-        crawl_keywords(
-            [keyword],
-            engines=engines,
-            max_pages=min(max_items, pages),
-            max_chars=chars,
-            delay_ms=int(os.environ.get("CRAWL4AI_DELAY_MS", "400")),
-            platform=platform,
-        )
-    )
-
-    posts: list[RawPost] = []
-    for row in result.get("posts", []):
-        posts.append(RawPost(
-            external_id=row["externalId"],
-            text=clean_text(row["text"]),
-            url=row["url"],
-            author_name=row.get("authorName") or row.get("siteName", ""),
-            author_headline=row.get("siteName", ""),
-            # The page's own stated date when it has one, the capture time
-            # otherwise — never one dressed as the other.
-            posted_at=row.get("publishedAt") or row.get("capturedAt", ""),
-            # A crawled page's `#tokens` are URL fragments, not hashtags —
-            # see `_hashtags_for_web_page` in `crawl.py`. Whatever the sidecar
-            # reported is what is recorded, and nothing is derived from prose.
-            hashtags=row.get("hashtags") or [],
-            keyword=keyword,
-            source_name=f"crawl4ai · {row.get('siteName', 'web')}",
-            **({"platform": Platform(platform)} if platform else {}),
-        ))
-    return posts
+_lane_cache: dict[str, str] | None = None
 
 
-def _lane(platform: str | None):
-    """Binds one platform lane to the shared `(keyword, max_items, window_days)` signature."""
-
-    def fetch(keyword: str, max_items: int, window_days: int) -> list[RawPost]:
-        del window_days  # See `_crawl`: recency is the engine's to decide.
-        return _crawl(keyword, max_items, platform)
-
-    return fetch
-
-
-#: Every lane, in capture order. The four platforms are crawl4ai searches
-#: scoped by `site:`; `web` is the same crawler unscoped. Hacker News keeps its
-#: own keyless API, which returns real engagement figures that a search-indexed
-#: page cannot.
-#:
-#: REDDIT WAS REMOVED at the operator's instruction. It had been answering
-#: `HTTP 403: Blocked` to this crawler, so every run spent a request on it and
-#: reported it as unreachable. Hacker News is now the only lane that reports real
-#: reaction counts — which matters downstream, because engagement carries the
-#: largest single share of the trend score.
-SOURCES = {
-    "linkedin": (_lane("linkedin"), "crawl4ai · LinkedIn", ""),
-    "instagram": (_lane("instagram"), "crawl4ai · Instagram", ""),
-    "x": (_lane("x"), "crawl4ai · X", ""),
-    "facebook": (_lane("facebook"), "crawl4ai · Facebook", ""),
-    "web": (_lane(None), "crawl4ai · open web", ""),
-    "hackernews": (_fetch_hackernews, "Hacker News", ""),
-}
-
-#: Sources whose availability is not an env var. A keyless source can still be
-#: unavailable — crawl4ai needs its package and its browser — and reporting it
-#: as ready because no key is missing would be a lie of omission.
-PROBES: dict[str, Any] = {
-    key: _crawl4ai_configured
-    for key in ("linkedin", "instagram", "x", "facebook", "web")
-}
-
-
-def _source_ready(key: str, env_key: str) -> bool:
-    if env_key and not os.environ.get(env_key):
-        return False
-    probe = PROBES.get(key)
-    return True if probe is None else bool(probe())
+def _lane_reasons() -> dict[str, str]:
+    """lane → "" when it can run, else the reason. Asked once per process; makes no search."""
+    global _lane_cache  # noqa: PLW0603 — a per-process memo of a config check
+    if _lane_cache is None:
+        try:
+            _lane_cache = {k: str(v) for k, v in _run_bridge(["--lanes"]).items()}
+        except Exception as error:  # noqa: BLE001 — reported as every lane's reason
+            _lane_cache = {lane: f"the Claude Bridge could not be reached: {error}" for lane in LANES}
+    return _lane_cache
 
 
 # ── The tools ──────────────────────────────────────────────────────────────
 
 def available_sources() -> dict[str, Any]:
     """
-    Which sources can be read right now, and why the others cannot.
+    Which platforms discovery can read right now, and why the others cannot.
 
-    A source that is unavailable is named with its env key, never silently
+    A platform that is unavailable is named with its reason, never silently
     dropped — the operator must be able to see what they are missing.
     """
+    reasons = _lane_reasons()
     rows = []
-    for key, (_, label, env_key) in SOURCES.items():
-        configured = _source_ready(key, env_key)
-        if configured:
-            reason = "Ready."
-        elif env_key:
-            reason = f"{env_key} is not set"
-        else:
-            reason = f"the {key} package is not installed"
+    for key, label in LANES.items():
+        reason = reasons.get(key, "unknown lane")
         rows.append({
             "id": key,
-            "label": label,
-            "configured": configured,
-            "reason": reason,
-            "env_key": env_key,
+            "label": f"Claude Bridge · {label}",
+            "configured": reason == "",
+            "reason": "Ready." if reason == "" else reason,
+            "env_key": "",
         })
     live = [r["id"] for r in rows if r["configured"]]
     return {
@@ -224,42 +120,65 @@ def available_sources() -> dict[str, Any]:
     }
 
 
-def fetch_posts(keywords: list[str], max_items: int = 50, window_days: int = 14) -> dict[str, Any]:
+def fetch_posts(keywords: list[str], max_items: int = 50, window_days: int = 0) -> dict[str, Any]:
     """
-    Captures posts for each keyword from every reachable source.
+    Discovers what is trending on each platform for these keywords.
 
-    One source failing never fails the run: it is named in `unreachable`, and
-    the rest carry on. There is nothing behind these sources — no bundled
-    corpus — so a keyword no source could answer contributes nothing, and the
-    reason says which sources were tried.
+    `max_items` is kept for the tool's signature; the bridge caps posts per trend
+    itself. `window_days` 0 is the current month so far (the bridge's default);
+    anything else becomes a rolling window in hours. One platform
+    finding nothing never fails the run: its reason is named in `unreachable`.
     """
+    del max_items  # the bridge's own per-trend cap governs
+    terms = [k.replace(",", " ").strip() for k in keywords if k and k.strip()]
+    if not terms:
+        return {"posts": [], "post_count": 0, "keywords_scanned": 0, "source": "none",
+                "unreachable": ["No keywords were supplied."], "fallback_reason": "No keywords were supplied.",
+                "platform_trends": []}
+
+    try:
+        report = _run_bridge([
+            "--platform-trends",
+            *(["--hours", str(int(window_days * 24))] if window_days > 0 else []),
+            "--platforms", ",".join(LANES.keys()),
+            "--keywords", ",".join(terms),
+        ])
+    except Exception as error:  # noqa: BLE001 — named, never swallowed
+        return {"posts": [], "post_count": 0, "keywords_scanned": len(terms), "source": "none",
+                "unreachable": [f"Claude Bridge: {error}"],
+                "fallback_reason": f"The Claude Bridge could not run: {error}", "platform_trends": []}
+
+    unreachable = [
+        f"{p['platform']}: {p.get('reason') or p.get('status')}"
+        for p in report.get("platforms", [])
+        if p.get("status") != "ok"
+    ]
     captured: list[dict[str, Any]] = []
-    unreachable: list[str] = []
-    any_live = False
-
-    for keyword in keywords:
-        for key, (fetch, label, env_key) in SOURCES.items():
-            if not _source_ready(key, env_key):
-                continue
-            try:
-                posts = fetch(keyword, max_items, window_days)
-                if posts:
-                    any_live = True
-                    captured.extend(p.model_dump() for p in posts)
-            except Exception as error:  # noqa: BLE001 — named, never swallowed
-                reason = f"{label}: {error}"
-                if reason not in unreachable:
-                    unreachable.append(reason)
+    for post in report.get("posts", []):  # newest first, as the bridge returned them
+        matched = post.get("matchedEtharaKeywords") or []
+        platform_id = post.get("platformId")
+        captured.append(RawPost(
+            external_id=post["url"],
+            text=clean_text(post.get("text") or ""),
+            url=post["url"],
+            author_name=post.get("author") or "",
+            posted_at=post["publishedAt"],
+            hashtags=[h.lstrip("#") for h in post.get("hashtags", [])],
+            keyword=matched[0] if matched else "",
+            source_name=f"Claude Bridge · {post.get('platform', '')}",
+            **({"platform": Platform(platform_id)} if platform_id in LANES else {}),
+        ).model_dump())
 
     return {
         "posts": captured,
         "post_count": len(captured),
-        "keywords_scanned": len(keywords),
-        "source": "live" if any_live else "none",
+        "keywords_scanned": len(terms),
+        "source": "live" if captured else "none",
         "unreachable": unreachable,
+        "platform_trends": report.get("trends", []),
         "fallback_reason": None
-        if any_live
-        else "No source returned anything for these keywords. Nothing was substituted.",
+        if captured
+        else "No Ethara-relevant post was verifiably published in the window on any platform. Nothing was substituted.",
     }
 
 

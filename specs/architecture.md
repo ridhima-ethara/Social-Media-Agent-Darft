@@ -7,7 +7,7 @@
 
 # Architecture
 
-**12 agents · 7 stages · 103 skills · 330 knobs · 47 tools**
+**12 agents · 7 stages · 105 skills · 384 knobs · 45 tools**
 
 Eleven specialist agents run a seven-stage pipeline; the twelfth is the command
 plane the operator talks to. Sequencing is derived from each agent's
@@ -37,10 +37,10 @@ plane the operator talks to. Sequencing is derived from each agent's
 | Name | Id | Role | Stage | Skills | Hands off to |
 |---|---|---|---|---|---|
 | Ethara Command | `assistant` | The command plane | `command` | 12 | scraping, validation, analysis, calendar, caption, image, review, knowledge, publishing, analytics, learning |
-| Sherlock | `scraping` | Scraping Agent · Keyword-driven capture across LinkedIn, Instagram, X, Facebook and the open web | `discover` | 11 | validation |
+| Sherlock | `scraping` | Scraping Agent · Platform-level trend discovery on LinkedIn, Instagram, Facebook and X | `discover` | 11 | validation |
 | Dexter | `validation` | Validation Agent · Verdicts on every candidate | `assess` | 12 | analysis |
-| Analysis Agent | `analysis` | Opportunities and the consolidated hashtag set | `assess` | 8 | calendar |
-| Dora | `calendar` | Calendar Agent · The weekly plan | `plan` | 8 | caption |
+| Analysis Agent | `analysis` | Opportunities and the consolidated hashtag set | `assess` | 10 | calendar |
+| Dora | `calendar` | Calendar Agent · Topics on the calendar, posts only when due | `plan` | 8 | caption |
 | SpongeBob | `caption` | Content Agent · Platform copy, grounded in the Knowledge Base | `create` | 14 | image |
 | Minnie | `image` | Image Agent · The shipping creative | `create` | 9 | review |
 | Reviewer | `review` | Human edits and compliance | `create` | 4 | knowledge, publishing |
@@ -72,15 +72,13 @@ plane the operator talks to. Sequencing is derived from each agent's
 | `knowledge.build` | mutating | Runs the research build now, researching the top hashtags against the live web. |
 | `knowledge.add` | mutating | Writes an entry to the Knowledge Base by hand. |
 | `knowledge.toggle` | mutating | Deactivates or reactivates an entry. Nothing is ever deleted. |
-| `idea.list` | safe | The calendar and the ranked suggestions beneath it. |
+| `idea.list` | safe | The calendar: post-ready posts and the dated topics in the Topic Queue. |
 | `idea.move` | mutating | Changes an idea’s date, time or platform. |
-| `idea.promote` | mutating | Gives a suggestion a calendar slot, demoting the lowest-ranked primary if the platform is full. |
 | `calendar.reshuffle` | mutating | Re-ranks the week and re-draws the top slots against a stated preference, and stores the preference so the next run honours it too. |
-| `idea.demote` | mutating | Takes an idea off the calendar and returns it to the ranked suggestions. |
 | `calendar.swap` | mutating | Exchanges the days and times of two scheduled posts, so each takes the other’s slot. |
 | `calendar.bulk.move` | mutating | Moves every post matching a filter to a new day, a new time of day, or both. |
 | `calendar.spread` | mutating | Distributes a set of posts evenly across the days given, one per day before any day takes a second. |
-| `draft.generate` | mutating | Writes the caption for an idea, grounded in the Knowledge Base, and renders its creative. |
+| `draft.generate` | mutating | Generates the complete post — caption grounded in the Knowledge Base, hashtags and creative — for ONE calendar topic. A topic that already has a post is left untouched unless regeneration is asked for. |
 | `draft.instruct` | mutating | Applies an instruction to a draft. A human instruction outranks a brand guideline, and the finding is raised alongside the edit. |
 | `image.render` | mutating | Renders or re-renders the picture for a post on the right canvas for its platform. |
 | `brand.check` | safe | Runs the twenty-rule compliance check on any text and reports the verdict with its evidence. |

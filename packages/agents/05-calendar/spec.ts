@@ -19,9 +19,9 @@ export const spec: AgentSpec = {
   id: 'calendar',
   name: 'Dora',
   stage: 'plan',
-  role: 'Calendar Agent · Places ideas on dates, times and platforms, and ranks them.',
+  role: 'Calendar Agent · Places validated topics on dates, times and platforms, and ranks them.',
   description:
-    'Forms ideas, places them with evidence-bearing slot reasons, and applies the per-platform slot cap. A promotion past the cap demotes the weakest primary and says which.',
+    'Forms topics, places them with evidence-bearing slot reasons, and applies the per-platform cap — no suggestion list. Only today\u2019s post (and tomorrow\u2019s when the schedule requires it) is written; later dates hold the topic in the Topic Queue until Generate Post.',
   consumes: [
     'opportunities',
     'consolidated hashtag set',
@@ -36,8 +36,6 @@ export const spec: AgentSpec = {
   tools: [
     'idea.list',
     'idea.move',
-    'idea.promote',
-    'idea.demote',
   ],
 }
 

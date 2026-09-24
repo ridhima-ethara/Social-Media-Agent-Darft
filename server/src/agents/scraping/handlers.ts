@@ -6,21 +6,22 @@
  * against the open web — then harvests the hashtags out of the bodies that
  * carry them and takes an independent reading of the strongest tags.
  *
- * TWO SOURCES, NO CORPUS. The four platform lanes are captured by Apify actors,
- * which read the platforms themselves and return real engagement counts. The
- * open web has no actor and is captured by crawl4ai, which reads what a search
- * engine indexed and therefore states no engagement at all. Every row carries
- * `metricsAvailable` so the difference is legible downstream rather than
- * inferred from zeros.
+ * ONE SOURCE, NO CORPUS. Every lane — LinkedIn, Instagram, X, Facebook and
+ * the open web — is served by the Claude Bridge (`server/src/bridges/claude-bridge/`):
+ * Claude Code's web search finds public posts and pages, and the bridge keeps
+ * only real item URLs, dates each one from what the platform or page states
+ * (the timestamp in a LinkedIn/X/Instagram post id; a web page's URL or its own
+ * published-date tag), de-duplicates, and filters to the recency window using
+ * the Knowledge Base, brand voice and keywords. A web search states no
+ * engagement, so every row carries `metricsAvailable: false`, legible
+ * downstream rather than inferred from zeros.
  *
- * There is no bundled fixture corpus behind either, which means an empty result
- * is reported as an empty result: a keyword that returned nothing on Instagram
+ * There is no bundled fixture corpus behind it, which means an empty result
+ * is reported as an empty result: a keyword that returned nothing on a lane
  * says so, and the run continues on the lanes that answered. What the pipeline
  * shows is what was actually published at capture time, or nothing.
  *
- * WITHOUT AN APIFY TOKEN the platform lanes degrade to crawl4ai rather than
- * disappearing — the same lane, read through a search engine, stamped
- * `metricsAvailable: false` and reported as downgraded at capture time.
+ * NO THIRD-PARTY SCRAPER. The Scraping Agent imports neither Apify nor Parallel.
  *
  * BRAND AND KNOWLEDGE ALIGNMENT AT CAPTURE. A `site:` search returns whatever
  * the engine indexed, which is wider than what this company publishes about.
@@ -46,23 +47,19 @@ import { PLATFORMS, type Platform, type SkillContext } from '../../../../shared/
 import { config } from '../../config'
 import {
   AdapterError,
-  apifySearch,
-  actorLabelFor,
-  explainApifyFailure,
-  captureChainFor,
   captureFor,
-  parallelResearch,
   mapWithConcurrency,
   platformLaneUnavailableReason,
   openWebLaneUnavailableReason,
   transcriptionBudget,
   whisperTranscribe,
-  type CaptureAttempt,
   type RawPost,
 } from '../../integrations'
 import { prepareEvidence } from '../../../../packages/runtime/src/evidence'
+import { discoverPlatformTrends } from '../../bridges/claude-bridge/trends/platform-trends'
+import { platformModule, type PlatformId } from '../../bridges/claude-bridge/platforms'
 import { cycleWeekFor } from '../../../../shared/keyword-schedule'
-import { cycleWeekTopic, keywordsForCycleWeek, type KeywordRow } from '../../db/repo'
+import { cycleWeekTopic, keywordsForCycleWeek, mergePipelineRunSummary, type KeywordRow } from '../../db/repo'
 import {
   activeDiscoveredKeywords,
   insertActivity,
@@ -106,6 +103,36 @@ const GENERIC_SET = new Set(GENERIC_HASHTAGS.map((t) => normaliseTag(t)))
  * captured. LinkedIn leads because it is both the primary publishing surface
  * and by far the best indexed of the four.
  */
+/**
+ * The run screen draws one live lane per (platform, keyword). Discovery runs
+ * once per platform over all keywords, so its lanes carry this one label.
+ */
+const DISCOVERY_LANE_KEY = 'Ethara keywords'
+
+/**
+ * The `datePosted` knob's rolling options in hours — a unit conversion, not a
+ * tunable. `current-month` is not here: it is the calendar month so far, which
+ * the bridge computes in the workspace's time zone.
+ */
+const MONTH_WORDS = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i
+
+/** True when a phrase is only a date — month names, years, day numbers — nothing a topic search would use. */
+function isDatePhrase(phrase: string): boolean {
+  const rest = phrase
+    .replace(new RegExp(MONTH_WORDS.source, 'gi'), ' ')
+    .replace(/\b\d{1,4}(?:st|nd|rd|th)?\b/gi, ' ')
+    .replace(/[^\p{L}]+/gu, '')
+  return rest === ''
+}
+
+const WINDOW_HOURS: Readonly<Record<string, number>> = {
+  'past-24h': 24,
+  'past-48h': 48,
+  'past-week': 24 * 7,
+  'past-month': 24 * 30,
+  'past-quarter': 24 * 90,
+}
+
 const PLATFORM_KNOBS: ReadonlyArray<{ platform: Platform; knob: string; label: string }> = [
   { platform: 'linkedin', knob: 'includeLinkedin', label: 'LinkedIn' },
   { platform: 'instagram', knob: 'includeInstagram', label: 'Instagram' },
@@ -490,41 +517,36 @@ registerSkill<PipelinePayload>('scraping.keyword.resolve', async (payload, ctx) 
 registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) => {
   const failIfNoSource = ctx.bool('failIfNoSource', false)
 
-  const apifyReady = apifySearch.isConfigured()
-  const openWebReady = parallelResearch.isConfigured()
+  const platformReady = platformLaneUnavailableReason() === ''
+  const openWebReady = openWebLaneUnavailableReason() === ''
   /*
    * ONE SOURCE PER LANE, SO EITHER LANE ALONE STILL CARRIES A RUN.
    *
-   * Apify owns the four platform lanes and Parallel owns the open web. Neither
-   * substitutes for the other: an actor states reaction counts and a cited page
-   * does not, so a platform lane without its token does not run rather than
-   * running with weaker numbers under the same name. Losing both leaves nothing
-   * to capture, which is the only case that makes the whole run fixture-mode.
+   * The Claude Bridge serves every lane — the four platforms and the open web.
+   * No other scraper stands behind it. Losing it leaves nothing to capture,
+   * which is the only case that makes the whole run fixture-mode.
    */
-  const configured = apifyReady || openWebReady
+  const configured = platformReady || openWebReady
   const mode: 'live' | 'fixture' = configured ? 'live' : 'fixture'
   const rows = await listSources(ctx.workspaceId)
 
-  // Reachability is per lane, because the two lanes have different credentials
-  // and now fail independently.
+  // Reachability is per lane — per platform, since the bridge serves each
+  // platform through its own module and may have one without another.
   const sources: SourceConnection[] = rows
     .filter((s) => s.enabled)
     .map((s) => {
-      const isOpenWeb = s.kind === 'web'
-      const reachable = isOpenWeb ? openWebReady : apifyReady
-      const via = isOpenWeb ? parallelResearch.label : apifySearch.label
-      const reason = reachable
-        ? `Reachable via ${via}`
-        : isOpenWeb
-          ? parallelResearch.unavailableReason()
-          : apifySearch.unavailableReason()
+      const platform = PLATFORMS.find((p) => p === s.kind)
+      // `web` (and any kind that is not a platform) is the open-web lane.
+      const lane = captureFor(platform)
+      const reachable = lane.isConfigured()
+      const reason = reachable ? `Reachable via ${lane.label}` : lane.unavailableReason()
       return { name: s.name, kind: s.kind, sourceType: s.source_type, reachable, reason }
     })
 
-  const unreachable = [
-    ...(apifyReady ? [] : [apifySearch.label]),
-    ...(openWebReady ? [] : [parallelResearch.label]),
-  ]
+  const unreachable = [...PLATFORMS, undefined]
+    .map((p) => captureFor(p))
+    .filter((c) => !c.isConfigured())
+    .map((c) => c.label)
 
   /**
    * A mode notice is BOTH published and stored.
@@ -546,37 +568,40 @@ registerSkill<PipelinePayload>('scraping.source.connect', async (_payload, ctx) 
   if (!configured) {
     await notify(
       'Neither capture source is configured — nothing can be captured this run. ' +
-        'Set APIFY_API_TOKEN for the platform lanes, CRAWL4AI_PYTHON for the open web.',
+        'Every lane is served by the Claude Bridge — install Claude Code or set CLAUDE_CODE_BIN.',
     )
     // With no corpus to fall back to, an unconfigured pair means an empty run
     // whatever this knob says. It is still honoured, because failing at the
     // source is a clearer report than five empty lanes downstream.
     if (failIfNoSource) {
       throw new Error(
-        'No capture source available — set APIFY_API_TOKEN (platform lanes) or ' +
-          'CRAWL4AI_PYTHON (open web, pointing at the interpreter of the backend venv).',
+        'No capture source available — every lane is served by the Claude Bridge; install Claude Code ' +
+          'or set CLAUDE_CODE_BIN.',
       )
     }
   } else {
-    if (apifyReady) {
+    if (platformReady) {
+      const served = PLATFORMS.filter((p) => captureFor(p).isConfigured())
       ctx.log(
-        `Apify reachable · up to ${config.apify.maxItemsPerKeyword} posts per keyword per platform lane, ` +
-          'with engagement figures',
+        `Claude Bridge reachable · ${served.join(', ')} via Claude Code web search, each post dated from ` +
+          'its id where the platform encodes one; a web search states no engagement figures',
       )
+      const unserved = PLATFORMS.filter((p) => !captureFor(p).isConfigured())
+      if (unserved.length > 0) {
+        ctx.log(`Platform lanes the bridge cannot serve yet: ${unserved.join(', ')} — skipped this run`)
+      }
     } else {
-      // Named at connect time rather than discovered later from missing counts.
-      // Both lanes report independently now: they have different sources and
-      // fail for different reasons, so one message cannot describe both.
+      // Named at connect time rather than discovered later from missing rows.
+      // The open-web lane reports separately below: different source, different reason.
       await notify(platformLaneUnavailableReason())
-      await notify(openWebLaneUnavailableReason())
     }
     if (openWebReady) {
       ctx.log(
-        `${parallelResearch.label} reachable · the open-web lane reads cited pages, ` +
-          'which state no engagement figures',
+        'Claude Bridge reachable · the open-web lane reads search results and each page’s own ' +
+          'published date (robots.txt permitting); pages state no engagement figures',
       )
     } else {
-      await notify(`The open-web lane cannot run — ${parallelResearch.unavailableReason()}.`)
+      await notify(openWebLaneUnavailableReason())
     }
   }
 
@@ -734,81 +759,33 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
   const keywords = payload.keywords ?? []
   if (keywords.length === 0) throw new Error('No keywords resolved — nothing to fetch.')
 
-  if (!apifySearch.isConfigured() && !parallelResearch.isConfigured()) {
-    throw new Error(
-      'Cannot capture — neither source is configured. Set APIFY_API_TOKEN for the ' +
-        'platform lanes or CRAWL4AI_PYTHON for the open web. There is no corpus to fall back to.',
-    )
+  // Trends come from the platforms themselves — the Claude Bridge's searches scoped to each platform's posts, never the open web.
+  if (platformLaneUnavailableReason() !== '') {
+    throw new Error(`Cannot capture — ${platformLaneUnavailableReason()} Platform trends are read only from the platforms; there is no web fallback.`)
   }
 
-  const maxItems = ctx.num('maxItemsPerKeyword', 25)
-  const retries = ctx.num('retries', 1)
   const minBrandRelevance = ctx.num('minBrandRelevance', 20)
-  const maxParallel = Math.max(1, ctx.num('maxParallel', 2))
-  const includeOpenWeb = ctx.bool('includeOpenWeb', true)
   const minAuthorFollowers = ctx.num('minAuthorFollowers', 0)
   const minEnglishRatio = ctx.num('minEnglishRatio', 8)
-  const datePosted = ctx.str('datePosted', 'past-week') as 'past-24h' | 'past-week' | 'past-month'
-  const sortBy = ctx.str('sortBy', 'date') as 'relevance' | 'date'
+  const datePosted = ctx.str('datePosted', 'current-month')
+  const currentMonth = datePosted === 'current-month' || WINDOW_HOURS[datePosted] === undefined
+  const rollingHours = currentMonth ? undefined : WINDOW_HOURS[datePosted]
+  const maxSearchesPerPlatform = ctx.num('maxSearchesPerPlatform', 16)
+  const maxPostsPerTrend = ctx.num('maxPostsPerTrend', 5)
+  const showOlderWhenEmpty = ctx.bool('showOlderWhenEmpty', true)
+  const listUndatedPlatforms = ctx.bool('listUndatedPlatforms', true)
 
-  // `undefined` is the open-web lane, which is how the adapter spells it too.
+  // `undefined` is the open-web lane, which is how the capture contract spells it too.
   const lanes: Array<{ platform: Platform | undefined; label: string }> = [
     ...PLATFORM_KNOBS.filter((p) => ctx.bool(p.knob, true)).map((p) => ({
       platform: p.platform as Platform | undefined,
       label: p.label,
     })),
-    ...(includeOpenWeb ? [{ platform: undefined, label: 'Open web' }] : []),
   ]
 
   if (lanes.length === 0) {
     throw new Error('Every capture lane is switched off — turn on at least one platform or the open web.')
   }
-
-  /*
-   * A LANE WHOSE SOURCE CANNOT ANSWER IS DROPPED ONCE, NOT FAILED PER KEYWORD.
-   *
-   * With the Apify account over its limit, every platform lane fails for the
-   * same account-level reason. Attempting them anyway produced one "nothing
-   * captured · Apify refused the run" row per lane PER KEYWORD — sixteen or
-   * twenty identical rows burying the open-web lane's real result, which was
-   * succeeding the whole time. The run looked broken while it was working.
-   *
-   * So a lane whose source reports itself unavailable is removed from the list
-   * before any keyword is attempted, and the reason is stated ONCE. This is not
-   * hiding the failure: the reason still appears, it still names the fix, and
-   * the run summary still carries it. It is stated at the level it is true at —
-   * the account — rather than repeated at a level it has nothing to do with.
-   */
-  /** Why a lane produced nothing. Declared here because the skip below uses it. */
-  /** Why a lane produced nothing. Declared here because the skip below uses it. */
-  const laneReasons: string[] = []
-  const unavailableLanes: Array<{ label: string; reason: string }> = []
-  const runnable = lanes.filter((lane) => {
-    const source = captureFor(lane.platform)
-    if (source.isConfigured()) return true
-    unavailableLanes.push({ label: lane.label, reason: source.unavailableReason() })
-    return false
-  })
-
-  if (unavailableLanes.length > 0) {
-    const reason = unavailableLanes[0]?.reason ?? 'the source is not configured'
-    const names = unavailableLanes.map((l) => l.label).join(', ')
-    if (!laneReasons.includes(reason)) laneReasons.push(reason)
-    ctx.emit(
-      'activity',
-      `${unavailableLanes.length} lane(s) skipped — ${names}: ${reason.split('.')[0]}.`,
-      { status: 'warn', lanes: unavailableLanes.map((l) => l.label), reason },
-    )
-  }
-
-  if (runnable.length === 0) {
-    throw new Error(
-      `No capture lane can run. ${unavailableLanes[0]?.reason ?? 'Every configured source is unavailable.'}`,
-    )
-  }
-
-  lanes.length = 0
-  lanes.push(...runnable)
 
   const vocabulary = await loadAlignmentVocabulary(ctx.workspaceId)
   ctx.log(
@@ -816,258 +793,234 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
       `${vocabulary.knowledgeEntries} Knowledge Base corpus entr${vocabulary.knowledgeEntries === 1 ? 'y' : 'ies'} ` +
       `and ${vocabulary.keywordTerms.size} declared keyword term${vocabulary.keywordTerms.size === 1 ? '' : 's'}`,
   )
-  if (vocabulary.knowledgeEntries === 0) {
-    ctx.emit(
-      'activity',
-      'The Knowledge Base holds no corpus entries, so alignment is running on the brand topics and keywords alone. ' +
-        'Add corpus entries under Knowledge Base → Brand corpus to sharpen it.',
-      { status: 'warn' },
-    )
+
+  /*
+   * PLATFORM-LEVEL TREND DISCOVERY (the Claude Bridge).
+   *
+   * One pass per platform — not one per keyword per lane. The bridge runs at
+   * most `maxSearchesPerPlatform` focused searches on each platform, built
+   * from this run's keywords, the brand context and the Knowledge Base; keeps
+   * only posts verifiably published inside the window that mention an Ethara
+   * keyword; and groups them into trends, newest first. It writes no content.
+   */
+  ctx.emit(
+    'activity',
+    `Discovering what is trending on ${lanes.map((l) => l.label).join(', ')} through the Claude Bridge — ` +
+      `${currentMonth ? 'this month so far' : `last ${rollingHours} hours`}, at most ${maxSearchesPerPlatform} searches per platform, one topic each`,
+    { status: 'running', datePosted, maxSearchesPerPlatform },
+  )
+
+  // One live lane per platform, so the run screen shows each platform being searched.
+  for (const lane of lanes) {
+    // A platform whose posts cannot be dated is searched only when its undated posts are listed.
+    if (platformModule(lane.platform ?? 'web')?.canDateItems === false && !listUndatedPlatforms) continue
+    ctx.emit('activity', `${lane.label}: searching through the Claude Bridge`, {
+      status: 'running',
+      platform: lane.platform ?? 'web',
+      keyword: DISCOVERY_LANE_KEY,
+    })
   }
+
+  const report = await discoverPlatformTrends({
+    platforms: lanes.map((l) => (l.platform ?? 'web') as PlatformId),
+    ...(rollingHours !== undefined ? { windowHours: rollingHours } : { currentMonth: true }),
+    // "Today" is the workspace's date, so a post from this morning in India is today's.
+    timeZone: config.core.tz,
+    fallbackToLatest: showOlderWhenEmpty,
+    includeUndated: listUndatedPlatforms,
+    maxSearchesPerPlatform,
+    maxPostsPerTrend,
+    keywords: keywords.map((k) => ({
+      term: k.term,
+      weight: k.weight,
+      category: k.category,
+      synonyms: synonymsFor(k.term),
+      scheduled: null,
+    })),
+  })
+
+  /*
+   * Recorded on the run as it happens, so the Scraping section of the app can
+   * show the discovery — each platform's searches, results and trends — even
+   * when nothing was captured and the run stops here.
+   */
+  if (payload.runId) {
+    await mergePipelineRunSummary(payload.runId, {
+      platformDiscovery: {
+        generatedAt: report.generatedAt,
+        context: report.context,
+        today: report.today,
+        timeZone: report.timeZone,
+        windowHours: report.windowHours,
+        window: report.window,
+        windowName: report.windowName,
+        keywordsUsed: report.keywordsUsed,
+        corpus: report.corpus,
+        searchesRun: report.searchesRun,
+        maxSearchesPerPlatform,
+        maxPostsPerTrend,
+        platforms: report.platforms,
+        trends: report.trends,
+        undated: report.undated,
+        postCount: report.posts.length,
+      },
+    }).catch(() => undefined)
+  }
+
+  /** Why a platform produced nothing — stated per platform, at the level it is true at. */
+  const laneReasons: string[] = []
+  ctx.emit(
+    'activity',
+    `Claude Bridge context · Knowledge Base ${report.context.knowledgeBase.entries} entries · ` +
+      `Ethara brand (${report.context.brand.topics} topics) · ${report.context.keywords.count} keywords`,
+    { status: 'ok', context: report.context },
+  )
+  for (const p of report.platforms) {
+    if (p.status === 'older' || p.status === 'undated') {
+      // Output, but not current or not datable — said plainly on the lane.
+      ctx.emit(
+        'activity',
+        p.status === 'older'
+          ? `${p.platform}: nothing indexed from the window — ${p.kept} newest relevant post(s) shown, labelled older`
+          : `${p.platform}: ${p.kept} relevant post(s), date not stated — listed for reference, not validated`,
+        {
+          status: 'warn',
+          platform: p.platformId,
+          keyword: DISCOVERY_LANE_KEY,
+          searches: p.searches,
+          count: p.status === 'older' ? p.kept : 0,
+          captured: p.found,
+          reason: p.reason,
+        },
+      )
+    } else if (p.status === 'ok') {
+      const trends = report.trends.filter((t) => t.platform === p.platform).length
+      ctx.emit('activity', `${p.platform}: ${p.kept} relevant post(s) in ${trends} trend(s)`, {
+        status: 'ok',
+        platform: p.platformId,
+        keyword: DISCOVERY_LANE_KEY,
+        searches: p.searches,
+        count: p.kept,
+        captured: p.found,
+      })
+    } else {
+      const reason = `${p.platform}: ${p.reason ?? p.status}`
+      laneReasons.push(reason)
+      ctx.emit('activity', `${p.platform}: ${p.status === 'skipped' ? 'skipped' : 'nothing captured'}`, {
+        status: 'warn',
+        platform: p.platformId,
+        keyword: DISCOVERY_LANE_KEY,
+        searches: p.searches,
+        count: 0,
+        captured: p.found,
+        reason: p.reason,
+      })
+    }
+  }
+  ctx.emit(
+    'activity',
+    report.corpus.terms.length > 0
+      ? `Reference · research corpus: ${report.corpus.papers} paper(s) → ${report.corpus.terms.length} topics; searched today: ${report.corpus.searched.join(', ')}`
+      : `Reference · research corpus not used: ${report.corpus.reason ?? 'no topics'}`,
+    { status: report.corpus.terms.length > 0 ? 'ok' : 'warn', corpus: report.corpus },
+  )
+  const trendingToday = report.trends.filter((t) => t.period === 'today').length
+  ctx.emit(
+    'activity',
+    `Trending today (${report.today}): ${trendingToday} trend(s) · trending ${report.windowName}: ${report.trends.filter((t) => t.period !== 'older').length} trend(s)`,
+    { status: trendingToday > 0 ? 'ok' : 'warn', today: report.today, trendingToday, trends: report.trends.length },
+  )
+  for (const trend of report.trends) {
+    ctx.emit('activity', `Trending ${trend.period === 'today' ? 'today' : trend.period === 'older' ? 'before the window' : report.windowName} on ${trend.platform}: ${trend.trend} — ${trend.posts.length} post(s)`, {
+      status: 'ok',
+      platform: trend.platform,
+      trend: trend.trend,
+      hashtags: trend.hashtags,
+      matchedEtharaKeywords: trend.matchedEtharaKeywords,
+      reason: trend.reason,
+    })
+  }
+  ctx.log(`${report.searchesRun} search(es) run across ${report.platforms.length} platform(s); ${report.trends.length} trend(s), ${report.posts.length} post(s)`)
 
   /** Kept per lane so the run console can say WHERE the material came from. */
   const perLaneCounts = new Map<string, number>()
   let offBrand = 0
-  /** Dropped for having too small an audience — only countable where one was stated. */
-  let belowFollowerFloor = 0
-  /** Dropped as prose this brand cannot publish from. */
+  // Search results state no follower count, so the floor never drops a post here;
+  // exemptions are counted as `followersNotStated` instead.
+  const belowFollowerFloor = 0
   let notEnglish = 0
-  /** Too short to judge the language of, so exempted rather than guessed at. */
   let languageUnknown = 0
-  /**
-   * Kept DESPITE the follower floor because the source stated no follower count.
-   * Reported rather than folded into the kept total: a floor that silently
-   * exempts most of a lane is a floor the operator should know is not biting.
-   */
   let followersNotStated = 0
 
-  // The work unit is one keyword on one lane. Flattening the pair means the
-  // concurrency ceiling governs actual browser page-loads rather than keywords,
-  // which is the resource that is genuinely scarce on a local machine.
-  const jobs = keywords.flatMap((keyword) => lanes.map((lane) => ({ keyword, lane })))
-
-  const perJob = await mapWithConcurrency(jobs, maxParallel, async ({ keyword, lane }) => {
-    /*
-     * THE CHAIN, NOT A SOURCE.
-     *
-     * Resolved per lane rather than once per run, because the open web is always
-     * crawl4ai while a platform lane follows the token. A platform lane with a
-     * token is Apify FIRST and crawl4ai BEHIND IT: an actor that is deprecated,
-     * rate-limited or simply broken today must not turn a keyword crawl4ai could
-     * have read into nothing captured. Which source answered travels on every
-     * event, so the run console can say why one lane carries engagement and
-     * another does not.
-     */
-    /*
-     * A LANE THAT HAS GONE DEAD MID-RUN IS SKIPPED SILENTLY.
-     *
-     * The lane list is built once, before any keyword is attempted — so a
-     * source that becomes unavailable DURING the run (the Apify breaker
-     * tripping on the first keyword's first call) is still in the list for
-     * every remaining keyword. Each one then failed, and each failure emitted
-     * its own "nothing captured" row: four platform lanes times every keyword,
-     * all saying the same thing about the account.
-     *
-     * The reason has already been stated once, at the level it is true at. It
-     * is on the run summary and in `laneReasons`, so nothing is hidden — this
-     * only stops it being repeated per keyword for a lane that is already known
-     * to be dead.
-     */
-    const laneSource = captureFor(lane.platform)
-    if (!laneSource.isConfigured()) {
-      const reason = laneSource.unavailableReason()
-      if (!laneReasons.includes(reason)) laneReasons.push(reason)
-      return []
+  const byTerm = new Map(keywords.map((k) => [k.term.toLowerCase(), k]))
+  const posts: ScrapedPost[] = []
+  // Newest first, as the bridge returned them.
+  for (const tp of report.posts) {
+    const keyword = tp.matchedEtharaKeywords.map((t) => byTerm.get(t.toLowerCase())).find((k) => k !== undefined)
+    // A related post names no keyword: its trend (the brand topic it matched) stands in.
+    const term = keyword?.term ?? tp.matchedEtharaKeywords[0] ?? tp.trend
+    // Engagement only when the source stated it (SocialFetch does; a web
+    // search result never does). Zero with `metricsAvailable: false` means
+    // "not applicable", never "no one engaged".
+    const e = tp.engagement
+    const stated = e !== null && (e.reactions !== null || e.comments !== null)
+    const raw: RawPost = {
+      externalId: tp.url,
+      text: tp.text,
+      authorName: tp.author ?? '',
+      authorHeadline: '',
+      authorFollowers: 0,
+      url: tp.url,
+      postedAt: tp.publishedAt,
+      reactions: stated ? (e.reactions ?? 0) : 0,
+      comments: stated ? (e.comments ?? 0) : 0,
+      reposts: stated ? (e.reposts ?? 0) : 0,
+      views: e?.views ?? 0,
+      viewsAvailable: e?.views !== null && e?.views !== undefined,
+      hashtags: tp.hashtags.map((h) => h.replace(/^#/, '')),
+      keyword: term,
+      // Always "Claude Bridge · …": the bridge ran the discovery; the source it read is named after it.
+      sourceName: `Claude Bridge · ${tp.platform}${tp.source === 'socialfetch' ? ' · SocialFetch' : ''}`,
+      platform: tp.platformId === 'web' ? null : tp.platformId,
+      metricsAvailable: stated,
     }
 
-    const chain = captureChainFor(lane.platform)
-    const primary = (chain[0] as CaptureAttempt).source
-
-    ctx.emit('activity', `Scraping ${lane.label} for “${keyword.term}” via ${primary.label}`, {
-      status: 'running',
-      keyword: keyword.term,
-      platform: lane.platform ?? 'open-web',
-      via: primary.label,
-    })
-
-    let rows: RawPost[] = []
-    /** The source that actually answered, for the per-row stamp and the log. */
-    let servedBy = primary
-    /** Set only when the primary failed and the backup answered instead. */
-    let laneFallbackReason = ''
-    const attemptReasons: string[] = []
-
-    for (const [index, attemptSource] of chain.entries()) {
-      const source = attemptSource.source
-      let lastError: unknown
-      for (let attempt = 0; attempt <= retries; attempt += 1) {
-        try {
-          rows = await source.run({
-            keyword: keyword.term,
-            ...(lane.platform === undefined ? {} : { platform: lane.platform }),
-            // Each source clamps this to its own ceiling — Apify to the env
-            // billing cap, crawl4ai to its page limit — so the knob asks for
-            // the same thing on every lane and the source decides what it can
-            // honestly serve.
-            maxItems,
-            maxCharsPerPage: config.parallel.maxCharsPerPage,
-            datePosted,
-            sortBy,
-          })
-          lastError = undefined
-          break
-        } catch (error) {
-          lastError = error
-          if (attempt === retries) break
-          await new Promise((r) => setTimeout(r, 600 * 2 ** attempt))
-        }
-      }
-
-      if (lastError === undefined) {
-        servedBy = source
-        if (attemptSource.isBackup) {
-          // The degradation, named at the point it happened and carried onto
-          // every row: these posts state no engagement, and the reason is not
-          // "no token" but "the actor did not answer".
-          laneFallbackReason =
-            `${primary.label} did not answer — ${attemptReasons[0] ?? 'no reason given'}. ` +
-            `Captured with ${source.label} instead, which states no engagement figures.`
-          // Also into the lane reasons, so it lands in `captureFallbackReasons`
-          // and therefore in the persisted run summary. An event alone would
-          // mean the fallback was only knowable to whoever was watching.
-          if (!laneReasons.includes(laneFallbackReason)) laneReasons.push(laneFallbackReason)
-          ctx.emit('activity', `${lane.label} · ${keyword.term}: fell back to ${source.label}`, {
-            status: 'warn',
-            keyword: keyword.term,
-            platform: lane.platform ?? 'open-web',
-            via: source.label,
-            reason: laneFallbackReason,
-          })
-        }
-        break
-      }
-
-      /*
-       * THE REASON AN OPERATOR READS.
-       *
-       * `AdapterError.toReason()` produces `apify.search returned HTTP 403 — {
-       * "error": { "t` — a status and the first 240 characters of a JSON body,
-       * cut mid-key. Two completely different failures with different fixes (a
-       * rejected token, an account over its monthly allowance) are
-       * indistinguishable in that string, and rule 6 asks a decision to name
-       * its evidence.
-       *
-       * `explainApifyFailure` reads Apify's structured `{ error: { type } }` and
-       * says what to do about it. Anything it does not recognise falls through
-       * to the generic reason, so nothing is ever hidden.
-       */
-      const reason =
-        source.id === apifySearch.id
-          ? explainApifyFailure(lastError, actorLabelFor(lane.platform))
-          : lastError instanceof AdapterError
-            ? lastError.toReason()
-            : `${source.label} failed — ${lastError instanceof Error ? lastError.message : String(lastError)}`
-      attemptReasons.push(reason)
-
-      // Nothing left to try. An empty lane is normal — a narrow keyword
-      // genuinely returns nothing on some platforms — so it is reported and the
-      // run carries on. There is nothing to substitute and nothing is substituted.
-      if (index === chain.length - 1) {
-        const combined = attemptReasons.join(' · then ')
-        if (!laneReasons.includes(combined)) laneReasons.push(combined)
-        ctx.emit('activity', `${lane.label} · ${keyword.term}: nothing captured`, {
-          status: 'warn',
-          keyword: keyword.term,
-          platform: lane.platform ?? 'open-web',
-          via: primary.label,
-          reason: combined,
-        })
-        return []
-      }
-    }
-
-    const source = servedBy
-
-    const posts: ScrapedPost[] = []
-    for (const raw of rows) {
-      // A follower count of zero means the source did not state one, not that
-      // the author has no audience — so the floor applies only where there is a
-      // number to apply it to. Exemptions are counted, never hidden.
-      if (minAuthorFollowers > 0) {
-        if (raw.authorFollowers === 0) {
-          followersNotStated += 1
-        } else if (raw.authorFollowers < minAuthorFollowers) {
-          belowFollowerFloor += 1
-          continue
-        }
-      }
-      /*
-       * READABILITY BEFORE RELEVANCE. A post can be squarely on-topic and still
-       * be unusable evidence: the brand writes in English, and a caption grounded
-       * in a body it cannot quote is a caption grounded in nothing. Checked before
-       * alignment because it is the cheaper test and the more decisive one.
-       */
-      if (minEnglishRatio > 0) {
-        const ratio = englishRatio(raw.text)
-        if (ratio === -1) {
-          languageUnknown += 1
-        } else if (ratio < minEnglishRatio) {
-          notEnglish += 1
-          continue
-        }
-      }
-
-      const alignment = alignmentOf(raw.text, keyword.term, vocabulary)
-      if (alignment.score < minBrandRelevance) {
-        offBrand += 1
+    // A follower count of zero means the source did not state one.
+    if (minAuthorFollowers > 0) followersNotStated += 1
+    if (minEnglishRatio > 0) {
+      const ratio = englishRatio(raw.text)
+      if (ratio === -1) {
+        languageUnknown += 1
+      } else if (ratio < minEnglishRatio) {
+        notEnglish += 1
         continue
       }
-      posts.push(toScrapedPost(raw, keyword.id, alignment))
     }
-
-    perLaneCounts.set(lane.label, (perLaneCounts.get(lane.label) ?? 0) + posts.length)
-
-    for (const post of posts) {
-      ctx.emit('item.scraped', post.title, {
-        keyword: keyword.term,
-        platform: post.platform ?? 'open-web',
-        source: post.sourceName,
-        externalId: post.externalId,
-        brandRelevance: post.brandRelevance,
-        captureSource: post.captureSource,
-        // The page itself. Without it the run console can say a page was
-        // captured but not WHICH page, so nothing on screen can be checked
-        // against its source.
-        ...(post.url ? { url: post.url } : {}),
-      })
+    const alignment = alignmentOf(raw.text, term, vocabulary)
+    if (alignment.score < minBrandRelevance) {
+      offBrand += 1
+      continue
     }
-
-    ctx.emit(
-      'activity',
-      `${lane.label} · ${keyword.term}: ${posts.length} page${posts.length === 1 ? '' : 's'} kept of ${rows.length}`,
-      {
-        status: 'ok',
-        keyword: keyword.term,
-        platform: lane.platform ?? 'open-web',
-        count: posts.length,
-        captured: rows.length,
-        // Names WHICH implementation answered, not just that one did — rule 6
-        // wants the evidence behind the decision.
-        via: source.label,
-        metricsAvailable: rows[0]?.metricsAvailable ?? false,
-      },
-    )
-
-    return posts
-  })
-
-  const posts = perJob.flat()
+    const post = toScrapedPost(raw, keyword?.id ?? null, alignment)
+    posts.push(post)
+    perLaneCounts.set(tp.platform, (perLaneCounts.get(tp.platform) ?? 0) + 1)
+    ctx.emit('item.scraped', post.title, {
+      keyword: term,
+      platform: post.platform ?? 'open-web',
+      source: post.sourceName,
+      externalId: post.externalId,
+      brandRelevance: post.brandRelevance,
+      captureSource: post.captureSource,
+      trend: tp.trend,
+      ...(post.url ? { url: post.url } : {}),
+    })
+  }
 
   if (posts.length === 0) {
     throw new Error(
       laneReasons.length > 0
-        ? `Nothing was captured on any lane — ${laneReasons[0]}`
-        : 'Nothing was captured on any lane, and no lane reported a reason.',
+        ? `Nothing was captured on any platform — ${laneReasons.join(' · ')}`
+        : 'Nothing was captured on any platform, and no platform reported a reason.',
     )
   }
 
@@ -1141,6 +1094,8 @@ registerSkill<PipelinePayload>('scraping.linkedin.fetch', async (payload, ctx) =
     postsBeforeDedupe: posts.length,
     captureSource: 'live' as const,
     captureFallbackReasons: laneReasons,
+    /** Handed to the Validation Agent beside `posts`. */
+    platformTrends: report.trends,
     /** The wrapped, escaped block. The only form in which a model may read these bodies. */
     evidenceText: evidence.text,
     injectionAttempts: evidence.injectionAttempts,
@@ -1326,11 +1281,10 @@ registerSkill<PipelinePayload>('scraping.hashtag.expand', async (payload, ctx) =
 
   const candidates = payload.hashtagCandidates ?? []
   if (candidates.length === 0) return {}
-  // With an Apify token the tag is read on LinkedIn itself, which returns real
-  // engagement and makes the independent reading a genuine volume AND strength
-  // signal. Without one it falls back to the open web, where only volume is
-  // knowable — the same degradation as the platform lanes, for the same reason.
-  const tagLane: Platform | undefined = apifySearch.isConfigured() ? 'linkedin' : undefined
+  // When the Claude Bridge can serve LinkedIn the tag is read there — dated,
+  // de-duplicated platform posts. Otherwise it falls back to the open web.
+  // Either way only volume is knowable: neither source states engagement.
+  const tagLane: Platform | undefined = captureFor('linkedin').isConfigured() ? 'linkedin' : undefined
   const tagSource = captureFor(tagLane)
 
   if (!tagSource.isConfigured()) {
@@ -1368,7 +1322,7 @@ registerSkill<PipelinePayload>('scraping.hashtag.expand', async (payload, ctx) =
         keyword: query,
         ...(tagLane === undefined ? {} : { platform: tagLane }),
         maxItems: itemsPerHashtag,
-        maxCharsPerPage: config.parallel.maxCharsPerPage,
+        maxCharsPerPage: config.capture.maxCharsPerPage,
         datePosted: 'past-month',
         sortBy: 'date',
       })
@@ -1496,7 +1450,7 @@ registerSkill<PipelinePayload>('scraping.competitor.track', async (_payload, ctx
         keyword: competitor.name,
         platform: 'linkedin',
         maxItems: postsPer,
-        maxCharsPerPage: config.parallel.maxCharsPerPage,
+        maxCharsPerPage: config.capture.maxCharsPerPage,
         datePosted: 'past-month',
         sortBy: 'date',
       })
@@ -1668,7 +1622,7 @@ registerSkill<PipelinePayload>('scraping.account.capture', async (payload, ctx) 
         keyword: `@${account.handle}`,
         platform: account.platform,
         maxItems: postsPerAccount,
-        maxCharsPerPage: config.parallel.maxCharsPerPage,
+        maxCharsPerPage: config.capture.maxCharsPerPage,
         datePosted: 'past-month',
         sortBy: 'date',
       })
@@ -1892,6 +1846,9 @@ registerSkill<PipelinePayload>('scraping.keyword.discover', async (payload, ctx)
       .filter((tag) => tag.split(/\s+/).length >= 1)
 
     for (const phrase of new Set([...phrasesOf(post.title), ...labels.filter((l) => !known.has(l) && l.length >= 6)])) {
+      // A date is not a topic. Discovery names the month in its searches, so
+      // "september 2026" recurs in every title — an echo of the query, not a trend.
+      if (isDatePhrase(phrase)) continue
       const tally = tallies.get(phrase) ?? {
         term: phrase,
         posts: 0,
@@ -1914,9 +1871,10 @@ registerSkill<PipelinePayload>('scraping.keyword.discover', async (payload, ctx)
        * The open-web lane states NO author — ever. An earlier version of this
        * collapsed every such post into one shared '(unattributed)', which made
        * the bar unpassable on an open-web-only corpus: every candidate showed
-       * exactly one author and nothing could ever be discovered. With the Apify
-       * lanes unavailable that is every corpus, which is precisely why the
-       * keyword set had stopped growing.
+       * exactly one author and nothing could ever be discovered. With the
+       * platform lanes unavailable that is every corpus, which is precisely why
+       * the keyword set had stopped growing. (Claude Bridge rows carry the
+       * author handle their post URL states, so they count per author.)
        *
        * The publishing HOST is the honest stand-in. Three different websites
        * writing about a term is independent corroboration — the same thing the

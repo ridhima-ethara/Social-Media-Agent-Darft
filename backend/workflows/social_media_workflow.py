@@ -115,7 +115,7 @@ class WorkflowRun:
             "keywords_trending": len(self.payload.get("trending", [])),
             "hashtags_consolidated": len(self.payload.get("top_hashtags", [])),
             "ideas_on_calendar": self.payload.get("primary_count", 0),
-            "ideas_in_suggestions": self.payload.get("suggestion_count", 0),
+            "ideas_not_placed": self.payload.get("not_placed_count", 0),
             "images_rendered": 1 if self.payload.get("asset", {}).get("data_uri") else 0,
             "published": bool(self.payload.get("published")),
             # What the run added to what the platform knows. `learned` counts
@@ -287,7 +287,7 @@ def main() -> int:
 
     print("\n  ── summary ──")
     for key in ("status", "agents_run", "posts_captured", "keywords_trending",
-                "hashtags_consolidated", "ideas_on_calendar", "ideas_in_suggestions",
+                "hashtags_consolidated", "ideas_on_calendar", "ideas_not_placed",
                 "images_rendered", "knowledge_learned", "knowledge_merged",
                 "knowledge_withheld", "used_model", "injection_attempts", "duration_ms"):
         print(f"    {key:24} {summary[key]}")

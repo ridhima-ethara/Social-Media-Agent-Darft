@@ -10,7 +10,7 @@
  * structured `data` the rail renders.
  */
 
-import type { CalendarSlot, IdeaStatus, Platform } from '../../../../shared/agent-contract'
+import type { IdeaStatus, Platform } from '../../../../shared/agent-contract'
 import { HOOK_PATTERN_LABEL } from '../../../../shared/agent-contract'
 import { runSkill } from '../../agents/runtime'
 import type { CaptionPayload } from '../../agents/skills/index'
@@ -20,6 +20,7 @@ import {
   BRAND_RULES,
 } from '../../../../shared/brand-voice'
 import { AGENTS, AGENT_BY_ID, SKILL_BY_ID, defaultSkillConfig } from '../../../../shared/agent-registry'
+import { isWithinPostReady, resolveCalendarHorizon } from '../../calendar-horizon'
 import { config } from '../../config'
 import { PLATFORM_LABEL, monthLabelOf } from '../../agents/corpus'
 import { detectDay, detectMonth, detectTime } from '../intent'
@@ -42,6 +43,7 @@ import {
   findHashtagByTag,
   findIdeasByTitle,
   getDraft,
+  withdrawIdea,
   getIdea,
   getMediaAsset,
   insertActivity,
@@ -55,7 +57,6 @@ import {
   listPlatformAnalytics,
   listPosts,
   listReviewQueue,
-  primaryIdeasForPlatform,
   resolveQueueForEntity,
   resolveReviewQueueRow,
   setHashtagValidation,
@@ -417,8 +418,8 @@ tool('pipeline.run', async (args, ctx) => {
     summary:
       `${s.trending} keyword${s.trending === 1 ? '' : 's'} are trending across ${s.postsScraped} posts` +
       (lead ? `. ${lead.term} leads at ${lead.trendScore}` : '') +
-      `. ${s.topHashtags} hashtags are queued for research and ${s.primaryIdeas} idea(s) took a calendar slot, ` +
-      `${s.suggestionIdeas} went to More suggestions` +
+      `. ${s.topHashtags} hashtags are queued for research, ${s.primaryIdeas} topic(s) took a date on the calendar, ` +
+      `${s.written} post-ready post(s) were written and ${s.topicsQueued} future topic(s) wait in the Topic Queue` +
       (s.needsReview > 0 ? `, and ${s.needsReview} item(s) need a human verdict` : '') +
       '.',
     data: {
@@ -852,17 +853,21 @@ tool('idea.list', async (args, ctx) => {
     ...(typeof args.platform === 'string' ? { platform: args.platform as Platform } : {}),
     ...(typeof args.status === 'string' ? { status: args.status as 'approved' } : {}),
     ...(day.date === undefined ? {} : { date: day.date }),
-    ...(typeof args.slot === 'string' ? { slot: args.slot as 'primary' } : {}),
+    slot: 'primary',
     limit: typeof args.limit === 'number' ? args.limit : 60,
   })
 
-  const primary = rows.filter((r) => r.calendar_slot === 'primary')
+  // Post-ready (today, tomorrow when required) versus a topic in the queue.
+  const horizon = await resolveCalendarHorizon(ctx.workspaceId)
+  const queued = rows.filter(
+    (r) => r.status === 'suggested' && String(r.scheduled_date).slice(0, 10) > horizon.today && !isWithinPostReady(String(r.scheduled_date), horizon),
+  )
 
   return {
     summary:
       rows.length === 0
         ? 'Nothing matches that on the calendar.'
-        : `${rows.length} idea(s) — ${primary.length} on the calendar, ${rows.length - primary.length} in More suggestions.` +
+        : `${rows.length} on the calendar — ${queued.length} future topic(s) in the Topic Queue with no post yet, ${rows.length - queued.length} post-ready or written.` +
           (rows[0] ? ` The next is “${rows[0].title}” on ${rows[0].scheduled_date} at ${rows[0].scheduled_time}.` : ''),
     data: {
       ideas: rows.map((r) => ({
@@ -872,7 +877,7 @@ tool('idea.list', async (args, ctx) => {
         status: r.status,
         date: r.scheduled_date,
         time: r.scheduled_time,
-        slot: r.calendar_slot,
+        inTopicQueue: queued.includes(r),
         rank: r.platform_rank,
         confidence: r.confidence,
         isNewTrend: r.is_new_trend,
@@ -914,43 +919,11 @@ tool('idea.move', async (args, ctx) => {
   }
 })
 
-tool('idea.promote', async (args, ctx) => {
-  const target = await resolveIdea(args, ctx)
-  const idea = await getIdea(ctx.workspaceId, target.id)
-  if (!idea) throw new Error('No such idea.')
-
-  const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
-  const primaries = await primaryIdeasForPlatform(ctx.workspaceId, idea.platform)
-
-  let demoted: { id: string; title: string } | null = null
-  if (idea.calendar_slot !== 'primary' && primaries.length >= cap) {
-    // The lowest-ranked primary makes room. It is demoted, never deleted, and the
-    // operator is told.
-    const weakest = primaries[primaries.length - 1]
-    if (weakest) {
-      await updateIdea(ctx.workspaceId, weakest.id, { calendarSlot: 'suggestion' })
-      demoted = { id: weakest.id, title: weakest.title }
-    }
-  }
-
-  const updated = await updateIdea(ctx.workspaceId, idea.id, { calendarSlot: 'primary' })
-
-  return {
-    summary:
-      `“${idea.title}” is on the ${PLATFORM_LABEL[idea.platform]} calendar.` +
-      (demoted ? ` “${demoted.title}” moved to More suggestions to make room — ${PLATFORM_LABEL[idea.platform]} holds ${cap}.` : ''),
-    data: { idea: updated, demoted },
-    render: 'text',
-    entity: { id: idea.id, title: idea.title, platform: idea.platform, type: 'content_idea' },
-    postcondition: { description: 'Calendar slot is primary', satisfied: updated?.calendar_slot === 'primary' },
-  }
-})
-
 /**
  * Statuses this tool will not touch.
  *
  * An idea a human has approved, or that is scheduled or published, is not a
- * planning suggestion any more — moving it would silently invalidate an
+ * planned topic any more — moving it would silently invalidate an
  * approval or contradict something already live. Reshuffling reorders the part
  * of the calendar that is still a plan, and says how much it left alone.
  */
@@ -998,7 +971,10 @@ tool('calendar.reshuffle', async (args, ctx) => {
       : ctx.utterance.trim()
 
   const remember = args.remember !== false
-  const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
+  // The same allowance the Calendar Agent applies: per platform per week, over
+  // the weeks being planned — a reshuffle must not cut the plan in half.
+  const rankDefaults = defaultSkillConfig('calendar.rank.select')
+  const cap = Number(rankDefaults.topPerPlatform ?? 5) * Math.max(1, Number(rankDefaults.planningWeeks ?? 2))
 
   const all = await listIdeas(ctx.workspaceId, { limit: 200 })
   const movable = all.filter((i) => !RESHUFFLE_FROZEN.has(i.status as IdeaStatus))
@@ -1036,23 +1012,41 @@ tool('calendar.reshuffle', async (args, ctx) => {
     byPlatform.set(idea.platform as Platform, list)
   }
 
-  const slots: Array<{ platform: Platform; primary: number; suggestions: number }> = []
-  let promoted = 0
-  let demoted = 0
+  /*
+   * No suggestion list to fall back into: a topic past the cap that has no post
+   * yet is withdrawn with its rank as the reason; a written post past the cap
+   * keeps its date and is reported, because an agent never unwrites a post.
+   */
+  const slots: Array<{ platform: Platform; onCalendar: number; topics: number; withdrawn: number }> = []
+  let withdrawn = 0
+  let overCapWritten = 0
 
   for (const [platform, rows] of byPlatform) {
     rows.sort((a, b) => b.priority_score - a.priority_score || a.title.localeCompare(b.title))
+    let platformWithdrawn = 0
     for (const [index, idea] of rows.entries()) {
-      const slot: CalendarSlot = index < cap ? 'primary' : 'suggestion'
       const rank = index + 1
-      if (idea.calendar_slot === slot && idea.platform_rank === rank) continue
-      if (idea.calendar_slot !== slot) slot === 'primary' ? (promoted += 1) : (demoted += 1)
-      await updateIdea(ctx.workspaceId, idea.id, { calendarSlot: slot, platformRank: rank })
+      if (index >= cap) {
+        if (idea.status === 'suggested') {
+          await withdrawIdea(
+            ctx.workspaceId,
+            idea.id,
+            `Reshuffled: ranked #${rank} on ${PLATFORM_LABEL[platform]} with a priority of ${idea.priority_score}; the calendar holds ${cap}. It had no post yet.`,
+          )
+          platformWithdrawn += 1
+          continue
+        }
+        overCapWritten += 1
+      }
+      if (idea.calendar_slot === 'primary' && idea.platform_rank === rank) continue
+      await updateIdea(ctx.workspaceId, idea.id, { calendarSlot: 'primary', platformRank: rank })
     }
+    withdrawn += platformWithdrawn
     slots.push({
       platform,
-      primary: Math.min(cap, rows.length),
-      suggestions: Math.max(0, rows.length - cap),
+      onCalendar: rows.length - platformWithdrawn,
+      topics: rows.filter((r, i) => r.status === 'suggested' && i < cap).length,
+      withdrawn: platformWithdrawn,
     })
   }
 
@@ -1069,40 +1063,27 @@ tool('calendar.reshuffle', async (args, ctx) => {
   }
 
   const shape = slots
-    .map((s) => `${PLATFORM_LABEL[s.platform]} ${s.primary} on the calendar, ${s.suggestions} in suggestions`)
+    .map((s) => `${PLATFORM_LABEL[s.platform]} ${s.onCalendar} on the calendar` + (s.withdrawn > 0 ? `, ${s.withdrawn} withdrawn` : ''))
     .join('; ')
 
   return {
     summary:
-      `Calendar reshuffled at ${cap} slots per platform — ${shape}.` +
+      `Calendar reshuffled at ${cap} topics per platform over the plan — ${shape}.` +
       (moved.length > 0 ? ` ${moved.length} idea(s) moved to ${PLATFORM_LABEL[preferred as Platform]}.` : '') +
-      (promoted + demoted > 0 ? ` ${promoted} promoted, ${demoted} moved to suggestions.` : ' Nothing changed slot.') +
+      (withdrawn > 0 ? ` ${withdrawn} topic(s) with no post were withdrawn past the cap.` : ' Nothing was withdrawn.') +
+      (overCapWritten > 0 ? ` ${overCapWritten} written post(s) sit past the cap and keep their dates.` : '') +
       (frozen > 0 ? ` ${frozen} approved or published idea(s) were left alone.` : '') +
       (stored
         ? stored.stored
           ? ' The preference is stored, so the next agent run will plan the same way.'
           : ` The preference was not stored — ${stored.reason}`
         : ''),
-    data: { slots, cap, moved, promoted, demoted, frozen, remembered: stored },
+    data: { slots, cap, moved, withdrawn, overCapWritten, frozen, remembered: stored },
     render: 'text',
     postcondition: {
-      description: `No platform holds more than ${cap} calendar slots`,
-      satisfied: slots.every((s) => s.primary <= cap),
+      description: `No platform holds more than ${cap} topics without a post`,
+      satisfied: slots.every((s) => s.topics <= cap),
     },
-  }
-})
-
-tool('idea.demote', async (args, ctx) => {
-  const target = await resolveIdea(args, ctx)
-  const updated = await updateIdea(ctx.workspaceId, target.id, { calendarSlot: 'suggestion' })
-  if (!updated) throw new Error('The demotion could not be recorded.')
-
-  return {
-    summary: `“${updated.title}” is in More suggestions, ranked ${updated.platform_rank ?? '—'}. It keeps its place in the ranking.`,
-    data: { idea: updated },
-    render: 'text',
-    entity: { id: updated.id, title: updated.title, platform: updated.platform, type: 'content_idea' },
-    postcondition: { description: 'Calendar slot is suggestion', satisfied: updated.calendar_slot === 'suggestion' },
   }
 })
 
@@ -1114,12 +1095,29 @@ tool('draft.generate', async (args, ctx) => {
   const target = await resolveIdea(args, ctx)
   const platform = (typeof args.platform === 'string' ? args.platform : target.platform) as Platform
 
+  /*
+   * Generate Post, from the command plane. A topic that already has a post is
+   * left alone unless the operator explicitly asked for a rewrite — pressing the
+   * same button twice must not quietly replace a reviewed caption.
+   */
+  if (args.regenerate !== true && (await getDraft(target.id, platform)) !== null) {
+    return {
+      summary: `“${target.title}” already has a ${PLATFORM_LABEL[platform]} post, so nothing was regenerated. Say “regenerate that post” to rewrite it.`,
+      data: { ideaId: target.id, platform, title: target.title, generated: false },
+      render: 'text',
+      entity: { id: target.id, title: target.title, platform, type: 'content_idea' },
+      postcondition: { description: 'Existing post left untouched', satisfied: true },
+    }
+  }
+
   const result = await generateDraft({
     workspaceId: ctx.workspaceId,
     trigger: ctx.trigger,
     turnId: ctx.turnId,
     ideaId: target.id,
     platform,
+    // A complete post: caption, hashtags and the creative.
+    withImage: true,
   })
 
   return {

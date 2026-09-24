@@ -232,7 +232,8 @@ export async function persistAgentRun(output: Record<string, unknown>): Promise<
       confidence: num(row, 'confidence'),
       priorityScore: num(row, 'priority_score'),
       platformRank: num(row, 'platform_rank', 0) || null,
-      calendarSlot: (row.calendar_slot === 'primary' ? 'primary' : 'suggestion') as CalendarSlot,
+      // Every idea the calendar keeps is a dated topic — there is no suggestion list.
+      calendarSlot: 'primary' as CalendarSlot,
       status: 'suggested' as const,
       // Every reason the agent gave, kept with the row. This is what the
       // calendar card shows when an operator asks why a post is where it is.
@@ -261,7 +262,7 @@ export async function persistAgentRun(output: Record<string, unknown>): Promise<
    * read sixteen pages. `artefacts()` now carries them; this writes them.
    *
    * `metricsAvailable` is false and the count columns stay at zero because this
-   * tier captures through crawl4ai only — it has no Apify path — and a
+   * tier captures through the Claude Bridge — web search results only — and a
    * search-indexed page states no reaction count. Zero here means "not
    * applicable", never "performed badly", exactly as on the Node side.
    */

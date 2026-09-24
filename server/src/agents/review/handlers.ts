@@ -35,9 +35,8 @@ import type { ReviewPayload } from '../skills/index'
  * Whether the chosen model can actually look at a picture.
  *
  * Only the hosted Gemini path accepts image parts. The local template writer
- * has no model at all, and the Ollama text adapter is text-only — handing
- * either one a data URI would put a megabyte of base64 into a prompt and
- * achieve nothing.
+ * has no model at all — handing it a data URI would put a megabyte of base64
+ * into a prompt and achieve nothing.
  */
 function modelSeesImages(captionModel: string | undefined): boolean {
   return captionModel === 'gcp-gemini'

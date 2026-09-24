@@ -23,24 +23,19 @@ import os
 
 # ── Text ────────────────────────────────────────────────────────────────────
 
-#: Reasoning, captions, calendar copy. What `ollama pull qwen3.5` lands.
-DEFAULT_OLLAMA_TEXT_MODEL = "qwen3.5:latest"
-
 #: This tier's hosted binding. It has no Gemini client — see `core/llm.py`.
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
 # ── Images ──────────────────────────────────────────────────────────────────
-
-#: The background painter served over the Ollama daemon.
-DEFAULT_OLLAMA_IMAGE_MODEL = "x/flux2-klein:latest"
 
 #: The mflux (MLX) weight set. 4b is Apache-2.0 and ungated; 9b is gated.
 DEFAULT_MFLUX_MODEL = "flux2-klein-4b"
 
 # ── Embeddings ──────────────────────────────────────────────────────────────
 
-#: 768 dimensions. `server/src/db/schema.sql` fixes the column width to match.
-DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
+#: `gemini-embedding-001` at 768 dimensions. `server/src/db/schema.sql` fixes
+#: the column width to match. Served by the Node tier over the Google credential.
+DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 
 
 def resolved(key: str, default: str) -> str:
@@ -48,8 +43,8 @@ def resolved(key: str, default: str) -> str:
     An environment override, or the declared default.
 
     Treats a blank value as absent, matching `str()` in `server/src/config.ts`:
-    a key written as `OLLAMA_TEXT_MODEL=` is present as the empty string, and
-    returning it would ask the daemon for a model named "".
+    a key written as `MFLUX_MODEL=` is present as the empty string, and
+    returning it would ask for a model named "".
     """
     value = os.environ.get(key, "").strip()
     return value or default

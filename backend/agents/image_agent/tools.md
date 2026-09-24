@@ -138,11 +138,11 @@ same reason the briefs do — a background acquired inside the loop would be
 missing on every run with no model bound, and the creative would silently ship
 the brand layer alone.
 
-**Two transports, one model.** Ollama holds the FLUX.2 Klein weights but its HTTP
-API still refuses image models, so the painter tries Ollama first and falls
-through to mflux, the MLX port of the same model, run as a subprocess. That is
-transport selection, not model substitution: an operator who asked for FLUX.2
-Klein gets FLUX.2 Klein either way, and the transport that served is recorded.
+**One transport, one model.** FLUX.2 Klein is painted through mflux, the MLX
+port of the model, run as a subprocess. (An earlier version also tried Ollama's
+HTTP API first, but Ollama has been removed; mflux was always the transport that
+actually painted.) An operator who asked for FLUX.2 Klein gets it through mflux,
+and the transport that served is recorded.
 
 **It never raises.** Every failure returns a reason and the brand renderer draws
 the creative alone. Choosing `brand-svg` and having `flux2-klein` decline are

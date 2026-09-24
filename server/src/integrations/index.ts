@@ -10,6 +10,7 @@
 
 export {
   AdapterError,
+  NothingInWindowError,
   describeAdapter,
   fetchJson,
   mapWithConcurrency,
@@ -39,10 +40,18 @@ export {
 } from './gcp-auth'
 
 export {
+  describeImage,
   gcpImage,
   gcpText,
   rewriteTemplateCaption,
+  templateWriter,
   temperatureFromPercent,
+  textAdapter,
+  textAdapterFor,
+  textChain,
+  textChainDowngradeReason,
+  textModelId,
+  textModelIdFor,
   writeTemplateCaption,
   type GcpImageInput,
   type GcpTextInput,
@@ -51,20 +60,6 @@ export {
   usableImageParts,
   type TemplateWriterInput,
 } from './gcp-llm'
-
-export {
-  ollamaImage,
-  ollamaText,
-  stripReasoning,
-  templateWriter,
-  textAdapter,
-  textAdapterFor,
-  textChain,
-  textChainDowngradeReason,
-  textModelId,
-  textModelIdFor,
-  type OllamaTextInput,
-} from './ollama'
 
 
 export {
@@ -82,7 +77,6 @@ export {
  * counts and had no caller outside this barrel — the pipeline's engagement
  * weighting lives in `agents/corpus.ts`, where the Validation Agent reads it.
  */
-export { apifySearch, actorLabelFor, explainApifyFailure } from './apify'
 
 export {
   describeWhisper,
@@ -94,32 +88,37 @@ export {
 } from './whisper'
 
 export {
-  captureChainFor,
   captureFor,
   platformLaneUnavailableReason,
   openWebLaneUnavailableReason,
-  type CaptureAttempt,
   type CaptureInput,
   type CaptureSource,
   type RawPost,
 } from './capture'
 
 import { describeAdapter, type AdapterReport } from './adapter'
-import { apifySearch } from './apify'
+import { claudeBridgeCapture } from '../bridges/claude-bridge/capture-source'
 import { gcpImage, gcpText } from './gcp-llm'
-import { ollamaImage, ollamaText } from './ollama'
+import { embeddingAdapter } from './embeddings'
 import { parallelResearch } from './parallel'
 import { whisperTranscribe } from './whisper'
 
 /** Every adapter in the product, for a single reachability sweep. */
 export function allAdapters() {
   return [
-    apifySearch,
+    // Every Scraping Agent lane is a Claude Bridge capture. Parallel stays in
+    // the sweep because it serves Knowledge Base research, not scraping.
+    claudeBridgeCapture('linkedin'),
+    claudeBridgeCapture('instagram'),
+    claudeBridgeCapture('x'),
+    claudeBridgeCapture('facebook'),
+    claudeBridgeCapture(undefined),
     parallelResearch,
     gcpText,
     gcpImage,
-    ollamaText,
-    ollamaImage,
+    // Embeddings ride the same Google credential as text; reported so a lexical
+    // fallback is visible rather than inferred from missing vectors.
+    embeddingAdapter,
     // R7: a new adapter joins the boot sweep and `/api/health` the day it is
     // written, not the day someone remembers. An unreported adapter is one
     // whose absence is discovered from a failed run.

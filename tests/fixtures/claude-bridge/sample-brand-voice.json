@@ -1,0 +1,86 @@
+{
+  "name": "Sample Lab",
+  "positioning": "a frontier AI research lab, not a startup pitching a product",
+  "audience": "AI researchers, ML engineers, heads of AI and CTOs",
+  "voice_words": [
+    "technical",
+    "precise",
+    "research-grounded",
+    "hype-free",
+    "professional"
+  ],
+  "domains": [
+    "Reinforcement learning and reward modelling",
+    "Post-training and alignment",
+    "Agentic systems and multi-agent orchestration",
+    "Model evaluation, benchmarks and environments",
+    "Synthetic data generation"
+  ],
+  "topics": [
+    "reinforcement learning",
+    "rlhf",
+    "rlvr",
+    "ai agents",
+    "agentic",
+    "agent",
+    "evaluation",
+    "benchmark",
+    "environment",
+    "post-training",
+    "reward model",
+    "synthetic data",
+    "llm",
+    "long-horizon"
+  ],
+  "generic_hashtags": [
+    "ai",
+    "artificialintelligence",
+    "innovation",
+    "futureofwork",
+    "startup",
+    "growth",
+    "marketing",
+    "sales"
+  ],
+  "hype_patterns": [
+    {
+      "source": "\\bgame[- ]?chang(er|ing)\\b",
+      "flags": "i",
+      "why": "Hype vocabulary"
+    },
+    {
+      "source": "\\brevolutionary\\b",
+      "flags": "i",
+      "why": "Hype vocabulary"
+    },
+    {
+      "source": "\\bexcited to announce\\b",
+      "flags": "i",
+      "why": "Announcement excitement"
+    },
+    {
+      "source": "\\bbook a demo\\b",
+      "flags": "i",
+      "why": "Direct sales CTA"
+    },
+    {
+      "source": "\\b10x\\b",
+      "flags": "i",
+      "why": "Unsubstantiated multiplier"
+    },
+    {
+      "source": "\\bunlock(s|ing)? the power of\\b",
+      "flags": "i",
+      "why": "Marketing cliche"
+    }
+  ],
+  "restrictions": [
+    {
+      "id": "funding",
+      "label": "Unannounced funding",
+      "source": "\\b(raise[sd]?|raising|funding|seed round|investor)",
+      "flags": "i"
+    }
+  ],
+  "excluded_terms": []
+}

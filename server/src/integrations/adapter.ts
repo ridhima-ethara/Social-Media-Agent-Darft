@@ -44,6 +44,20 @@ export class AdapterError extends Error {
   }
 }
 
+/**
+ * A source that answered correctly and simply had nothing in the window.
+ *
+ * Distinct from a failure so a caller does not retry it — a retry would spend
+ * another search to be told the same thing — while still carrying the reason
+ * ("34 found, the freshest published 2026-09-05") into the run's report.
+ */
+export class NothingInWindowError extends AdapterError {
+  constructor(adapterId: string, message: string) {
+    super(adapterId, message)
+    this.name = 'NothingInWindowError'
+  }
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    HTTP
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -162,9 +176,7 @@ export async function withFallback<TIn, TOut>(
    is: a configured primary that fails should reach its backup before the
    product gives up on a model altogether.
 
-   This mirrors `captureChainFor()` in `capture.ts`, which does the same for the
-   platform lanes — Apify first, crawl4ai behind it. The distinction that file
-   draws is preserved here: an adapter reached because the one before it FAILED
+   The distinction kept here: an adapter reached because the one before it FAILED
    is a degradation and is reported per call; an adapter that is simply the
    first configured one in the chain is the primary and is not.
    ═══════════════════════════════════════════════════════════════════════════ */

@@ -5,20 +5,10 @@
  * text (invariant 21). The brand layer is composited over the result as vectors by
  * `renderCreative`.
  *
- * TWO TRANSPORTS, ONE MODEL
- *
- * Ollama has the weights and reports `capabilities: ["image"]` for
- * `x/flux2-klein:9b`, but as of 0.33.3 its HTTP API refuses image models
- * outright — `/api/generate`, `/api/chat` and `ollama run` all answer
- * `image generation models are not currently supported`. Image generation is
- * still a GUI-only experiment, which is no use to a server pipeline.
- *
- * So this painter tries Ollama first and falls through to mflux, the MLX port
- * of the same model, invoked as a subprocess. That is transport selection, not
- * the silent model substitution `index.ts` forbids: an operator who asked for
- * FLUX.2 Klein gets FLUX.2 Klein either way, and the transport that served is
- * recorded. When Ollama ships REST support the first branch simply starts
- * winning, with no change here.
+ * ONE TRANSPORT: mflux, the MLX port of the model, invoked as a subprocess.
+ * (An earlier version also tried Ollama's HTTP API first, but Ollama has been
+ * removed from the product; mflux was always the transport that actually
+ * painted, since Ollama's REST API refuses image models.)
  *
  * WHY A SUBPROCESS. mflux is a Python library, not a service. Standing up an
  * HTTP wrapper around it would add a process to supervise for no gain, so the
@@ -34,7 +24,6 @@ import { dirname, join } from 'node:path'
 
 import { config } from '../../../config'
 import { AdapterError } from '../../../integrations/adapter'
-import { ollamaImage } from '../../../integrations/ollama'
 import type { BackgroundPainter, RenderRequest } from './types'
 
 const ADAPTER_ID = 'flux2-klein'
@@ -42,12 +31,10 @@ const ADAPTER_ID = 'flux2-klein'
 /**
  * Invariant 21 says no diffusion model is ever asked to render brand text.
  *
- * The two transports state that differently because they accept different
- * things: the Ollama adapter passes a negative prompt (see `ollama.ts`), while
- * FLUX.2 through mflux explicitly refuses one — `mflux-generate-flux2` rejects
- * `--negative-prompt` and tells you to describe what you want instead. So the
- * exclusion is written into the positive prompt here, which both transports
- * share. Compositing the brand layer locally is the real enforcement either way.
+ * FLUX.2 through mflux refuses a negative prompt — `mflux-generate-flux2`
+ * rejects `--negative-prompt` and tells you to describe what you want instead —
+ * so the exclusion is written into the positive prompt here. Compositing the
+ * brand layer locally is the real enforcement either way.
  */
 function buildPrompt(request: RenderRequest): string {
   return [
@@ -213,11 +200,11 @@ export const flux2KleinPainter: BackgroundPainter = {
   id: 'flux2-klein',
 
   isConfigured(): boolean {
-    return ollamaImage.isConfigured() || config.mflux.configured
+    return config.mflux.configured
   },
 
   unavailableReason(): string {
-    return 'neither OLLAMA_BASE_URL nor MFLUX_PYTHON is set, so FLUX.2 Klein has no transport'
+    return 'MFLUX_PYTHON is not set, so FLUX.2 Klein has no transport'
   },
 
   async paint(request: RenderRequest): Promise<{ base64: string; mimeType: string }> {
@@ -225,44 +212,17 @@ export const flux2KleinPainter: BackgroundPainter = {
       throw new AdapterError(ADAPTER_ID, this.unavailableReason())
     }
 
-    const failures: string[] = []
-
-    // Transport 1 — Ollama. Preferred: the weights are already there and no
-    // second runtime is involved. Currently refused by the daemon; the attempt
-    // is cheap and self-correcting once that changes.
-    if (ollamaImage.isConfigured()) {
-      try {
-        return await ollamaImage.run({
-          prompt: buildPrompt(request),
-          width: snap(request.width),
-          height: snap(request.height),
-          timeoutMs: request.timeoutMs || config.ollama.imageTimeoutMs,
-        })
-      } catch (error) {
-        failures.push(
-          error instanceof AdapterError ? error.message : `Ollama transport failed — ${String(error)}`,
-        )
-      }
+    // mflux on MLX is the only transport. It spawns `mflux-generate-flux2` and
+    // reads the PNG it writes.
+    try {
+      return await paintWithMflux(request, seedFor(request))
+    } catch (error) {
+      throw new AdapterError(
+        ADAPTER_ID,
+        `FLUX.2 Klein could not paint — ${
+          error instanceof AdapterError ? error.toReason() : String(error)
+        }`,
+      )
     }
-
-    // Transport 2 — mflux on MLX. The same model, a different runtime.
-    if (config.mflux.configured) {
-      try {
-        return await paintWithMflux(request, seedFor(request))
-      } catch (error) {
-        failures.push(
-          error instanceof AdapterError
-            ? error.toReason()
-            : `mflux transport failed — ${String(error)}`,
-        )
-      }
-    }
-
-    // Both transports named, so the operator sees why each one declined rather
-    // than a single collapsed "unavailable".
-    throw new AdapterError(
-      ADAPTER_ID,
-      `no FLUX.2 Klein transport succeeded — ${failures.join('; ')}`,
-    )
   },
 }

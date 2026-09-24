@@ -10,10 +10,10 @@
 - **Id**: `analysis`
 - **Stage**: `assess`
 - **Hands off to**: `calendar`
-- **Skills**: 8
+- **Skills**: 10
 - **Handlers**: `server/src/agents/analysis/handlers.ts`
 
-Clusters validated signal into ranked opportunities, judges brand fit, predicts engagement, recommends a format and an angle, and merges the 5×5 validated hashtags across every trending keyword into the consolidated top twenty-five that the research build works from.
+Clusters validated signal into ranked opportunities, judges brand fit, predicts engagement, recommends a format and an angle, and merges the 5×5 validated hashtags across every trending keyword into the consolidated top twenty-five that the research build works from. Its Social Media Listener reads Ethara.AI’s own LinkedIn, Instagram, Facebook and X through SocialFetch and reports what is happening on those channels and what people are saying.
 
 ## Skills
 
@@ -35,8 +35,8 @@ Scores how well an opportunity sits with what Ethara can credibly say, given the
 |---|---|---|
 | `minBrandFit` | `45` | Opportunities below this are not carried into the calendar. Raising it makes the account narrower and more consistent. |
 | `requireDomainMatch` | `false` | On, an opportunity must map to one of the six declared research domains. Off allows adjacent commentary. |
-| `dropNonEditorial` | `true` | The corpus is other accounts’ posts, so it contains job ads, certification announcements, personal product reviews and event promotion. Those mention our vocabulary and therefore pass a keyword brand-fit score, which is how “Hire a generative AI engineer” became a calendar suggestion. On, a subject that is an announcement about a person or company rather than a finding about the world is rejected before it is scored, and the reason is named. Off lets them through. |
-| `titleMergeThreshold` | `70` | Two formed ideas whose titles are at least this similar are one idea, and the weaker is folded away rather than ranked. Clustering merges on the scraped post text, so two posts making the same point in different words survive as two clusters and produce two near-identical suggestions. Lower merges more aggressively; higher lets close variants both stand. |
+| `dropNonEditorial` | `true` | The corpus is other accounts’ posts, so it contains job ads, certification announcements, personal product reviews and event promotion. Those mention our vocabulary and therefore pass a keyword brand-fit score, which is how “Hire a generative AI engineer” reached the calendar. On, a subject that is an announcement about a person or company rather than a finding about the world is rejected before it is scored, and the reason is named. Off lets them through. |
+| `titleMergeThreshold` | `70` | Two formed ideas whose titles are at least this similar are one idea, and the weaker is folded away rather than ranked. Clustering merges on the scraped post text, so two posts making the same point in different words survive as two clusters and produce two near-identical calendar topics. Lower merges more aggressively; higher lets close variants both stand. |
 
 ### `analysis.engagement.predict`
 
@@ -92,4 +92,53 @@ Writes the plain-language reason behind every ranking and every rejection, namin
 |---|---|---|
 | `maxReasonChars` | `240` | The ceiling on a single explanation. Long enough to name the evidence, short enough to read on a card. |
 | `includeNumbers` | `true` | On, every reason carries the figure it rests on. Off produces vaguer reasons, which the review guidelines treat as a defect. |
+
+### `analysis.social.listen`
+
+Reads Ethara.AI’s own LinkedIn, Instagram, Facebook and X through SocialFetch — posts, engagement and comments — ranks the posts, detects topics, has Claude read each comment’s sentiment and feedback, and reads Ethara.AI’s Glassdoor employer reviews through FetchLayer. Reports what is happening on those channels and what people — audience and employees — are saying.
+
+| Knob | Default | Description |
+|---|---|---|
+| `company` | `Ethara.AI` | The company the listener reports on. Used in the report and in Claude’s instructions. |
+| `linkedinPage` | `https://www.linkedin.com/company/ethara-ai` | The LinkedIn company page URL (or slug). Empty skips LinkedIn. |
+| `instagramHandle` | `ethara.ai` | The Instagram handle or profile URL. Empty skips Instagram. |
+| `facebookPage` | `https://www.facebook.com/people/Ethara-AI/pfbid0MzfHN74R6ouyZYh2YjXbAGnSita1mYANTWFQHmdRYQ7PrkZG5DgmcJZu4eFXy3vel/` | The Facebook page URL (Ethara.AI’s page, as supplied by the operator). Empty skips Facebook. |
+| `xHandle` | `EtharaAi` | The X (Twitter) handle, without @. Empty skips X. |
+| `includeLinkedin` | `true` | Include LinkedIn in the listener. |
+| `includeInstagram` | `true` | Include Instagram in the listener. |
+| `includeFacebook` | `true` | Include Facebook in the listener. |
+| `includeX` | `true` | Include X in the listener. |
+| `postsPerPlatform` | `10` | How many of the most recent posts are read per platform. One list call per platform (LinkedIn’s costs 3 SocialFetch credits, the others 1), whatever this is set to up to a page. |
+| `commentPostsPerPlatform` | `4` | Comments are fetched only for posts that have comments, the most-commented first, up to this many per platform. Each is one SocialFetch call (3 credits on LinkedIn, 1 elsewhere), so this is the main driver of a run’s cost. Zero reads no comments. |
+| `commentsPerPost` | `20` | The most comments read from one post. Comments beyond this are not analysed. |
+| `topPostsCount` | `3` | How many top-performing posts each platform lists. |
+| `lowestPostsCount` | `2` | How many lowest-performing posts each platform lists. |
+| `includeReposts` | `true` | On, posts the company reposted count as its activity (their engagement is the original post’s). Off analyses only the company’s own posts. |
+| `includeGlassdoor` | `true` | On, reads Ethara.AI’s Glassdoor employer profile and recent reviews through FetchLayer — overall rating, recommend %, CEO approval and the recurring pros and cons. Off, or with FETCHLAYER_API_KEY unset, the Glassdoor block reports itself unavailable and the rest of the listener is unaffected. |
+| `glassdoorEmployer` | `Ethara.AI` | The employer name, Glassdoor URL or employer id FetchLayer looks up. Empty skips Glassdoor. |
+| `glassdoorReviewLimit` | `15` | How many of the most recent Glassdoor reviews are read — the sample the pros/cons themes and review sentiment rest on. Each read is a FetchLayer call. |
+| `claudeAnalysis` | `true` | On, Claude classifies each comment (sentiment, question/praise/complaint…, topic) and writes the insights from the computed figures. Off, sentiment is not measured and the insights are computed only. |
+| `claudeModel` | `sonnet` | The Claude model used for comment readings and insights. |
+| `claudeBudgetCents` | `50` | The most one Claude call may spend, in US cents. A run makes one call per comment batch plus one for the insights. |
+| `claudeBatchSize` | `40` | How many comments Claude reads in one call. |
+| `refreshHours` | `24` | Inside a pipeline run, a listener report younger than this is reused instead of fetching again — SocialFetch bills per call and the company’s own channels do not change by the minute. The Run listener button always fetches fresh. Zero always fetches. |
+
+### `analysis.competitor.intel`
+
+Profiles each competitor in the configurable P0/P1 Competitor Universe with the competitor-profiling skill from coreyhaines31/marketingskills (vendored in packages/marketing-skills): the SMA reads the competitor’s site (robots.txt obeyed), Wikipedia, dated news and review pages, and DataForSEO when configured; Claude writes the profile with every claim labelled fact / source-derived / inference / analysis and cited. Then a cross-competitor analysis — landscape, capability evidence, trends, gaps and Ethara implications — with no scores or rankings. Each version is kept and compared with the last.
+
+| Knob | Default | Description |
+|---|---|---|
+| `depth` | `quick` | The skill’s two depths. Quick scan: homepage and the first key pages, SEO overview. Deep profile: more pages, top pages and organic competitors from DataForSEO, larger evidence budget. |
+| `maxPagesPerCompetitor` | `5` | The homepage plus the key pages the skill prioritises (pricing, about, blog, research, changelog, customers, docs, careers), in that order. |
+| `newsWindowDays` | `30` | Only coverage and blog posts dated inside this many days count as recent developments. |
+| `maxNewsItems` | `8` | The most news / blog items passed to the profile as recent-development evidence. |
+| `includeSeo` | `true` | On, and with DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD set, reads domain rank, organic keywords and traffic, backlinks and referring domains. Otherwise every SEO figure reads “Not available from current sources”. |
+| `includeReviews` | `true` | Reads G2 / Capterra / TrustRadius / Product Hunt pages configured in a competitor’s links, where robots.txt allows. None configured, or disallowed, is stated per source. |
+| `runMarketAnalysis` | `true` | After the profiles, analyse the market across every active competitor’s latest profile. |
+| `concurrency` | `2` | How many competitors are researched at once. |
+| `maxCompetitorsPerPipelineRun` | `0` | Inside a pipeline run, profile at most this many competitors that are due by their monitoring frequency. Zero leaves Competitor Intelligence to its own tab and the monitor schedule — a full universe takes many minutes. |
+| `claudeModel` | `sonnet` | The Claude model that writes the profiles and the market analysis. |
+| `claudeBudgetCents` | `60` | The most one profile’s Claude call may spend, in US cents. |
+| `marketBudgetCents` | `120` | The most the cross-competitor analysis may spend, in US cents. |
 

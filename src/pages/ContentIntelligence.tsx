@@ -9,8 +9,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Check, Search, X, Sparkles, ArrowRight, Brain, ExternalLink, Download, Maximize2 } from 'lucide-react'
 import { API_BASE } from '../lib/api'
+import { SocialListenerSection } from '../components/social-listener'
 import { useStore } from '../store'
 import { PageHeader } from '../components/layout'
+import { PlatformDiscoveryPanel } from '../components/platform-discovery'
 import { PlayButton } from '../components/play-button'
 import {
   Badge,
@@ -646,25 +648,36 @@ function ScrapedTab() {
 
   if (scraped.length === 0) {
     return (
-      <EmptyState
-        icon={<Search size={22} />}
-        title="Nothing captured yet"
-        body="Run discovery and Sherlock will surface LinkedIn posts across the active keyword set."
-        action={
-          <PlayButton
-            label="Run SocialAI"
-            onClick={() => {
-              openTheater()
-              void runScraping()
-            }}
-          />
-        }
-      />
+      <>
+        {/* What the latest capture did, platform by platform — including why it found nothing. */}
+        <div className="mb-4">
+          <PlatformDiscoveryPanel />
+        </div>
+        <EmptyState
+          icon={<Search size={22} />}
+          title="Nothing captured yet"
+          body="Run discovery and Sherlock will find what is trending on LinkedIn, Instagram, Facebook and X for the active keyword set."
+          action={
+            <PlayButton
+              label="Run SocialAI"
+              onClick={() => {
+                openTheater()
+                void runScraping()
+              }}
+            />
+          }
+        />
+      </>
     )
   }
 
   return (
     <>
+      {/* What the latest capture did, platform by platform: the flow, each
+          platform's searches and outcome, and the trends it handed on. */}
+      <div className="mb-4">
+        <PlatformDiscoveryPanel />
+      </div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <label className="relative flex-1 min-w-56">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-3" aria-hidden="true" />
@@ -969,6 +982,7 @@ function AnalysisTab() {
   const hashtags = useStore((s) => s.hashtags)
   const toast = useStore((s) => s.toast)
   const setPage = useStore((s) => s.setPage)
+  const listener = useStore((s) => s.socialListener ?? null)
 
   const top = [...scraped]
     .filter((s) => s.validation === 'validated')
@@ -979,6 +993,11 @@ function AnalysisTab() {
     hashtags.find((h) => item.hashtags.includes(h.display_tag))
 
   return (
+    <>
+    {/* The Analysis Agent's Social Media Listener — Ethara.AI's own channels, through SocialFetch. */}
+    <div className="mb-4">
+      <SocialListenerSection report={listener} />
+    </div>
     <div className="stagger-fade grid gap-3 lg:grid-cols-2">
       {top.map((item, i) => {
         const tag = hashtagFor(item)
@@ -1041,5 +1060,6 @@ function AnalysisTab() {
         )
       })}
     </div>
+  </>
   )
 }

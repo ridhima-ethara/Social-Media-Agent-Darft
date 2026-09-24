@@ -33,10 +33,8 @@ function pyConst(body: string, name: string): string | undefined {
 
 /** Every tag that exists on both sides, and which file declares it in TS. */
 const MIRRORED = [
-  { name: 'DEFAULT_OLLAMA_TEXT_MODEL', ts: 'shared/text-models.ts' },
   { name: 'DEFAULT_ANTHROPIC_MODEL', ts: 'shared/text-models.ts' },
   { name: 'DEFAULT_EMBEDDING_MODEL', ts: 'shared/text-models.ts' },
-  { name: 'DEFAULT_OLLAMA_IMAGE_MODEL', ts: 'shared/image-models.ts' },
   { name: 'DEFAULT_MFLUX_MODEL', ts: 'shared/image-models.ts' },
 ] as const
 
@@ -59,8 +57,6 @@ describe('config.ts reads the shared declarations rather than restating them', (
   const configSource = read('server/src/config.ts')
 
   const KEYS = [
-    'OLLAMA_TEXT_MODEL',
-    'OLLAMA_IMAGE_MODEL',
     'GCP_TEXT_MODEL',
     'GCP_IMAGE_MODEL',
     'MFLUX_MODEL',
@@ -86,35 +82,24 @@ describe('the Python tier reads its declarations rather than restating them', ()
   it('llm.py takes its model tags from core/models.py', () => {
     const llm = read('backend/core/llm.py')
     expect(llm).toContain('from .models import')
-    expect(llm).toMatch(/resolved\("OLLAMA_TEXT_MODEL",\s*DEFAULT_OLLAMA_TEXT_MODEL\)/)
     expect(llm).toMatch(/resolved\("ANTHROPIC_MODEL",\s*DEFAULT_ANTHROPIC_MODEL\)/)
   })
 
   it('painter.py takes its model tags from core/models.py', () => {
     const painter = read('backend/tools/painter.py')
     expect(painter).toContain('from core.models import')
-    expect(painter).toMatch(/resolved\("OLLAMA_IMAGE_MODEL",\s*DEFAULT_OLLAMA_IMAGE_MODEL\)/)
     expect(painter).toMatch(/resolved\("MFLUX_MODEL",\s*DEFAULT_MFLUX_MODEL\)/)
   })
 })
 
 describe('server/.env.example ships the tags the code defaults to', () => {
   const example = read('server/.env.example')
-  const text = read('shared/text-models.ts')
   const image = read('shared/image-models.ts')
 
   const envValue = (key: string): string | undefined => {
     const match = new RegExp(`^\\s*${key}\\s*=\\s*(.*?)\\s*$`, 'm').exec(example)
     return match ? (match[1] ?? '').replace(/\s+#.*$/, '').trim() : undefined
   }
-
-  it('OLLAMA_TEXT_MODEL matches the declared default', () => {
-    expect(envValue('OLLAMA_TEXT_MODEL')).toBe(tsConst(text, 'DEFAULT_OLLAMA_TEXT_MODEL'))
-  })
-
-  it('OLLAMA_IMAGE_MODEL matches the declared default', () => {
-    expect(envValue('OLLAMA_IMAGE_MODEL')).toBe(tsConst(image, 'DEFAULT_OLLAMA_IMAGE_MODEL'))
-  })
 
   it('MFLUX_MODEL matches the declared default', () => {
     expect(envValue('MFLUX_MODEL')).toBe(tsConst(image, 'DEFAULT_MFLUX_MODEL'))

@@ -16,7 +16,7 @@
 
 import type { ServiceAdapter } from '../../../shared/agent-contract'
 import { config } from '../config'
-import { AdapterError, fetchJson } from './adapter'
+import { AdapterError, fetchJson, type ChainLink } from './adapter'
 import { describeGcpAuth, gcpAuthAvailable, gcpAuthHeader } from './gcp-auth'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -682,4 +682,153 @@ export function rewriteTemplateCaption(
   // Nothing mechanical matched. Return the body unchanged and say so, rather
   // than silently pretending an edit happened.
   return { text: body, applied: '' }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PROVIDER RESOLUTION — GEMINI ONLY
+
+   The product used to choose between a local model (Ollama · Qwen) and the
+   hosted one (Gemini) here. Ollama has been removed, so Gemini is the only
+   model provider and the deterministic template writer is the floor beneath it.
+   These functions are kept — `textChain()`, `textAdapter()`, `textModelIdFor()`
+   and the rest — because the caption, calendar, review and assistant agents all
+   call them by name. They now resolve to exactly one thing, but the callers do
+   not have to know that.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The adapter that should serve text generation right now.
+ *
+ * Always Gemini. Returned even when it is unconfigured, so `withFallback` takes
+ * the fixture (template writer) path and names the reason rather than the caller
+ * having to branch on null.
+ */
+export function textAdapter(): ServiceAdapter<GcpTextInput, string> {
+  return gcpText
+}
+
+/**
+ * THE ORDERED TEXT PROVIDERS, PRIMARY FIRST.
+ *
+ * One link now that Ollama is gone: Gemini, when it is configured. When it is
+ * not, the chain is empty and the caller takes the deterministic template path
+ * with the reason stated. The chain shape is retained so callers that stamp
+ * `servedBy` and report a backup keep working unchanged.
+ */
+export function textChain(): ChainLink<GcpTextInput, string>[] {
+  return gcpText.isConfigured() ? [{ adapter: gcpText, isBackup: false }] : []
+}
+
+/**
+ * Why text generation is not being served, or an empty string when it is.
+ * Surfaced at /health so the mode stays visible.
+ */
+export function textChainDowngradeReason(): string {
+  return gcpText.isConfigured() ? '' : gcpText.unavailableReason()
+}
+
+/**
+ * The deterministic template writer, expressed as an adapter that is never
+ * configured.
+ *
+ * Selecting "Ethara Writer" is a positive choice for the local template path,
+ * not a failure to reach a model. Modelling it as a never-configured adapter
+ * means `withFallback` takes the template branch by the same route it always
+ * does, so the choice needs no second code path and is stamped with a reason
+ * like every other fallback.
+ */
+export const templateWriter: ServiceAdapter<GcpTextInput, string> = {
+  id: 'ethara.writer',
+  label: 'Ethara Writer (local template)',
+  isConfigured(): boolean {
+    return false
+  },
+  unavailableReason(): string {
+    return 'Ethara Writer was selected — the deterministic template writer is the intended path, not a fallback'
+  },
+  async run(): Promise<string> {
+    throw new AdapterError(this.id, this.unavailableReason())
+  },
+}
+
+/**
+ * The adapter for an explicitly chosen caption model.
+ *
+ * An unknown or absent id falls through to `textAdapter()`. `ollama-qwen3` is
+ * gone from the catalogue; a stored row still carrying it resolves to Gemini
+ * rather than erroring, which is the honest thing to do with a superseded choice.
+ */
+export function textAdapterFor(modelId?: string): ServiceAdapter<GcpTextInput, string> {
+  switch (modelId) {
+    case 'ethara-writer':
+      return templateWriter
+    case 'gcp-gemini':
+      return gcpText
+    default:
+      return textAdapter()
+  }
+}
+
+/** The model id that actually produced a caption, for the artefact stamp. */
+export function textModelId(fast = false): string {
+  return fast ? config.gcp.fastTextModel : config.gcp.textModel
+}
+
+/**
+ * The model id behind a specific adapter, for stamping a chained result.
+ *
+ * Callers that use `textChain()` stamp with this, passing the `servedBy` the
+ * chain returned. Anything that is not Gemini is the template writer.
+ */
+export function textModelIdFor(adapterId: string | undefined, fast = false): string {
+  if (adapterId === gcpText.id) {
+    return fast ? config.gcp.fastTextModel : config.gcp.textModel
+  }
+  return 'the template writer'
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   VISION — describing an attached reference image
+
+   Gemini is multimodal, so an attached moodboard is read here and turned into
+   the one thing every painter and writer accepts: words. What reaches the
+   caller is a DESCRIPTION of the reference, never the reference itself.
+
+   Returns an empty string on any failure. A reference that could not be read is
+   reported by the caller as unread rather than silently treated as absent.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export async function describeImage(
+  dataUri: string,
+  intent: 'caption' | 'image',
+): Promise<string> {
+  if (!gcpText.isConfigured()) return ''
+
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(dataUri)
+  if (!match) return ''
+  const mimeType = match[1] as string
+  if (!mimeType.startsWith('image/')) return ''
+
+  const ask =
+    intent === 'image'
+      ? 'Describe this reference image for another illustrator to work from: subject, ' +
+        'composition, palette, and mood. Two sentences. No preamble.'
+      : 'Describe what this image shows, in one sentence, for a writer who cannot see it. ' +
+        'No preamble.'
+
+  try {
+    return (
+      await gcpText.run({
+        systemInstruction: 'You describe images plainly and briefly. No preamble.',
+        prompt: ask,
+        temperature: 0.2,
+        maxOutputTokens: 256,
+        fast: true,
+        images: [{ dataUri, name: 'reference' }],
+      })
+    ).trim()
+  } catch {
+    // Never fatal: a describable reference is a bonus, not a requirement.
+    return ''
+  }
 }

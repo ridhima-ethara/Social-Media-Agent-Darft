@@ -11,6 +11,8 @@
  */
 
 import type { Confidence, Platform } from '../../../shared/agent-contract'
+import { localIsoDate } from '../../../shared/calendar-horizon'
+import { config } from '../config'
 import { BRAND_TOPICS, similarity } from '../../../shared/brand-voice'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -496,9 +498,23 @@ export function isWeekend(dateIso: string): boolean {
  * from today costs nothing and makes every slot reachable.
  */
 export function planningStart(now: Date = new Date()): Date {
-  const monday = startOfWeek(now)
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  const today = workspaceDay(now)
+  const monday = startOfWeek(today)
   return monday.getTime() > today.getTime() ? monday : today
+}
+
+/**
+ * Today in the WORKSPACE's time zone, as a UTC-midnight Date.
+ *
+ * Planning used the UTC date, and the post-ready horizon the workspace's date
+ * (Asia/Kolkata). For the five and a half hours after local midnight they
+ * disagreed: a run at 00:03 IST placed a topic on "today" = yesterday's date,
+ * which was then neither post-ready nor in the Topic Queue. Both now read the
+ * same calendar day.
+ */
+export function workspaceDay(now: Date = new Date()): Date {
+  const iso = localIsoDate(now, config.core.tz)
+  return new Date(`${iso}T00:00:00Z`)
 }
 
 /**
@@ -513,7 +529,7 @@ export function planningStart(now: Date = new Date()): Date {
 export function planningEnd(horizonDays: number, now: Date = new Date()): Date {
   const days = Math.max(1, Math.round(horizonDays))
   const byDays = addDays(planningStart(now), days)
-  const byWeeks = addDays(startOfWeek(now), Math.ceil(days / 7) * 7)
+  const byWeeks = addDays(startOfWeek(workspaceDay(now)), Math.ceil(days / 7) * 7)
   return byDays.getTime() < byWeeks.getTime() ? byDays : byWeeks
 }
 

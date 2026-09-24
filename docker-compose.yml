@@ -87,7 +87,6 @@ services:
       # Service addresses. The host files point these at localhost, which
       # inside a container means the container.
       DATABASE_URL: postgresql://${POSTGRES_USER:-ethara}:${POSTGRES_PASSWORD:-ethara}@db:5432/${POSTGRES_DB:-ethara_socialai}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       PORT: '4001'
       # Same-origin through nginx, so no browser ever sends a cross-origin
       # request. Kept narrow rather than '*' because the API has no auth.
@@ -142,34 +141,13 @@ services:
     ports:
       - '${WEB_PORT:-8080}:80'
 
-  # ── Local text model ──────────────────────────────────────────────────
-  # The model is NOT pulled at build time — it is ~9 GB and would make the
-  # first `up` look hung. Pull it once, after the stack is running:
-  #
-  #   docker compose exec ollama ollama pull qwen3:14b
-  #
-  # Until then captions, calendar copy and the command plane run on the
-  # deterministic template writer and parser, labelled as such in the UI.
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    volumes:
-      - ollama:/root/.ollama
-    # NVIDIA on-prem: uncomment to give the model a GPU. Without it Ollama runs
-    # on CPU, where qwen3:14b answers in minutes rather than seconds — usable
-    # for a smoke test, too slow for real use.
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+  # ── Local text model · removed ─────────────────────────────────────────
+  # Ollama has been removed. Text generation runs on Gemini (GCP_* keys); with
+  # no Google credential the deterministic template writer and parser take over,
+  # labelled as such in the UI.
 
 volumes:
   pgdata:
     name: ethara-socialai-pgdata
-  ollama:
-    name: ethara-socialai-ollama
   brain:
     name: ethara-socialai-brain

@@ -152,7 +152,7 @@ describe('the gate sits in front of bulk work, and only bulk work', () => {
    * instruction that never needed it.
    */
   const bulkMutations = ['calendar.reshuffle', 'calendar.swap', 'calendar.bulk.move', 'calendar.spread']
-  const singleMutations = ['idea.move', 'idea.promote', 'idea.demote']
+  const singleMutations = ['idea.move']
   const calendarMutations = [...bulkMutations, ...singleMutations]
 
   for (const id of bulkMutations) {

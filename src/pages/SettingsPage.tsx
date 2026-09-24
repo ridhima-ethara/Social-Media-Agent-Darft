@@ -17,23 +17,18 @@ import { Select, Badge, Btn, FacebookGlyph, InstagramGlyph, LinkedinGlyph, XGlyp
 import { DiscoveredKeywordsPanel, TrackedAccountsPanel, VoicePanel } from '../components/short-form'
 import { defaultSkillConfig } from '@shared/agent-registry'
 
-/** The lanes the Scraping Agent captures, in the order it runs them. */
 /**
- * How each lane is read, under each of the two capture sources.
- *
- * The four platform lanes are read by an Apify actor, and only by an Apify
- * actor: it reads the platform itself and states real reaction counts, and
- * nothing else can. There is no fallback, so a lane without the token does not
- * run rather than running with weaker numbers under the same name. The open web
- * has no actor and is read by Parallel, which returns cited pages and therefore
- * states no engagement either.
+ * The lanes the Scraping Agent captures, in the order it runs them — every one
+ * served by the Claude Bridge. Claude Code's web search finds public posts and
+ * pages; the bridge keeps only real item URLs and dates each from what the
+ * platform or page states. Facebook post ids carry no date, so that lane skips
+ * itself in capture rather than spending searches it cannot use.
  */
 const CAPTURE_LANES = [
-  { label: 'LinkedIn', apify: 'Apify actor · post search', crawler: 'lane does not run without the token' },
-  { label: 'Instagram', apify: 'Apify actor · hashtag search', crawler: 'lane does not run without the token' },
-  { label: 'X', apify: 'Apify actor · post search', crawler: 'lane does not run without the token' },
-  { label: 'Facebook', apify: 'Apify actor · post search', crawler: 'lane does not run without the token' },
-  { label: 'Open web', apify: null, crawler: 'Parallel · cited pages, no engagement figures' },
+  { id: 'linkedin', label: 'LinkedIn', how: 'Claude Bridge · search scoped to linkedin.com posts, dated from the post id' },
+  { id: 'instagram', label: 'Instagram', how: 'Claude Bridge · search scoped to instagram.com posts and reels, dated from the shortcode' },
+  { id: 'x', label: 'X', how: 'Claude Bridge · search scoped to x.com posts, dated from the status id' },
+  { id: 'facebook', label: 'Facebook', how: 'Claude Bridge · posts cannot be dated from search, so discovery skips Facebook' },
 ]
 
 /**
@@ -43,10 +38,10 @@ const CAPTURE_LANES = [
  * listing one here would leave a row that can only ever say "not reported".
  */
 const SERVICES = [
-  { id: 'apify', label: 'Apify · platform capture (LinkedIn, Instagram, X, Facebook)', env: 'APIFY_API_TOKEN' },
-  { id: 'parallel', label: 'Parallel Web Systems · open-web capture and deep research', env: 'PARALLEL_API_KEY' },
+  { id: 'claude-bridge', label: 'Claude Bridge · all scraping, via Claude Code (every lane)', env: 'CLAUDE_CODE_BIN' },
+  { id: 'parallel', label: 'Parallel Web Systems · Knowledge Base research only (not scraping)', env: 'PARALLEL_API_KEY' },
   { id: 'gcp', label: 'Google Cloud · Gemini and Imagen', env: 'GCP_API_KEY' },
-  { id: 'ollama', label: 'Ollama · local Qwen3 and FLUX.2 Klein', env: 'OLLAMA_BASE_URL' },
+  { id: 'mflux', label: 'FLUX.2 Klein · local background painter (MLX)', env: 'MFLUX_PYTHON' },
 ]
 
 /**
@@ -233,29 +228,24 @@ export function SettingsPage() {
           <div className="card mt-3 p-4">
             <h3 className="display text-sm">Sources</h3>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <span className="text-[11.5px] text-ink-3">Apify</span>
-              <Badge tone={statusOf('apify').configured ? 'good' : 'warn'}>
-                {statusOf('apify').configured
-                  ? 'Configured · platform lanes carry engagement'
-                  : `Not configured — ${statusOf('apify').reason}`}
-              </Badge>
-              <span className="ml-1 text-[11.5px] text-ink-3">Parallel</span>
-              <Badge tone={statusOf('parallel').configured ? 'good' : 'warn'}>
-                {statusOf('parallel').configured
-                  ? 'Configured · open web and research'
-                  : `Not configured — ${statusOf('parallel').reason}`}
+              <span className="text-[11.5px] text-ink-3">Claude Bridge</span>
+              <Badge tone={statusOf('claude-bridge').configured ? 'good' : 'warn'}>
+                {statusOf('claude-bridge').configured
+                  ? 'Ready · every lane via Claude Code web search'
+                  : `Not available — ${statusOf('claude-bridge').reason}`}
               </Badge>
             </div>
 
             <p className="mt-1.5 text-[11px] leading-relaxed text-ink-3">
-              Every keyword is captured once per lane. The four platform lanes are read by an Apify
-              actor, which reads the platform itself and states real reaction counts. There is no
-              fallback behind it: nothing else can state a reaction count, so a lane without the
-              token does not run rather than returning weaker numbers under the same name. The open
-              web has no actor and is read by Parallel, which returns cited pages and states no
-              engagement — those rows are excluded from the engagement, velocity and growth parts of
-              the trend score rather than counted as zero. A lane that returns nothing is reported,
-              never filled in.
+              Capture is platform-level trend discovery through the Claude Bridge. For each of
+              LinkedIn, Instagram, Facebook and X it runs at most three focused searches built from
+              the Knowledge Base, brand context and keywords, keeps only posts whose date can be
+              verified inside the window (the past week by default) and that mention an Ethara keyword,
+              groups them into trends (at most five posts each) with what is trending today first,
+              and hands them to the Validation Agent. The results pop up once validation is done, and
+              the calendar writes today&rsquo;s and tomorrow&rsquo;s posts from the freshest trends. No other scraping service is used. Search engines index social posts
+              late, so a short window is often empty — that is reported, never filled in. Nothing
+              states engagement, so those rows are excluded from the engagement parts of the score.
             </p>
 
             <div className="mt-2 space-y-1.5">
@@ -263,9 +253,7 @@ export function SettingsPage() {
                 <label key={lane.label} className="block">
                   <span className="text-[10px] uppercase tracking-[0.08em] text-ink-3">{lane.label}</span>
                   <input
-                    value={
-                      lane.apify !== null && statusOf('apify').configured ? lane.apify : lane.crawler
-                    }
+                    value={statusOf('claude-bridge').configured ? lane.how : 'Claude Bridge unavailable — lane does not run'}
                     readOnly
                     className="mono mt-0.5 w-full cursor-default rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[11px] text-ink-3 outline-none"
                   />
@@ -276,9 +264,8 @@ export function SettingsPage() {
             <p className="mt-2 text-[11px] leading-relaxed text-ink-3">
               Posts per keyword, the recency window and the ranking order are knobs on{' '}
               <span className="text-ink-2">Sherlock · Capture pages per keyword and platform</span> in
-              Agent Studio, and the deployment caps them with{' '}
-              <code className="mono">APIFY_MAX_ITEMS_PER_KEYWORD</code> so a slider cannot run up a
-              bill.
+              Agent Studio. The bridge's own query and result limits live in{' '}
+              <code className="mono">server/src/bridges/claude-bridge/config/bridge.config.json</code>.
             </p>
           </div>
         </section>
@@ -331,7 +318,7 @@ export function SettingsPage() {
             {
               key: 'topPerPlatform' as const,
               label: 'Calendar posts per platform',
-              hint: 'How many ideas take a calendar slot per platform. The rest go to More suggestions.',
+              hint: 'How many validated topics take a date per platform per week. Ideas below the cut are not placed — there is no suggestion list.',
               min: 1,
               max: 30,
             },

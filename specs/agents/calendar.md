@@ -5,7 +5,7 @@
   stale the first time an agent changes.
 -->
 
-# Dora — Calendar Agent · The weekly plan
+# Dora — Calendar Agent · Topics on the calendar, posts only when due
 
 - **Id**: `calendar`
 - **Stage**: `plan`
@@ -13,7 +13,7 @@
 - **Skills**: 8
 - **Handlers**: `server/src/agents/calendar/handlers.ts`
 
-Turns opportunities into content ideas, picks the platform and the slot, balances cadence across the week, and ranks everything. The top five per platform take a calendar slot; the rest keep their rank and wait in More suggestions.
+Turns validated opportunities into calendar topics, picks the platform and the slot, balances cadence across the week, and ranks everything. The top five per platform per week take a date; there is no suggestion list. Only today’s post — and tomorrow’s, when the posting schedule requires it — is written; every later date holds its topic in the Topic Queue until someone presses Generate Post.
 
 ## Skills
 
@@ -43,7 +43,7 @@ Places each idea on a date and time using an hour-weight table, spreading determ
 
 | Knob | Default | Description |
 |---|---|---|
-| `planningHorizonDays` | `14` | How many days ahead the calendar spreads ideas over. 7 plans one week; 14 plans a fortnight, which gives the cadence limits room to breathe rather than compressing every idea into five weekdays. Weekends are still skipped when "Avoid weekends" is on, so a 14-day horizon offers ten postable days. |
+| `planningHorizonDays` | `14` | How many days ahead the calendar spreads ideas over. 7 plans this week; 14 plans this week and next. The window always ends at a week boundary, so a run mid-week never spills into a third week, and two weeks is the ceiling — the calendar never plans further ahead. Weekends are still skipped when "Avoid weekends" is on. |
 | `preferredWindowStart` | `8` | The start of the posting window in local time. Nothing is scheduled before it. |
 | `preferredWindowEnd` | `18` | The end of the posting window. Nothing is scheduled after it. |
 | `avoidWeekends` | `true` | On, ideas are only placed Monday to Friday, where this audience is active. |
@@ -56,7 +56,8 @@ Picks the primary platform from a format-by-platform fit matrix, lists every via
 
 | Knob | Default | Description |
 |---|---|---|
-| `enabledPlatforms` | `linkedin,instagram,facebook` | Comma-separated platform ids an idea may be placed on: linkedin, instagram, x, facebook. Set it to `linkedin` and nothing else is ever suggested — the fit matrix only scores what is listed here. This is the restriction; `Tie-break toward` below is only a preference and never excluded a platform. X is OFF by default: it is the one channel this account does not currently publish to, and planning slots for a channel nobody ships to fills the calendar with work that will never run. Add `,x` to turn it back on — nothing else has to change, because every platform stays a first-class member of the union either way. |
+| `enabledPlatforms` | `linkedin,instagram,x,facebook` | Comma-separated platform ids an idea may be placed on: linkedin, instagram, x, facebook. Set it to `linkedin` and nothing else is ever suggested — the fit matrix only scores what is listed here. This is the restriction; `Tie-break toward` below is only a preference and never excluded a platform. X is OFF by default: it is the one channel this account does not currently publish to, and planning slots for a channel nobody ships to fills the calendar with work that will never run. Add `,x` to turn it back on — nothing else has to change, because every platform stays a first-class member of the union either way. |
+| `preferTrendPlatform` | `true` | On, a topic the Scraping Agent found trending on a platform is planned for that platform when it is in play above — so each platform’s calendar is built from its own most trending, relevant topics. The format-fit matrix still scores every platform for the alternates, and decides when the source platform is unknown or not in play (X is not in play by default, so X trends go to the best-fitting enabled platform). Off, the format fit alone decides. |
 | `primaryPlatform` | `linkedin` | Which platform wins when two enabled platforms score equally. LinkedIn is where this audience actually is. |
 | `alternateThreshold` | `45` | An enabled platform scoring at or above this is offered as an alternate, and is what the cross-platform step adapts an idea onto. Lowered from 55 for a specific arithmetic reason: this account’s work is mostly Thought Leadership, which the fit matrix scores LinkedIn 96, Facebook 74 and Instagram 46 — so at 55 Instagram could never receive a single post, and the calendar came back LinkedIn and Facebook only. 45 admits it. Raise it again if Instagram variants read as forced. |
 
@@ -70,6 +71,7 @@ Spreads the week so no single day or platform carries the load, moving ideas rat
 | `maxPerDay` | `3` | Across all platforms. Beyond this, ideas move to the next available day. |
 | `maxPerPlatformPerDay` | `1` | Two posts to the same platform on one day competes with itself. |
 | `targetPerWeek` | `3` | What a healthy week looks like. The ambient watcher flags a platform that falls below it. |
+| `planningHorizonDays` | `14` | The window a post displaced from a full day may move within. Declared here as well as on slot optimisation because this skill MOVES dates: it wraps around the window’s postable days instead of walking past its last one. Keep it equal to the slot-optimisation horizon. |
 
 ### `calendar.conflict.detect`
 
@@ -87,22 +89,27 @@ When an idea suits more than one platform, prepares the adapted variants rather 
 | Knob | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Off, an idea only ever exists for its primary platform. |
+| `everyPlatform` | `true` | On, every topic is planned for every platform in play on the same day — LinkedIn, X, Facebook and Instagram — so the week has a recommendation for each channel. The per-platform cap still keeps each platform to its weekly target. Off, only the strongest ideas get a staggered variant (Variants per idea, Stagger). |
+| `shareMetaPost` | `true` | On, a topic’s Facebook and Instagram entries carry the same caption: it is written once and the second reuses it (each still gets its own image size). |
 | `maxVariants` | `2` | How many additional platforms one idea may be adapted for. |
 | `staggerDays` | `2` | How many days apart the same idea appears on different platforms, so it does not read as a cross-post. |
+| `planningHorizonDays` | `14` | The window a variant must land inside. A variant staggered past the window’s end is staggered earlier instead, and dropped when neither fits. Keep it equal to the slot-optimisation horizon. |
 
 ### `calendar.rank.select`
 
-Scores every idea on confidence, brand relevance and trend strength, then per platform independently gives the top ranks a calendar slot and leaves the rest as ranked suggestions.
+Scores every idea on confidence, brand relevance and trend strength, then per platform independently gives the top ranks a date on the calendar as topics. Ideas below the cut-off are not placed; there is no suggestion list.
 
 | Knob | Default | Description |
 |---|---|---|
-| `topPerPlatform` | `5` | How many ideas per platform actually take a slot on the week. Everything else keeps its rank and waits in More suggestions. |
-| `planningWeeks` | `2` | How many weeks ahead the slot cap applies to. The cap is per platform PER WEEK, so a value of two fills this week and the next rather than spreading one week’s worth of posts thinly across a fortnight — which is what made a freshly scraped week look almost empty. Raising this plans further ahead and writes more posts per run. |
+| `topPerPlatform` | `5` | How many topics per platform take a date on the week. An idea ranked below this is not placed — the run reports how many and the cut-off score — because the calendar keeps no suggestion list. |
+| `planningWeeks` | `2` | How many weeks ahead the slot cap applies to. The cap is per platform PER WEEK, so a value of two fills this week and the next rather than spreading one week’s worth of posts thinly across a fortnight — which is what made a freshly scraped week look almost empty. Two weeks is the ceiling: the calendar never plans a third. |
 | `rankConfidenceWeight` | `45` | How much the agent’s own confidence in the idea counts toward its rank. |
 | `rankRelevanceWeight` | `35` | How much fit with Ethara’s positioning counts toward its rank. |
 | `rankTrendWeight` | `20` | How much the strength of the originating trend counts toward its rank. |
 | `balanceAcrossPlatforms` | `true` | On, each platform gets its own top five, so a strong LinkedIn week cannot starve Instagram. Off ranks globally. |
-| `autoWriteCalendar` | `true` | On, a post that takes a calendar slot is handed straight to the Content and Image Agents, so the week fills with written, illustrated drafts instead of placeholders. This is what makes the calendar populate at all: the grid deliberately shows only posts that have actually been written, so a placed-but-unwritten idea waits in More suggestions and the week looks empty. Off leaves every placement to be drafted by hand from the card. |
-| `maxAutoWrites` | `12` | The ceiling on how many newly placed posts one run will write and illustrate. Each one is a model call for the caption and another for the creative, so this is the main driver of a run’s length and cost — budget roughly a minute and a half each. The default covers a two-week plan across the active platforms, because the calendar grid only renders posts that have actually been written: a placed-but-unwritten idea waits in More suggestions and the week reads as empty. Lower it to shorten a run and draft the rest by hand. |
-| `reconcileOverCap` | `true` | On, a platform already holding more primaries than the slot count has its weakest excess ideas moved back to More suggestions, so the calendar matches the declared cap instead of keeping whatever earlier runs left behind. Nothing is deleted — a demoted idea keeps its rank and reasons and can be promoted again. Ideas past planning are never moved: once a person has reviewed one, only a person may move it, and that is reported instead. |
+| `autoWriteCalendar` | `true` | On, a topic placed on a post-ready date (see “Posts written ahead”) is handed straight to the Content and Image Agents, so today’s post is ready without anyone asking. Topics on later dates are never written automatically, whatever this is set to: they wait in the Topic Queue until someone presses Generate Post. Off leaves today’s post to be generated by hand too. |
+| `postReadyHorizon` | `today-and-tomorrow` | Which dates get a complete post — caption, hashtags and creative — written automatically. “today” writes only today’s placed post. “today-and-tomorrow” also writes tomorrow’s, but only when the posting schedule requires it: a topic is placed tomorrow and tomorrow is a posting day (“Avoid weekends” decides that). Every later date holds its validated topic only — no caption, image or hashtags — until Generate Post is pressed for it. |
+| `maxAutoWrites` | `8` | The ceiling on how many post-ready posts one run will write and illustrate. Each is a model call for the caption and another for the creative. It only ever applies to today and tomorrow, so the default covers both days across the active platforms; future dates are never written by a run. |
+| `freshestFirst` | `true` | On, each platform’s topics from this run keep the dates the cadence gave them, but the freshest source posts take the earliest of those dates — so a topic trending TODAY becomes today’s (or tomorrow’s) written post, and last week’s trends fill the later dates in the Topic Queue. Only this run’s topics are re-dated; a written post or a person’s placement never moves. Off keeps the cadence order. |
+| `reconcileOverCap` | `true` | On, a platform holding more agent-placed topics than the slot count has its weakest excess topics withdrawn — status rejected, with the reason and the cut-off score recorded — so the calendar matches the declared cap. Nothing is deleted. Only topics with no post yet are affected: a written post, or one a person has reviewed, keeps its date and counts against the cap. |
 

@@ -15,13 +15,8 @@ import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_GCP_TEXT_MODEL,
-  DEFAULT_OLLAMA_TEXT_MODEL,
 } from '../../shared/text-models'
-import {
-  DEFAULT_GCP_IMAGE_MODEL,
-  DEFAULT_MFLUX_MODEL,
-  DEFAULT_OLLAMA_IMAGE_MODEL,
-} from '../../shared/image-models'
+import { DEFAULT_GCP_IMAGE_MODEL, DEFAULT_MFLUX_MODEL } from '../../shared/image-models'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SERVER_ROOT = join(HERE, '..')
@@ -135,24 +130,23 @@ function has(key: string): boolean {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export type PublishMode = 'demo' | 'live'
-export type AssistantProvider = 'gcp' | 'ollama' | 'deterministic'
+export type AssistantProvider = 'gcp' | 'deterministic'
 
 /**
- * Which vendor serves text generation.
- * `auto` prefers a configured local model over a cloud one — see `textAdapter()`.
+ * Which vendor serves text generation. Ollama has been removed, so `gcp`
+ * (Gemini) is the only model provider; the type is kept for the config surface
+ * and for callers that still read `config.textProvider`.
  */
-export type TextProvider = 'auto' | 'ollama' | 'gcp'
+export type TextProvider = 'gcp'
 
 export const config = {
   /**
    * Provider selection for text generation, read by `textAdapter()`.
-   * Lives at the top level rather than inside a vendor section because it is
-   * the choice BETWEEN vendors, and putting it under one of them would imply
-   * that vendor is privileged.
+   * Gemini is the only provider now, so this is constant — kept so the health
+   * report and any caller reading it resolve without a special case.
    */
   get textProvider(): TextProvider {
-    const raw = str('TEXT_MODEL_PROVIDER', 'auto').toLowerCase()
-    return raw === 'ollama' || raw === 'gcp' ? raw : 'auto'
+    return 'gcp'
   },
 
   /* ── Core ───────────────────────────────────────────────────────────────── */
@@ -204,8 +198,7 @@ export const config = {
      * narrator: slightly blunter, fully working, every tool still reachable.
      */
     get provider(): AssistantProvider {
-      const raw = str('ASSISTANT_MODEL_PROVIDER').toLowerCase()
-      return raw === 'gcp' || raw === 'ollama' ? raw : 'deterministic'
+      return str('ASSISTANT_MODEL_PROVIDER').toLowerCase() === 'gcp' ? 'gcp' : 'deterministic'
     },
     get plannerModel(): string {
       return str('ASSISTANT_PLANNER_MODEL', 'gemini-2.5-pro')
@@ -238,19 +231,73 @@ export const config = {
     },
   },
 
-  /* ── Knowledge · Parallel Web Systems ───────────────────────────────────── */
-  parallel: {
+  /* ── Capture · the Scraping Agent's lanes (all served by the Claude Bridge) ─ */
+  capture: {
     /**
-     * Characters kept per captured page on the open-web lane.
-     *
-     * Lived on the crawl4ai config until the crawler was removed. It is a
-     * property of the LANE, not of whichever client reads it: one verbose page
-     * must not crowd the rest of a keyword's budget out of the payload handed to
-     * the validator.
+     * Characters kept per captured page. A property of the LANE, not of
+     * whichever client reads it: one verbose page must not crowd the rest of a
+     * keyword's budget out of the payload handed to the validator.
      */
     get maxCharsPerPage(): number {
       return int('OPEN_WEB_MAX_CHARS_PER_PAGE', 6000)
     },
+  },
+
+  /* ── Knowledge · Parallel Web Systems (research only — not a scraping source) ─ */
+  /**
+   * SocialFetch — public social data (profiles, posts, comments, engagement)
+   * for the Analysis Agent's Social Media Listener. Header `x-api-key`. The key
+   * lives in secrets.env; without it the listener reports itself unavailable.
+   */
+  socialFetch: {
+    get baseUrl(): string {
+      return str('SOCIALFETCH_BASE_URL', 'https://api.socialfetch.dev')
+    },
+    get apiKey(): string {
+      return str('SOCIALFETCH_API_KEY')
+    },
+    get timeoutMs(): number {
+      return Number(str('SOCIALFETCH_TIMEOUT_MS', '90000')) || 90_000
+    },
+  },
+  /**
+   * FetchLayer — Glassdoor employer reviews and ratings for the Analysis
+   * Agent's Social Media Listener (https://fetchlayer.dev, header `x-api-key`).
+   * The key lives in secrets.env; without it the Glassdoor block reports itself
+   * unavailable and the rest of the listener is unaffected.
+   */
+  /**
+   * DataForSEO — SEO & market data for Competitor Intelligence (the
+   * competitor-profiling skill's DataForSEO calls). HTTP Basic auth with the
+   * account login and API password, both in secrets.env. Unset, every SEO
+   * figure reads "Not available from current sources".
+   */
+  dataForSeo: {
+    get baseUrl(): string {
+      return str('DATAFORSEO_BASE_URL', 'https://api.dataforseo.com')
+    },
+    get login(): string {
+      return str('DATAFORSEO_LOGIN')
+    },
+    get password(): string {
+      return str('DATAFORSEO_PASSWORD')
+    },
+    get locationCode(): number {
+      return Number(str('DATAFORSEO_LOCATION_CODE', '2840')) || 2840
+    },
+  },
+  fetchLayer: {
+    get baseUrl(): string {
+      return str('FETCHLAYER_BASE_URL', 'https://api.fetchlayer.dev')
+    },
+    get apiKey(): string {
+      return str('FETCHLAYER_API_KEY')
+    },
+    get timeoutMs(): number {
+      return Number(str('FETCHLAYER_TIMEOUT_MS', '90000')) || 90_000
+    },
+  },
+  parallel: {
     get baseUrl(): string {
       return str('PARALLEL_BASE_URL', 'https://api.parallel.ai')
     },
@@ -285,14 +332,22 @@ export const config = {
     /** Sunday 06:00 in TZ. */
     get discoveryCron(): string {
       /*
-       * Blank means NOT SCHEDULED, deliberately. A discovery run costs Apify
-       * credit and several minutes of crawling, so it must be opted into rather
+       * Blank means NOT SCHEDULED, deliberately. A discovery run costs Claude
+       * usage and a few minutes of searching, so it must be opted into rather
        * than started by the act of installing the product.
        */
       return str('DISCOVERY_CRON')
     },
     get buildCron(): string {
       return str('KNOWLEDGE_BUILD_CRON', '0 6 * * 0')
+    },
+    /**
+     * Competitor Intelligence monitoring: when set, profiles the competitors
+     * that are DUE by their monitoring frequency (weekly / monthly). Blank = not
+     * scheduled, for the same reason as discovery: it spends Claude usage.
+     */
+    get competitorMonitorCron(): string {
+      return str('COMPETITOR_MONITOR_CRON')
     },
     get hashtagCount(): number {
       return int('KNOWLEDGE_HASHTAG_COUNT', 25)
@@ -362,52 +417,6 @@ export const config = {
     /** Vertex endpoints are used when a project is named; otherwise the public API. */
     get useVertex(): boolean {
       return has('GCP_PROJECT_ID')
-    },
-  },
-
-  /* ── Local models · Ollama ──────────────────────────────────────────────── */
-  ollama: {
-    /**
-     * No default. A default would make `configured` answer true on a machine
-     * with no daemon, and /health would claim live when nothing is listening.
-     * The example value is in `.env.example`, where it is opt-in.
-     */
-    get baseUrl(): string {
-      return str('OLLAMA_BASE_URL').replace(/\/+$/, '')
-    },
-    /** Content generation, calendar reasoning, review rewrites, the planner. */
-    get textModel(): string {
-      return str('OLLAMA_TEXT_MODEL', DEFAULT_OLLAMA_TEXT_MODEL)
-    },
-    /**
-     * Short, cheap calls — narration and single rewrites.
-     *
-     * Falls back to the model the operator actually configured, never to a
-     * second hardcoded tag. A literal default here names a model the operator
-     * never chose and may not have pulled: every `fast` call then failed with
-     * "model not found", `withFallback` swallowed it, and caption edits
-     * silently ran on the built-in writer instead of the model.
-     */
-    get fastTextModel(): string {
-      return str('OLLAMA_FAST_TEXT_MODEL', this.textModel)
-    },
-    /** Background painting. Empty disables the Ollama image transport. */
-    get imageModel(): string {
-      return str('OLLAMA_IMAGE_MODEL', DEFAULT_OLLAMA_IMAGE_MODEL)
-    },
-    /** Local generation is slower per token than a hosted API; budget for it. */
-    get timeoutMs(): number {
-      return int('OLLAMA_TIMEOUT_MS', 180000)
-    },
-    get imageTimeoutMs(): number {
-      return int('OLLAMA_IMAGE_TIMEOUT_MS', 600000)
-    },
-    /** Qwen3-14B ships a 40 960-token window; leave headroom under it. */
-    get contextTokens(): number {
-      return int('OLLAMA_CONTEXT_TOKENS', 16384)
-    },
-    get configured(): boolean {
-      return has('OLLAMA_BASE_URL')
     },
   },
 
@@ -516,26 +525,27 @@ export const config = {
     },
   },
 
-  /* ── Semantic retrieval · embeddings over the same Ollama daemon ─────────── */
+  /* ── Semantic retrieval · embeddings over the Google credential ─────────── */
   embeddings: {
     /**
-     * The embedding model. Rides the Ollama daemon that already serves text, so
-     * enabling semantic retrieval costs no new service, key or egress.
+     * The embedding model. Rides the same Google credential that serves Gemini
+     * text, so enabling semantic retrieval costs no new service or key.
      */
     get model(): string {
       return str('EMBEDDING_MODEL', DEFAULT_EMBEDDING_MODEL)
     },
     /**
-     * The vector width this model returns. Declared here for VALIDATION, not
-     * configuration: `schema.sql` fixes the column at vector(768) because
-     * pgvector needs a literal dimension for an HNSW index. A model returning
-     * anything else is rejected at write time with both numbers named, rather
+     * The vector width requested from the model AND asserted against the schema.
+     * `schema.sql` fixes the column at vector(768) because pgvector needs a
+     * literal dimension for an HNSW index, and `gemini-embedding-001` returns
+     * exactly this width when asked via `outputDimensionality`. A response of
+     * any other width is rejected at write time with both numbers named, rather
      * than allowed to fail later inside a distance operator.
      */
     get dimensions(): number {
       return int('EMBEDDING_DIMENSIONS', 768)
     },
-    /** How many texts go in one request. Ollama accepts an array on /api/embed. */
+    /** How many texts go in one `:batchEmbedContents` request. */
     get batchSize(): number {
       return int('EMBEDDING_BATCH_SIZE', 16)
     },
@@ -543,16 +553,17 @@ export const config = {
       return int('EMBEDDING_TIMEOUT_MS', 120000)
     },
     /**
-     * Whether semantic retrieval is on. Defaults to on WHEN a daemon exists,
-     * because the embedder is the same daemon the text model already uses — but
-     * `EMBEDDINGS_ENABLED=false` turns it off without unsetting OLLAMA_BASE_URL,
-     * which is what you want to isolate a retrieval problem.
+     * Whether semantic retrieval is on. Defaults to on WHEN a Google credential
+     * exists, because the embedder rides the same credential the text model
+     * already uses — but `EMBEDDINGS_ENABLED=false` turns it off without
+     * touching the credential, which is what you want to isolate a retrieval
+     * problem.
      */
     get enabled(): boolean {
       return flag('EMBEDDINGS_ENABLED', true)
     },
     get configured(): boolean {
-      return this.enabled && has('OLLAMA_BASE_URL')
+      return this.enabled && (has('GCP_API_KEY') || has('GCP_SERVICE_ACCOUNT_JSON'))
     },
   },
 
@@ -588,69 +599,6 @@ export const config = {
     },
   },
 
-  /* ── Scraping · Apify ───────────────────────────────────────────────────── */
-  apify: {
-    /**
-     * Hosted capture for the four platform lanes, and the only source for them.
-     * An actor reads the platform itself and returns real engagement; nothing
-     * else can state a reaction count, which is why there is no fallback.
-     * That is the whole reason this adapter exists: three of the four trend
-     * components are engagement maths, and they are inert without it.
-     *
-     * The open web has no actor and is served by Parallel. See `capture.ts`.
-     */
-    get token(): string {
-      return str('APIFY_API_TOKEN')
-    },
-    /**
-     * AN OPTIONAL PIN, NOT THE DEFAULT.
-     *
-     * Actor SELECTION now comes from the skill's curated index in
-     * `services/scraping/actor-index.ts`, keyed by platform AND intent, with
-     * the skill's `actors search` as the documented fallback. These keys exist
-     * so an operator can override that per platform without a deploy — which
-     * matters because an actor is a third-party artefact that can be
-     * deprecated or repriced without notice.
-     *
-     * BLANK IS THE NORMAL STATE and means "use the index". There are no
-     * defaults here any more: a default would silently re-pin the four lanes to
-     * whatever was true when this file was written, which is exactly the
-     * hardcoding the skill workflow replaced.
-     *
-     * A pinned actor is still schema-checked. `apify actors info --input` runs
-     * against it like any other, so pinning changes WHICH actor runs and never
-     * lets an assumed input shape through.
-     */
-    actorFor(platform: string): string {
-      // `~` is Apify's own owner separator and `/` is the CLI's; both are
-      // accepted so a slug copied from either console or docs works.
-      return str(`APIFY_${platform.toUpperCase()}_ACTOR`).replace('~', '/')
-    },
-    /** Every pin an operator has set, for the doctor report. */
-    get pinnedActors(): Array<{ platform: string; actorId: string }> {
-      const out: Array<{ platform: string; actorId: string }> = []
-      for (const platform of ['linkedin', 'instagram', 'x', 'facebook', 'youtube', 'tiktok']) {
-        const pinned = str(`APIFY_${platform.toUpperCase()}_ACTOR`).replace('~', '/')
-        if (pinned !== '') out.push({ platform, actorId: pinned })
-      }
-      return out
-    },
-    get runTimeoutMs(): number {
-      return int('APIFY_RUN_TIMEOUT_MS', 180000)
-    },
-    /**
-     * The ceiling the operator's knob cannot exceed. Actors bill per result, so
-     * a slider in Agent Studio must not be able to run up a bill beyond what the
-     * deployment allows — the knob asks, this decides.
-     */
-    get maxItemsPerKeyword(): number {
-      return int('APIFY_MAX_ITEMS_PER_KEYWORD', 50)
-    },
-    get configured(): boolean {
-      return has('APIFY_API_TOKEN')
-    },
-  },
-
   /* ── Whisper · local transcription sidecar (ADR-011) ────────────────────── */
   whisper: {
     /**
@@ -682,8 +630,7 @@ export const config = {
     /**
      * THE CEILING THE OPERATOR'S KNOB CANNOT EXCEED (ADR-011).
      *
-     * Exactly the `APIFY_MAX_ITEMS_PER_KEYWORD` arrangement: the knob asks,
-     * this decides. Transcription bills wall-clock time on this machine rather
+     * The knob asks, this decides. Transcription bills wall-clock time on this machine rather
      * than a vendor invoice, which makes it easier to spend carelessly, not
      * harder.
      */
@@ -744,82 +691,43 @@ function statusFor(configured: boolean, envKey: string): IntegrationStatus {
 export function integrationStatuses(): {
   parallel: IntegrationStatus
   gcp: IntegrationStatus
-  ollama: IntegrationStatus & { textModel: string; imageModel: string }
   embeddings: IntegrationStatus & { model: string; dimensions: number }
   mflux: IntegrationStatus & { model: string }
-  apify: IntegrationStatus & { platformLanes: 'apify' | 'unavailable' }
   zImage: IntegrationStatus
   text: IntegrationStatus & {
     provider: TextProvider
-    resolved: 'ollama' | 'gcp' | 'template'
+    resolved: 'gcp' | 'template'
     /** The ordered providers that will be tried, primary first. */
-    chain: Array<'ollama' | 'gcp'>
+    chain: Array<'gcp'>
     /** The provider standing behind the primary, or `null` when there is none. */
-    backup: 'ollama' | 'gcp' | null
+    backup: 'gcp' | null
   }
   assistant: IntegrationStatus & { provider: AssistantProvider }
 } {
   const gcpConfigured = config.gcp.configured
-  const ollamaConfigured = config.ollama.configured
 
   /*
-   * THE ORDERED PROVIDERS, mirroring `textChain()` exactly.
-   *
-   * Reported rather than inferred, because "which model wrote this" is the
-   * first question an operator asks about a caption — and with a chain the
-   * answer is no longer a single name. A named provider that is unreachable now
-   * degrades to the OTHER vendor before it degrades to the template writer, so
-   * reporting only the preference would describe a path that is not taken.
+   * ONE PROVIDER NOW. Ollama has been removed, so text generation is Gemini
+   * with the deterministic template writer as its only floor. There is no
+   * second model provider, so `chain` is at most one link and `backup` is
+   * always null — kept in the shape callers expect rather than removed.
    */
-  const preferred: 'ollama' | 'gcp' =
-    config.textProvider === 'gcp'
-      ? 'gcp'
-      : config.textProvider === 'ollama'
-        ? 'ollama'
-        : ollamaConfigured
-          ? 'ollama'
-          : 'gcp'
-
-  const configuredFor = { ollama: ollamaConfigured, gcp: gcpConfigured }
-  const backupName: 'ollama' | 'gcp' = preferred === 'ollama' ? 'gcp' : 'ollama'
-
-  const chain: Array<'ollama' | 'gcp'> = []
-  if (configuredFor[preferred]) chain.push(preferred)
-  if (configuredFor[backupName]) chain.push(backupName)
-
-  // Derived from the same two booleans as `chain` rather than read off its
-  // first element, which would narrow the union and lose 'template'.
-  const resolved: 'ollama' | 'gcp' | 'template' = configuredFor[preferred]
-    ? preferred
-    : configuredFor[backupName]
-      ? backupName
-      : 'template'
-
-  // A backup exists only when the primary is also configured. When the
-  // preferred provider is absent the other one IS the primary, and naming it a
-  // backup would report a degradation that did not happen.
-  const backup: 'ollama' | 'gcp' | null =
-    configuredFor[preferred] && configuredFor[backupName] ? backupName : null
+  const resolved: 'gcp' | 'template' = gcpConfigured ? 'gcp' : 'template'
+  const chain: Array<'gcp'> = gcpConfigured ? ['gcp'] : []
+  const backup: 'gcp' | null = null
 
   const assistantProvider = config.assistant.provider
-  const assistantConfigured =
-    (assistantProvider === 'gcp' && gcpConfigured) ||
-    (assistantProvider === 'ollama' && ollamaConfigured)
+  const assistantConfigured = assistantProvider === 'gcp' && gcpConfigured
 
   return {
     parallel: statusFor(config.parallel.configured, 'PARALLEL_API_KEY'),
     gcp: statusFor(gcpConfigured, 'GCP_API_KEY'),
-    ollama: {
-      ...statusFor(ollamaConfigured, 'OLLAMA_BASE_URL'),
-      textModel: config.ollama.textModel,
-      imageModel: config.ollama.imageModel,
-    },
     embeddings: {
       configured: config.embeddings.configured,
       reason: config.embeddings.configured
-        ? `Semantic retrieval on — ${config.embeddings.model} (${config.embeddings.dimensions} dims) on ${config.ollama.baseUrl}`
+        ? `Semantic retrieval on — ${config.embeddings.model} (${config.embeddings.dimensions} dims) on the Google credential`
         : config.embeddings.enabled
-          ? 'OLLAMA_BASE_URL is not set, so nothing can embed — retrieval is lexical only'
+          ? 'No Google credential set, so nothing can embed — retrieval is lexical only'
           : 'EMBEDDINGS_ENABLED is false — retrieval is lexical only',
       model: config.embeddings.model,
       dimensions: config.embeddings.dimensions,
@@ -827,14 +735,6 @@ export function integrationStatuses(): {
     mflux: {
       ...statusFor(config.mflux.configured, 'MFLUX_PYTHON'),
       model: config.mflux.model,
-    },
-    apify: {
-      ...statusFor(config.apify.configured, 'APIFY_API_TOKEN'),
-      // Which implementation the four platform lanes will actually bind, for
-      // the same reason `text.resolved` is reported: an operator should not
-      // have to work out the precedence, and "why does this post have no
-      // reaction count" is answered here rather than on the card.
-      platformLanes: config.apify.configured ? 'apify' : 'unavailable',
     },
     zImage: statusFor(config.zImage.configured, 'Z_IMAGE_ENDPOINT'),
     text: {
@@ -846,37 +746,20 @@ export function integrationStatuses(): {
       reason:
         resolved === 'template'
           ? 'No text provider configured — running on the deterministic template writer'
-          : [
-              resolved === 'ollama'
-                ? `Local model — ${config.ollama.textModel} on ${config.ollama.baseUrl}`
-                : `Hosted model — ${config.gcp.textModel}`,
-              // The backup is stated whenever there is one, because a chain of
-              // two degrades differently from a chain of one and an operator
-              // reading this should not have to work that out.
-              backup === null
-                ? 'no second provider is configured, so a failure here falls straight to the template writer'
-                : backup === 'ollama'
-                  ? `backed by the local model ${config.ollama.textModel} if it fails`
-                  : `backed by the hosted model ${config.gcp.textModel} if it fails`,
-            ].join(', '),
+          : `Hosted model — ${config.gcp.textModel}, with the deterministic template writer beneath it`,
     },
     assistant: {
       provider: assistantProvider,
       configured: assistantConfigured,
       reason:
         assistantProvider === 'deterministic'
-          ? 'ASSISTANT_MODEL_PROVIDER is not set to gcp or ollama — running on the deterministic parser and template narrator'
+          ? 'ASSISTANT_MODEL_PROVIDER is not set to gcp — running on the deterministic parser and template narrator'
           : assistantConfigured
             ? 'Configured'
-            : `ASSISTANT_MODEL_PROVIDER is ${assistantProvider} but ${
-                assistantProvider === 'ollama'
-                  ? 'OLLAMA_BASE_URL'
-                  : // Either credential satisfies `gcpConfigured`, so naming only
-                    // GCP_API_KEY sent an operator to create a key they did not
-                    // need — a service account is the path this deployment
-                    // actually uses, and it was not mentioned.
-                    'neither GCP_API_KEY nor GCP_SERVICE_ACCOUNT_JSON'
-              } is not set — falling back to the deterministic parser`,
+            : // Either credential satisfies `gcpConfigured`, so naming only
+              // GCP_API_KEY sent an operator to create a key they did not need —
+              // a service account is the path this deployment actually uses.
+              'ASSISTANT_MODEL_PROVIDER is gcp but neither GCP_API_KEY nor GCP_SERVICE_ACCOUNT_JSON is set — falling back to the deterministic parser',
     },
   }
 }
@@ -901,10 +784,9 @@ export function describeConfiguration(): string[] {
     `publish     ${config.core.publishMode}`,
     `timezone    ${config.core.tz}`,
     `assistant   ${s.assistant.provider}${s.assistant.configured ? '' : ' (deterministic fallback)'}`,
-    `text        ${s.text.resolved}${s.text.resolved === 'template' ? '' : ` · ${s.text.resolved === 'ollama' ? config.ollama.textModel : config.gcp.textModel}`}`,
-    `ollama      ${s.ollama.configured ? `live · ${config.ollama.baseUrl}` : 'not configured'}`,
+    `text        ${s.text.resolved}${s.text.resolved === 'template' ? '' : ` · ${config.gcp.textModel}`}`,
+    `embeddings  ${s.embeddings.configured ? `live · ${s.embeddings.model}` : 'lexical only'}`,
     `mflux       ${s.mflux.configured ? `live · ${s.mflux.model}` : 'not configured'}`,
-    `apify       ${s.apify.configured ? 'live · the four platform lanes carry engagement' : 'NOT CONFIGURED — the four platform lanes cannot run; no substitute is attempted'}`,
     `parallel    ${s.parallel.configured ? 'live' : 'not configured'}`,
     `gcp         ${s.gcp.configured ? 'live' : 'template writer'}`,
     `z-image     ${s.zImage.configured ? 'live' : 'not configured'}`,

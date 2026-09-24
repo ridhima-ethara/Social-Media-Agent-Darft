@@ -16,6 +16,7 @@ import { TOOL_BY_ID } from '@shared/tool-registry'
 import { API_BASE, api, currentSession, detectApi, runAgentPipeline, subscribeToEvents, signIn, signOut, SignInRefused } from './lib/api'
 import { applyInstruction as applyInstructionLocally, writeCaption } from './lib/ai'
 import { renderBrandSvg } from './lib/image-gen'
+import { isQueuedTopic, minutesOf, resolveHorizon } from './lib/calendar-horizon'
 import {
   confirmOnServer,
   runLocally,
@@ -188,7 +189,7 @@ function runReport(run: AgentRunState): [string, Toast['tone'], string?] {
   const wrote = run.persisted
   const headline =
     `${n('posts_captured')} posts captured · ${n('keywords_trending')} keywords trending · ` +
-    `${n('ideas_on_calendar')} on the calendar, ${n('ideas_in_suggestions')} in suggestions`
+    `${n('ideas_on_calendar')} topics on the calendar`
 
   if (!wrote) return [headline, 'warn', 'Nothing was written to the database, so the screen is unchanged.']
 
@@ -476,11 +477,35 @@ export interface Store extends Omit<StatePayload, 'assistant'> {
   moveIdea: (ideaId: string, date: string) => Promise<void>
   setIdeaTime: (ideaId: string, time: string) => Promise<void>
   setIdeaPlatform: (ideaId: string, platform: Platform) => Promise<void>
-  promoteIdea: (ideaId: string) => Promise<void>
-  /** Promote a suggestion onto the calendar AND land it on a specific day. */
-  scheduleIdeaOnDay: (ideaId: string, date: string) => Promise<void>
-  demoteIdea: (ideaId: string) => Promise<void>
-  duplicateIdea: (ideaId: string) => void
+  /**
+   * Generate Post — the complete post for ONE topic, on demand. An existing
+   * post is left untouched unless `regenerate` is set explicitly.
+   */
+  generatePost: (ideaId: string, opts?: { regenerate?: boolean }) => Promise<void>
+  /**
+   * The discovery-results popup — Topic + Date + Hashtags + Post URL + Platform.
+   * Opens by itself when a run finishes scraping and validation; reopenable from
+   * the scraping panel. Reads the latest run's recorded results.
+   */
+  discoveryResultsOpen: boolean
+  openDiscoveryResults: () => void
+  closeDiscoveryResults: () => void
+  /** True while a listener run is in flight. */
+  socialListenerRunning: boolean
+  /** Runs the Social Media Listener now (SocialFetch + Claude), then reloads state. */
+  runSocialListener: () => Promise<void>
+  /** True while a Glassdoor-only refresh is in flight. */
+  glassdoorRunning: boolean
+  reputationRunning: boolean
+  analyseReputation: () => Promise<void>
+  /** Re-reads Glassdoor (FetchLayer) only, keeping the platform data, then reloads state. */
+  refreshGlassdoor: () => Promise<void>
+  /** Topic ids with a Generate Post call in flight, so the button can say so. */
+  generatingPosts: string[]
+  /** Edit a queued topic — its line, date, time or platform. Never writes a post. */
+  editTopic: (ideaId: string, patch: { title?: string; date?: string; time?: string; platform?: Platform }) => Promise<void>
+  /** Reorder the Topic Queue: its dates are handed to the topics in this order. */
+  reorderTopicQueue: (ids: string[]) => Promise<void>
   deleteIdea: (ideaId: string) => Promise<void>
 
   approveIdea: (ideaId: string) => Promise<void>
@@ -946,6 +971,10 @@ export const useStore = create<Store>((set, get) => ({
       if (event.type === 'pipeline.finished') {
         void get().refreshState()
       }
+      // Scraping and validation are done: fetch the recorded results, then show them.
+      if (event.type === 'discovery.results') {
+        void get().refreshState().then(() => get().openDiscoveryResults())
+      }
     })
   },
 
@@ -976,7 +1005,7 @@ export const useStore = create<Store>((set, get) => ({
    *
    * Each agent's own summary becomes its activity line — the scrape reports what
    * it captured, the validation reports what it accepted, the calendar reports
-   * what took a slot and what went to suggestions. None of it is written here.
+   * which topics it placed and which posts are due. None of it is written here.
    */
   runAgentPipeline: async () => {
     if (get().agentRun.running) return
@@ -1087,7 +1116,7 @@ export const useStore = create<Store>((set, get) => ({
       },
       scrapeRunCount: get().scrapeRunCount + 1,
     })
-    get().setAgent('scraping', { status: 'running', current_task: 'Scanning LinkedIn' })
+    get().setAgent('scraping', { status: 'running', current_task: 'Claude Bridge · discovering platform trends' })
 
     // Connected runs narrate themselves: `item.scraped` and the per-lane
     // activity lines arrive over the event stream and are recorded as they
@@ -1166,15 +1195,16 @@ export const useStore = create<Store>((set, get) => ({
     const trending = st.keywordSignals.filter((k) => k.is_trending).length
     const validated = st.scraped.filter((i) => i.validation === 'validated').length
     const review = st.reviewQueue.filter((q) => !q.resolved).length
-    const primary = st.ideas.filter((i) => i.calendar_slot === 'primary').length
-    const suggestions = st.ideas.filter((i) => i.calendar_slot === 'suggestion').length
+    const primary = st.ideas.filter((i) => i.calendar_slot === 'primary' && i.status !== 'rejected').length
+    const horizon = resolveHorizon(st.calendarHorizon)
+    const queuedTopics = st.ideas.filter((i) => isQueuedTopic(i, horizon)).length
     const drafts = Object.keys(st.drafts).length
     const media = Object.keys(st.media).length
 
     const steps: Array<{ agent: AgentId; task: string; done: string; ms: number }> = [
       { agent: 'validation', task: 'Scoring candidates against the four-verdict gate', done: `${trending} keywords trending · ${validated} validated · ${review} for review`, ms: 1_100 },
       { agent: 'analysis', task: 'Consolidating the hashtag set', done: `${st.topHashtags.length} hashtags consolidated across ${trending} keywords`, ms: 800 },
-      { agent: 'calendar', task: 'Placing ideas on the week', done: `${primary} on the calendar · ${suggestions} in More suggestions`, ms: 900 },
+      { agent: 'calendar', task: 'Placing validated topics on the calendar', done: `${primary} on the calendar · ${queuedTopics} future topic(s) in the Topic Queue`, ms: 900 },
       { agent: 'caption', task: 'Writing grounded captions', done: `${drafts} drafts grounded in ${st.knowledge.filter((k) => k.active).length} entries`, ms: 900 },
       { agent: 'image', task: 'Rendering creatives with the brand layer', done: `${media} creatives rendered locally`, ms: 700 },
       { agent: 'review', task: 'Running the twenty-rule check', done: 'Twenty rules checked · nothing silently corrected', ms: 700 },
@@ -1521,6 +1551,9 @@ export const useStore = create<Store>((set, get) => ({
   ensureDraft: async (ideaId, platform) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
+    // A future topic holds no post until Generate Post is pressed for it —
+    // opening its card must not write one behind the operator's back.
+    if (isQueuedTopic(idea, resolveHorizon(get().calendarHorizon))) return
     const target = platform ?? idea.platform
     if (get().drafts[`${ideaId}|${target}`]) return
     await get().regenerateDraft(ideaId, target)
@@ -1762,6 +1795,8 @@ export const useStore = create<Store>((set, get) => ({
   ensureImage: async (ideaId, platform) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
+    // Same rule as the caption: a queued topic gets no creative until asked.
+    if (isQueuedTopic(idea, resolveHorizon(get().calendarHorizon))) return
     const target = platform ?? idea.platform
     if (get().media[`${ideaId}|${target}`]) return
     await get().regenerateImage(ideaId, target)
@@ -1993,6 +2028,8 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   setIdeaPlatform: async (ideaId, platform) => {
+    const before = get().ideas.find((i) => i.id === ideaId)
+    const topicOnly = before ? isQueuedTopic(before, resolveHorizon(get().calendarHorizon)) : false
     set({ ideas: get().ideas.map((i) => (i.id === ideaId ? { ...i, platform } : i)) })
     if (get().apiMode === 'connected') {
       try {
@@ -2001,167 +2038,176 @@ export const useStore = create<Store>((set, get) => ({
         await get().refreshState()
       }
     }
+    // A queued topic just changes platform; its post is written on demand.
+    if (topicOnly) {
+      await get().refreshState()
+      return
+    }
     await get().regenerateDraft(ideaId, platform)
     await get().regenerateImage(ideaId, platform)
   },
 
-  /** The per-platform cap, with the demotion always announced. */
-  promoteIdea: async (ideaId) => {
-    const idea = get().ideas.find((i) => i.id === ideaId)
-    if (!idea || idea.calendar_slot === 'primary') return
+  generatingPosts: [],
 
-    const cap = get().settings.topPerPlatform
-    const primaries = get()
-      .ideas.filter((i) => i.platform === idea.platform && i.calendar_slot === 'primary')
-      .sort((a, b) => b.priority_score - a.priority_score)
+  discoveryResultsOpen: false,
+  openDiscoveryResults: () => set({ discoveryResultsOpen: true }),
+  closeDiscoveryResults: () => set({ discoveryResultsOpen: false }),
 
-    let demoted: Idea | null = null
-    if (primaries.length >= cap) demoted = primaries[primaries.length - 1] ?? null
-
-    set({
-      ideas: get().ideas.map((i) => {
-        if (i.id === ideaId) return { ...i, calendar_slot: 'primary', calendarSlot: 'primary' }
-        if (demoted && i.id === demoted.id) return { ...i, calendar_slot: 'suggestion', calendarSlot: 'suggestion' }
-        return i
-      }),
-    })
-
-    if (get().apiMode === 'connected') {
-      try {
-        const result = await api.updateIdea(ideaId, { calendarSlot: 'primary' })
-        if (result.demoted) {
-          get().toast(`'${result.demoted.title}' moved to More suggestions to make room.`, 'neutral')
-        }
-        /*
-         * A PROMOTED SUGGESTION HAS TO BE WRITTEN.
-         *
-         * The queue tells the operator that SpongeBob drafts a post once it
-         * holds a slot, and nothing did: promotion set `calendar_slot` and
-         * left `status` at `suggested`. The server only moves an idea to
-         * `drafted` when a caption is generated, so the post sat placed and
-         * unwritten. Drafting it here keeps the promise the queue makes, and
-         * it is what moves the card out of the queue for good.
-         */
-        if (idea.status === 'suggested') await get().regenerateDraft(ideaId)
-        await get().refreshState()
-        return
-      } catch (error) {
-        get().toast(error instanceof Error ? error.message : 'That promotion did not save.', 'critical')
-        await get().refreshState()
-        return
-      }
+  glassdoorRunning: false,
+  refreshGlassdoor: async () => {
+    if (get().glassdoorRunning) return
+    if (get().apiMode !== 'connected') {
+      get().toast('Glassdoor is read on the API — start it to use FetchLayer.', 'warn')
+      return
     }
-
-    if (idea.status === 'suggested') void get().regenerateDraft(ideaId)
-    if (demoted) get().toast(`'${demoted.title}' moved to More suggestions to make room.`, 'neutral')
-    else get().toast(`'${idea.title}' promoted to the calendar.`, 'good')
+    set({ glassdoorRunning: true })
+    try {
+      const res = await api.refreshGlassdoor()
+      await get().refreshState()
+      if (!res.saved) get().toast(res.reason ?? 'Glassdoor was read but not saved.', 'warn')
+      else if (res.glassdoor.status === 'ok') get().toast('Glassdoor refreshed.', 'good')
+      else get().toast(res.glassdoor.reason ?? `Glassdoor: ${res.glassdoor.status}`, 'warn')
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'Glassdoor could not be read.', 'critical')
+    } finally {
+      set({ glassdoorRunning: false })
+    }
   },
 
-  /*
-   * Dropping a suggestion onto a calendar day: promote it to a primary slot AND
-   * land it on that day, in ONE PATCH. The server enforces the per-platform cap
-   * in the same call — promoting past it demotes the weakest primary and says
-   * so — so this cannot open a hole the calendar view would misread.
-   */
-  scheduleIdeaOnDay: async (ideaId, date) => {
+  reputationRunning: false,
+  analyseReputation: async () => {
+    if (get().reputationRunning) return
+    if (get().apiMode !== 'connected') {
+      get().toast('The reputation analysis runs on the API — start it to use Claude.', 'warn')
+      return
+    }
+    set({ reputationRunning: true })
+    try {
+      const { report } = await api.analyseReputation()
+      await get().refreshState()
+      const r = report.reputation
+      get().toast(
+        r ? `Reputation: ${r.overview.status.replace('_', ' ')}${r.overview.net_sentiment !== null ? ` · net ${r.overview.net_sentiment}` : ''}` : 'Reputation analysed.',
+        r?.by === 'claude' ? 'good' : 'warn',
+        r?.error ?? undefined,
+      )
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The reputation analysis could not run.', 'critical')
+    } finally {
+      set({ reputationRunning: false })
+    }
+  },
+
+  socialListenerRunning: false,
+  runSocialListener: async () => {
+    if (get().socialListenerRunning) return
+    if (get().apiMode !== 'connected') {
+      get().toast('The Social Media Listener runs on the API — start it to read SocialFetch.', 'warn')
+      return
+    }
+    set({ socialListenerRunning: true })
+    get().setAgent('analysis', { status: 'running', current_task: 'Social Media Listener · reading SocialFetch' })
+    try {
+      const { report } = await api.runSocialListener()
+      await get().refreshState()
+      get().toast(
+        `Social Media Listener · ${report.sample_size.posts} posts and ${report.sample_size.comments} comments analysed · ${report.credits_used} SocialFetch credit(s)`,
+        (report.warnings ?? []).length > 0 ? 'warn' : 'good',
+        report.warnings?.[0],
+      )
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The Social Media Listener could not run.', 'critical')
+    } finally {
+      set({ socialListenerRunning: false })
+      get().setAgent('analysis', { status: 'completed', current_task: 'Idle' })
+    }
+  },
+
+  generatePost: async (ideaId, opts = {}) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
-    // Already placed: this is a plain reschedule, not a promotion.
-    if (idea.calendar_slot === 'primary') {
-      await get().moveIdea(ideaId, date)
+    if (get().generatingPosts.includes(ideaId)) return
+    const hasPost = Boolean(get().drafts[`${ideaId}|${idea.platform}`] ?? idea.draft?.body)
+    // Never regenerate an existing post unless that was asked for explicitly.
+    if (hasPost && opts.regenerate !== true) {
+      get().toast(`'${idea.title}' already has a post. Use Regenerate in the editor to rewrite it.`, 'neutral')
       return
     }
 
-    const cap = get().settings.topPerPlatform
-    const primaries = get()
-      .ideas.filter((i) => i.platform === idea.platform && i.calendar_slot === 'primary')
-      .sort((a, b) => b.priority_score - a.priority_score)
-
-    let demoted: Idea | null = null
-    if (primaries.length >= cap) demoted = primaries[primaries.length - 1] ?? null
-
-    set({
-      ideas: get().ideas.map((i) => {
-        if (i.id === ideaId)
-          return { ...i, calendar_slot: 'primary', calendarSlot: 'primary', scheduled_date: date }
-        if (demoted && i.id === demoted.id)
-          return { ...i, calendar_slot: 'suggestion', calendarSlot: 'suggestion' }
-        return i
-      }),
-    })
-
-    if (get().apiMode === 'connected') {
-      try {
-        const result = await api.updateIdea(ideaId, { calendarSlot: 'primary', date })
-        if (result.demoted) {
-          get().toast(`'${result.demoted.title}' moved to More suggestions to make room.`, 'neutral')
-        }
-        /*
-         * A PROMOTED SUGGESTION HAS TO BE WRITTEN.
-         *
-         * The queue tells the operator that SpongeBob drafts a post once it
-         * holds a slot, and nothing did: promotion set `calendar_slot` and
-         * left `status` at `suggested`. The server only moves an idea to
-         * `drafted` when a caption is generated, so the post sat placed and
-         * unwritten. Drafting it here keeps the promise the queue makes, and
-         * it is what moves the card out of the queue for good.
-         */
-        if (idea.status === 'suggested') await get().regenerateDraft(ideaId)
+    set({ generatingPosts: [...get().generatingPosts, ideaId] })
+    get().setAgent('caption', { status: 'running', current_task: `Generating the post for “${idea.title.slice(0, 48)}”` })
+    try {
+      if (get().apiMode === 'connected') {
+        const result = await api.generatePost(ideaId, opts.regenerate === true ? { regenerate: true } : {})
         await get().refreshState()
-        return
-      } catch (error) {
-        get().toast(error instanceof Error ? error.message : 'That schedule did not save.', 'critical')
-        await get().refreshState()
-        return
+        get().toast(result.generated ? `Post generated for '${idea.title}'.` : result.reason, result.generated ? 'good' : 'neutral')
+      } else {
+        // Standalone: the local writer and the brand renderer, labelled as such.
+        await get().regenerateDraft(ideaId, idea.platform)
+        await get().regenerateImage(ideaId, idea.platform)
+        get().toast(`Post written locally for '${idea.title}'. Start the API to generate it with the agents.`, 'warn')
       }
+    } catch (error) {
+      get().toast(error instanceof Error ? error.message : 'The post could not be generated.', 'critical')
+      await get().refreshState()
+    } finally {
+      set({ generatingPosts: get().generatingPosts.filter((id) => id !== ideaId) })
+      get().setAgent('caption', { status: 'completed', current_task: 'Idle' })
     }
-
-    if (idea.status === 'suggested') void get().regenerateDraft(ideaId)
-    if (demoted) get().toast(`'${demoted.title}' moved to More suggestions to make room.`, 'neutral')
-    else get().toast(`'${idea.title}' scheduled on the calendar.`, 'good')
   },
 
-  demoteIdea: async (ideaId) => {
+  editTopic: async (ideaId, patch) => {
     const idea = get().ideas.find((i) => i.id === ideaId)
     if (!idea) return
     set({
       ideas: get().ideas.map((i) =>
-        i.id === ideaId ? { ...i, calendar_slot: 'suggestion', calendarSlot: 'suggestion' } : i,
+        i.id === ideaId
+          ? {
+              ...i,
+              ...(patch.title === undefined ? {} : { title: patch.title }),
+              ...(patch.date === undefined ? {} : { scheduled_date: patch.date }),
+              ...(patch.time === undefined ? {} : { scheduled_time: patch.time }),
+              ...(patch.platform === undefined ? {} : { platform: patch.platform }),
+            }
+          : i,
       ),
     })
     if (get().apiMode === 'connected') {
       try {
-        await api.updateIdea(ideaId, { calendarSlot: 'suggestion' })
+        await api.updateIdea(ideaId, patch)
         await get().refreshState()
-      } catch {
+      } catch (error) {
+        get().toast(error instanceof Error ? error.message : 'That edit did not save.', 'critical')
         await get().refreshState()
       }
     }
-    get().toast(`'${idea.title}' moved to More suggestions.`, 'neutral')
   },
 
-  duplicateIdea: (ideaId) => {
-    const idea = get().ideas.find((i) => i.id === ideaId)
-    if (!idea) return
-    const copy: Idea = {
-      ...idea,
-      id: nid('idea'),
-      title: `${idea.title} (copy)`,
-      status: 'suggested',
-      calendar_slot: 'suggestion',
-      calendarSlot: 'suggestion',
-      platform_rank: null,
-      platformRank: null,
-      draft: null,
-      media: null,
-      marketing_approved_by: null,
-      marketing_approved_at: null,
-      leadership_decision: null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+  reorderTopicQueue: async (ids) => {
+    // The queue's own dates, handed out again in the new order — the same rule
+    // the server applies, so the optimistic view matches what it will store.
+    const topics = ids
+      .map((id) => get().ideas.find((i) => i.id === id))
+      .filter((i): i is Idea => i !== undefined)
+    const slots = topics
+      .map((t) => ({ date: t.scheduled_date, time: t.scheduled_time }))
+      .sort((a, b) => a.date.localeCompare(b.date) || minutesOf(a.time) - minutesOf(b.time))
+    const next = new Map(topics.map((t, index) => [t.id, slots[index]]))
+    set({
+      ideas: get().ideas.map((i) => {
+        const slot = next.get(i.id)
+        return slot ? { ...i, scheduled_date: slot.date, scheduled_time: slot.time } : i
+      }),
+    })
+    if (get().apiMode === 'connected') {
+      try {
+        await api.reorderTopicQueue(ids)
+        await get().refreshState()
+      } catch (error) {
+        get().toast(error instanceof Error ? error.message : 'That reorder did not save.', 'critical')
+        await get().refreshState()
+      }
     }
-    set({ ideas: [...get().ideas, copy] })
-    get().toast('Duplicated into More suggestions.', 'neutral')
   },
 
   deleteIdea: async (ideaId) => {

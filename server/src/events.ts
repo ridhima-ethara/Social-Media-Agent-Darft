@@ -27,6 +27,8 @@ export const PIPELINE_EVENT_TYPES = [
   'item.scraped',
   'item.held',
   'item.validated',
+  /** Scraping and validation are done: the Topic + Date + Hashtags + Post URL + Platform results. */
+  'discovery.results',
   'hashtag.captured',
   'hashtag.validated',
   'keyword.ranked',

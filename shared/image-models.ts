@@ -19,16 +19,9 @@ export type ImageModelId = 'brand-svg' | 'gcp-imagen' | 'gcp-gemini-image' | 'z-
    The counterpart to the block in `text-models.ts`, for the same reason and with
    the same rule: the tag named here must exist in the registry it addresses.
 
-   These previously disagreed in a way that mattered. `config.ts` defaulted the
-   Ollama painter to `x/flux2-klein:9b` and `painter.py` to the same — a tag that
-   is not installed — while the working tag is `:latest`. And `MFLUX_MODEL` was
-   `flux2-klein-9b` in `config.ts` against `flux2-klein-4b` in `painter.py` and
-   `server/.env.example`. 4b is the correct default: it is Apache-2.0 and ungated,
-   where 9b is gated and cannot be fetched without accepting terms.
+   `MFLUX_MODEL` is `flux2-klein-4b`: Apache-2.0 and ungated, where 9b is gated
+   and cannot be fetched without accepting terms.
    ═══════════════════════════════════════════════════════════════════════════ */
-
-/** The background painter served over the Ollama daemon. */
-export const DEFAULT_OLLAMA_IMAGE_MODEL = 'x/flux2-klein:latest'
 
 /** The hosted painter, used when a Google credential is present. */
 export const DEFAULT_GCP_IMAGE_MODEL = 'imagen-4.0-generate-001'
@@ -123,8 +116,8 @@ export const IMAGE_MODELS: ImageModelSpec[] = [
     summary:
       'Open-weight background painter running entirely on this machine. Distilled to four steps, so it is quick for a diffusion model, and nothing leaves the host.',
     licence: 'Apache-2.0 (4B) · non-commercial (9B) · local weights',
-    // The Ollama transport is preferred; MFLUX_PYTHON is what actually paints
-    // today, because Ollama will not serve image models over HTTP yet.
+    // MFLUX_PYTHON is what paints: FLUX.2 Klein runs through the mflux (MLX)
+    // subprocess on this machine.
     envKey: 'MFLUX_PYTHON',
     paintsBackground: true,
     drawsBrandLayerLocally: true,

@@ -18,11 +18,16 @@ import type {
 } from '../../shared/agent-contract'
 import { AGENT_BY_ID, SKILL_BY_ID } from '../../shared/agent-registry'
 import { canvasFor, canvasKey, type ImageModelId } from '../../shared/image-models'
+import { isWithinPostReady, resolveCalendarHorizon } from './calendar-horizon'
 import { config } from './config'
 import { publish, publishActivity } from './events'
+import { buildDiscoveryResults } from './discovery-results'
 import {
   appendIdeaFeedback,
   countPipelineRuns,
+  mergePipelineRunSummary,
+  recordDiscoveredHashtags,
+  type DiscoveredHashtag,
   finishKnowledgeBuild,
   finishPipelineRun,
   getDraft,
@@ -69,7 +74,7 @@ import type {
   ReviewPayload,
   ScoredHook,
 } from './agents/skills/index'
-import { inPlanningWindow, PLATFORM_LABEL } from './agents/corpus'
+import { PLATFORM_LABEL } from './agents/corpus'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    TRIGGERS
@@ -103,10 +108,11 @@ export interface PipelineSummary {
   opportunities: number
   ideas: number
   primaryIdeas: number
-  suggestionIdeas: number
+  /** Placed topics dated after the post-ready horizon — in the Topic Queue, no post yet. */
+  topicsQueued: number
   source: 'live' | 'fixture'
   fallbackReasons: string[]
-  /** Posts handed to the Content and Image Agents because they took a slot. */
+  /** Post-ready topics (today, and tomorrow when required) handed to the Content and Image Agents. */
   written: number
   writeFailed: number
 }
@@ -181,11 +187,22 @@ export async function runDiscoveryPipeline(
   /* ── ① Scraping ─────────────────────────────────────────────────────────── */
   const scraping = await runAgent<PipelinePayload>('scraping', seed, {
     ...shared,
-    currentTask: 'Scanning LinkedIn',
+    currentTask: 'Claude Bridge · discovering trends on LinkedIn, Instagram, Facebook and X',
     inputCount: 0,
   })
 
   if (scraping.status === 'failed') {
+    // Nothing to validate, but the operator is still shown the result — an
+    // empty one, with each platform's reason already on the run's summary.
+    const empty = buildDiscoveryResults(run.id, {}, new Date(), config.core.tz)
+    await mergePipelineRunSummary(run.id, { discoveryResults: empty })
+    publish({
+      type: 'discovery.results',
+      runId: run.id,
+      ...(turnId === null ? {} : { turnId }),
+      message: 'Discovery found no post to validate',
+      data: { total: 0 },
+    })
     // A critical failure finishes the run failed with NO partial hand-off.
     return failRun(run.id, scraping.error ?? `${AGENT_BY_ID.scraping.name} failed.`, emptySummary(), turnId)
   }
@@ -244,6 +261,76 @@ export async function runDiscoveryPipeline(
   await persistKeywordSignals(workspaceId, run.id, afterValidation)
   await materialiseReviewQueue(workspaceId, afterValidation, itemIdByExternal, hashtagIdByTag)
 
+  /*
+   * NEW HASHTAGS → KNOWLEDGE BASE.
+   *
+   * Hashtags on VALIDATED posts that Ethara does not track yet (the bridge
+   * flags them `newHashtags`) are learned as "Discovered Hashtag" entries, so
+   * the next run searches them too. Only validated posts count — a tag seen on
+   * a rejected post is not evidence of anything. Failure never fails the run.
+   */
+  try {
+    const scrapeKnobs = await resolveSkillConfig(workspaceId, 'scraping.linkedin.fetch')
+    if (scrapeKnobs.learnNewHashtags !== false) {
+      const cap = Math.max(0, Number(scrapeKnobs.maxNewHashtagsPerRun ?? 10))
+      const validatedUrls = new Set((afterValidation.posts ?? []).filter((p) => p.validation === 'validated').map((p) => p.url))
+      const byTag = new Map<string, DiscoveredHashtag & { count: number }>()
+      for (const t of afterValidation.platformTrends ?? []) {
+        for (const p of t.posts) {
+          if (!validatedUrls.has(p.url)) continue
+          for (const tag of t.newHashtags) {
+            const key = tag.toLowerCase()
+            const entry = byTag.get(key) ?? { display: tag, urls: [], platforms: [], topics: [], count: 0 }
+            if (!entry.urls.some((u) => u.url === p.url)) entry.urls.push({ url: p.url, title: t.trend, publishedAt: p.publishedAt })
+            if (!entry.platforms.includes(t.platform)) entry.platforms.push(t.platform)
+            if (!entry.topics.includes(t.trend)) entry.topics.push(t.trend)
+            entry.count += 1
+            byTag.set(key, entry)
+          }
+        }
+      }
+      const best = [...byTag.values()].sort((a, b) => b.count - a.count).slice(0, cap)
+      if (best.length > 0) {
+        const learned = await recordDiscoveredHashtags(workspaceId, best)
+        await mergePipelineRunSummary(run.id, { learnedHashtags: { written: learned.written, merged: learned.merged } })
+        await insertActivity({
+          workspaceId,
+          agentId: 'scraping',
+          message:
+            `New hashtags learned into the Knowledge Base: ${learned.written.join(' ') || 'none new'}` +
+            (learned.merged.length > 0 ? ` · seen again: ${learned.merged.join(' ')}` : '') +
+            ' — the next run searches them too.',
+          status: 'ok',
+        })
+      }
+    }
+  } catch (err) {
+    await insertActivity({
+      workspaceId,
+      agentId: 'scraping',
+      message: `Could not learn new hashtags into the Knowledge Base: ${err instanceof Error ? err.message : String(err)}`,
+      status: 'warn',
+    })
+  }
+
+  /*
+   * SCRAPING AND VALIDATION ARE DONE — SHOW WHAT WAS FOUND.
+   *
+   * Topic + Date + Hashtags + Post URL + Platform, one row per captured post
+   * with the Validation Agent's verdict beside it, newest first. Recorded on the
+   * run so it can be reopened, and announced so the app opens it now, while the
+   * rest of the pipeline carries on.
+   */
+  const discoveryResults = buildDiscoveryResults(run.id, afterValidation, new Date(), config.core.tz)
+  await mergePipelineRunSummary(run.id, { discoveryResults })
+  publish({
+    type: 'discovery.results',
+    runId: run.id,
+    ...(turnId === null ? {} : { turnId }),
+    message: `Discovery results · ${discoveryResults.counts.total} post(s), ${discoveryResults.counts.validated} validated`,
+    data: { total: discoveryResults.counts.total, validated: discoveryResults.counts.validated },
+  })
+
   /* ── ③ Analysis ─────────────────────────────────────────────────────────── */
   const analysis = await runAgent<PipelinePayload>('analysis', afterValidation, {
     ...shared,
@@ -299,27 +386,23 @@ export async function runDiscoveryPipeline(
     turnId,
   )
 
-  /* ── ⑤ Write what took a slot ────────────────────────────────────────────
+  /* ── ⑤ Write what is due ─────────────────────────────────────────────────
    *
-   * THE STAGE THAT MAKES THE CALENDAR APPEAR.
+   * TODAY → POST READY · TOMORROW → POST READY IF REQUIRED · LATER → TOPIC.
    *
-   * The grid deliberately renders only posts that have actually been written —
-   * `calendar_slot === 'primary' && status !== 'suggested'` — because a placed
-   * but unwritten idea sitting beside a finished post looks equally ready to
-   * publish, and once twenty-one of twenty-nine cards were in that state.
+   * The Calendar Agent places validated topics on dates; it writes nothing. The
+   * pipeline then hands ONLY the post-ready topics — today's, and tomorrow's
+   * when the posting schedule requires it (`shared/calendar-horizon.ts`) — to
+   * the Content and Image Agents. Every later date keeps its topic in the
+   * Topic Queue with no caption, image or hashtags, until someone presses
+   * Generate Post for it. Writing the whole week up front spent two model calls
+   * a post on topics that later runs routinely displaced.
    *
-   * Nothing, however, closed the gap. Planning ended at `calendar`, and drafting
-   * was a per-card action an operator had to find, so a complete and correct run
-   * left a calendar that rendered empty. Three agents looked broken — calendar,
-   * caption, image — for one missing hand-off.
-   *
-   * So the pipeline now walks the graph one stage further and hands each newly
-   * placed post to the Content and Image Agents. Bounded by a declared knob,
-   * because each post is two model calls; a failure is reported per post and
-   * never fails the run, because a written calendar with four of five posts is
-   * worth more than a failed pipeline.
+   * Bounded by a declared knob; a failure is reported per post and never fails
+   * the run, because a written today with one post missing is worth more than a
+   * failed pipeline.
    */
-  const { written, writeFailed } = await writeCalendarBacklog({ workspaceId, trigger, turnId, paceMs, configOverrides })
+  const { written, writeFailed, topicsQueued } = await writeCalendarBacklog({ workspaceId, trigger, turnId, paceMs, configOverrides })
 
   /* ── Finish ─────────────────────────────────────────────────────────────── */
   const buckets = final.buckets ?? { validated: 0, needs_review: 0, duplicate: 0, rejected: 0 }
@@ -338,7 +421,7 @@ export async function runDiscoveryPipeline(
     opportunities: final.opportunities?.length ?? 0,
     ideas: ideas.length,
     primaryIdeas: ideas.filter((i) => i.calendarSlot === 'primary').length,
-    suggestionIdeas: ideas.filter((i) => i.calendarSlot === 'suggestion').length,
+    topicsQueued,
     source: final.captureSource ?? 'fixture',
     fallbackReasons: final.captureFallbackReasons ?? [],
     written,
@@ -393,7 +476,7 @@ function emptySummary(): PipelineSummary {
     opportunities: 0,
     ideas: 0,
     primaryIdeas: 0,
-    suggestionIdeas: 0,
+    topicsQueued: 0,
     source: 'fixture',
     fallbackReasons: [],
     written: 0,
@@ -402,7 +485,9 @@ function emptySummary(): PipelineSummary {
 }
 
 /**
- * Write every calendar post that holds a slot but has no caption yet.
+ * Write every POST-READY calendar topic that has no post yet — today's, and
+ * tomorrow's when the posting schedule requires it. Later topics are counted
+ * as queued and left alone.
  *
  * The pipeline calls this as its last stage. It is also called once when the
  * API starts, because a run cut off mid-write — a deploy, a crash, a restart —
@@ -421,7 +506,7 @@ let backlogInFlight: Promise<unknown> | null = null
 
 export async function writeCalendarBacklog(
   ctx: OrchestratorContext,
-): Promise<{ written: number; writeFailed: number }> {
+): Promise<BacklogResult> {
   while (backlogInFlight !== null) await backlogInFlight.catch(() => undefined)
   const pending = writeCalendarBacklogNow(ctx)
   backlogInFlight = pending
@@ -432,44 +517,45 @@ export async function writeCalendarBacklog(
   }
 }
 
-async function writeCalendarBacklogNow(
-  ctx: OrchestratorContext,
-): Promise<{ written: number; writeFailed: number }> {
+interface BacklogResult {
+  written: number
+  writeFailed: number
+  /** Placed topics after the post-ready horizon, waiting in the Topic Queue. */
+  topicsQueued: number
+}
+
+async function writeCalendarBacklogNow(ctx: OrchestratorContext): Promise<BacklogResult> {
   const { workspaceId, trigger, turnId = null, paceMs = 0, configOverrides = {} } = ctx
   const rankConfig = await resolveSkillConfig(workspaceId, 'calendar.rank.select')
   const autoWrite = rankConfig.autoWriteCalendar !== false
-  const maxWrites = Math.max(0, Number(rankConfig.maxAutoWrites ?? 5))
-  const planningWeeks = Math.max(1, Number(rankConfig.planningWeeks ?? 2))
-  // Only the first weeks are written now; the rest of the plan is placed and
-  // waits. Never wider than the plan itself.
-  const writeWeeks = Math.min(planningWeeks, Math.max(1, Number(rankConfig.autoWriteWeeks ?? 1)))
+  const maxWrites = Math.max(0, Number(rankConfig.maxAutoWrites ?? 8))
+  const horizon = await resolveCalendarHorizon(workspaceId)
 
   let written = 0
   let writeFailed = 0
 
-  if (autoWrite && maxWrites > 0) {
-    const onCalendar = await listIdeas(workspaceId, { limit: 400 })
-    const unwritten = onCalendar
-      .filter((row) => row.calendar_slot === 'primary')
-      .filter((row) => row.status === 'suggested')
-      // Only inside the planning window: a post dated past it is re-dated by the
-      // next run's rank selection, not written where the calendar never shows it.
-      .filter((row) => inPlanningWindow(String(row.scheduled_date ?? ''), planningWeeks * 7))
-    /*
-     * THIS WEEK IS WRITTEN; NEXT WEEK WAITS.
-     *
-     * Only posts in the first `autoWriteWeeks` weeks are written and
-     * illustrated now. Later weeks keep their slots as "No caption yet" and are
-     * written when their week arrives — the next run, or the backlog pass when
-     * the API starts — or when someone drafts one from its card. Nothing here
-     * rewrites a post that already has a caption: `status === 'suggested'` and
-     * the draft check below both guard that.
-     */
-    const pending = unwritten
-      .filter((row) => inPlanningWindow(String(row.scheduled_date ?? ''), writeWeeks * 7))
-      .sort((a, b) => Number(b.priority_score ?? 0) - Number(a.priority_score ?? 0))
-    const queuedLater = unwritten.length - pending.length
+  const onCalendar = await listIdeas(workspaceId, { limit: 400 })
+  const unwritten = onCalendar
+    .filter((row) => row.calendar_slot === 'primary')
+    .filter((row) => row.status === 'suggested')
+  /*
+   * ONLY THE POST-READY DATES ARE WRITTEN.
+   *
+   * Today's topic, and tomorrow's when `postReadyHorizon` includes it and
+   * tomorrow is a posting day. Everything later stays a topic — no caption, no
+   * image, no hashtags — in the Topic Queue. Nothing here rewrites a post that
+   * already exists: `status === 'suggested'` and the draft check below both
+   * guard that.
+   */
+  const pending = unwritten
+    .filter((row) => isWithinPostReady(String(row.scheduled_date ?? ''), horizon))
+    .sort((a, b) => Number(b.priority_score ?? 0) - Number(a.priority_score ?? 0))
+  const topicsQueued = unwritten.filter((row) => {
+    const date = String(row.scheduled_date ?? '').slice(0, 10)
+    return date > horizon.today && !isWithinPostReady(date, horizon)
+  }).length
 
+  if (autoWrite && maxWrites > 0) {
     const queue: IdeaRow[] = []
     for (const row of pending) {
       if (queue.length >= maxWrites) break
@@ -483,17 +569,8 @@ async function writeCalendarBacklogNow(
       await insertActivity({
         workspaceId,
         agentId: 'caption',
-        message: `Writing ${queue.length} post(s) for this week`,
+        message: `Writing ${queue.length} post-ready post(s) for ${horizon.postReadyDates.join(' and ')}`,
         status: 'running',
-      })
-    }
-    // Said out loud, so a placed-but-unwritten card reads as queued, not failed.
-    if (queuedLater > 0) {
-      await insertActivity({
-        workspaceId,
-        agentId: 'caption',
-        message: `${queuedLater} post(s) for next week are placed and queued — their captions are written when that week arrives, or from the card`,
-        status: 'ok',
       })
     }
 
@@ -531,8 +608,8 @@ async function writeCalendarBacklogNow(
         workspaceId,
         agentId: 'image',
         message:
-          `${written} post(s) written and illustrated, now on the calendar` +
-          (writeFailed > 0 ? ` · ${writeFailed} could not be written and keep their slot unwritten` : ''),
+          `${written} post-ready post(s) written and illustrated` +
+          (writeFailed > 0 ? ` · ${writeFailed} could not be written and keep their topic` : ''),
         status: writeFailed > 0 ? 'warn' : 'ok',
       })
     }
@@ -542,15 +619,15 @@ async function writeCalendarBacklogNow(
      *
      * A post is written in two steps — caption, then image — and a run cut off
      * between them leaves a written post with no creative, which nothing above
-     * picks up because it is no longer `suggested`. Within the weeks being
-     * written, each such post gets its image now. Never re-renders an existing
-     * one: only a post with NO media asset qualifies.
+     * picks up because it is no longer `suggested`. On the post-ready dates each
+     * such post gets its image now. Never re-renders an existing one: only a
+     * post with NO media asset qualifies.
      */
     const writtenPosts = onCalendar
       .filter((row) => row.calendar_slot === 'primary')
       .filter((row) => row.status !== 'suggested' && row.status !== 'rejected' && row.status !== 'published')
       .filter((row) => row.content_format !== 'short_form_script')
-      .filter((row) => inPlanningWindow(String(row.scheduled_date ?? ''), writeWeeks * 7))
+      .filter((row) => isWithinPostReady(String(row.scheduled_date ?? ''), horizon))
     let illustrated = 0
     for (const row of writtenPosts) {
       const platform = row.platform as Platform
@@ -579,7 +656,17 @@ async function writeCalendarBacklogNow(
     }
   }
 
-  return { written, writeFailed }
+  // Said out loud, so a topic with no post reads as queued by design, not failed.
+  if (topicsQueued > 0) {
+    await insertActivity({
+      workspaceId,
+      agentId: 'calendar',
+      message: `${topicsQueued} future topic(s) in the Topic Queue — no post is written for them until Generate Post is pressed`,
+      status: 'ok',
+    })
+  }
+
+  return { written, writeFailed, topicsQueued }
 }
 
 async function failRun(
@@ -807,6 +894,8 @@ async function persistPlannedIdeas(
 ): Promise<Array<{ id: string; title: string; platform: Platform; slot: CalendarSlot; rank: number | null }>> {
   const ideas = payload.ideas ?? []
   if (ideas.length === 0) return []
+  // Plan keys (`idea-1`…) repeat every run; the run tag makes a plan group unique.
+  const runTag = payload.runId || new Date().toISOString()
 
   const written = await persistIdeas(
     workspaceId,
@@ -834,6 +923,9 @@ async function persistPlannedIdeas(
         slotReasons: idea.slotReasons,
         conflicts: idea.conflicts,
         ...(idea.variantOf ? { variantOf: idea.variantOf } : {}),
+        // The plan group ties a topic's per-platform entries together; the Meta twin shares one post.
+        planGroup: `${runTag}:${idea.variantOf ?? idea.key}`,
+        ...(idea.sharesPostWith ? { sharesPostWith: idea.sharesPostWith } : {}),
       },
       isNewTrend: idea.isNewTrend,
     })),
@@ -1029,6 +1121,61 @@ export interface MediaResult {
 }
 
 /**
+ * GENERATE POST — the Topic Queue's on-demand action.
+ *
+ * A future calendar date holds a validated topic and nothing else. This writes
+ * the complete post — caption, hashtags and creative — for that ONE topic, and
+ * nothing for any other. It never overwrites: a topic that already has a post
+ * returns that post untouched unless `regenerate` is set, because a rewrite is
+ * a decision a person makes explicitly, not a side effect of pressing a button
+ * twice.
+ */
+export interface GeneratePostResult {
+  ideaId: string
+  platform: Platform
+  /** False when the topic already had a post and `regenerate` was not asked for. */
+  generated: boolean
+  reason: string
+  draft: DraftResult | null
+}
+
+export async function generatePostForTopic(
+  ctx: OrchestratorContext & { ideaId: string; regenerate?: boolean },
+): Promise<GeneratePostResult> {
+  const idea = await getIdea(ctx.workspaceId, ctx.ideaId)
+  if (!idea) throw new Error('No such topic.')
+  if (idea.status === 'rejected') throw new Error(`“${idea.title}” was withdrawn from the calendar; restore it before generating a post.`)
+  if (idea.status === 'published') throw new Error(`“${idea.title}” is already published — a post is never rewritten after it went out.`)
+  const platform = idea.platform
+
+  const existing = await getDraft(idea.id, platform)
+  if (existing && ctx.regenerate !== true) {
+    return {
+      ideaId: idea.id,
+      platform,
+      generated: false,
+      reason: `“${idea.title}” already has a post (revision ${existing.revision}); nothing was regenerated. Ask to regenerate it to rewrite it.`,
+      draft: null,
+    }
+  }
+
+  const draft = await generateDraft({ ...ctx, ideaId: idea.id, platform, withImage: true })
+  await insertActivity({
+    workspaceId: ctx.workspaceId,
+    agentId: 'caption',
+    message: `${existing ? 'Regenerated' : 'Generated'} the ${PLATFORM_LABEL[platform]} post for the topic “${idea.title.slice(0, 60)}” on ${String(idea.scheduled_date).slice(0, 10)}`,
+    status: 'ok',
+  })
+  return {
+    ideaId: idea.id,
+    platform,
+    generated: true,
+    reason: existing ? `Regenerated as revision ${draft.revision}, as asked.` : 'Post generated for this topic only.',
+    draft,
+  }
+}
+
+/**
  * Caption → image, with the whole caption payload passed into the image agent so
  * the creative is drawn from what actually shipped rather than from the title.
  */
@@ -1068,6 +1215,21 @@ export async function generateDraft(
     'caption.hook.generate',
     'caption.hook.score',
   ]
+
+  /*
+   * FACEBOOK ↔ INSTAGRAM SHARE ONE POST.
+   *
+   * The calendar plans a topic's Facebook and Instagram entries as twins
+   * (`analysis.sharesPostWith`). When the twin is already written, this entry
+   * takes the same caption instead of writing a second one; its own image is
+   * still rendered at its own platform's size.
+   */
+  const twinPlatform = analysis.sharesPostWith
+  if (!shortForm && (twinPlatform === 'facebook' || twinPlatform === 'instagram') && twinPlatform !== platform) {
+    const twin = await findPlanTwin(workspaceId, idea, twinPlatform)
+    const twinDraft = twin ? await getDraft(twin.id, twinPlatform) : null
+    if (twin && twinDraft) return shareTwinDraft(ctx, idea, platform, twin, twinDraft)
+  }
 
   const caption = await runAgent<CaptionPayload>(
     'caption',
@@ -1264,6 +1426,69 @@ export async function generateDraft(
       status: s.status,
       durationMs: s.durationMs,
     })),
+  }
+}
+
+/** The same topic's entry on `platform`, planned in the same group on the same day — the Meta twin. */
+async function findPlanTwin(workspaceId: string, idea: IdeaRow, platform: Platform): Promise<IdeaRow | null> {
+  const group = (idea.analysis as Record<string, unknown>).planGroup
+  if (typeof group !== 'string' || group === '') return null
+  const rows = await listIdeas(workspaceId, { platform, date: String(idea.scheduled_date ?? '').slice(0, 10), limit: 100 })
+  return rows.find((r) => r.id !== idea.id && (r.analysis as Record<string, unknown>).planGroup === group) ?? null
+}
+
+/** Writes this entry's draft as its twin's caption, then renders its own image. */
+async function shareTwinDraft(
+  ctx: OrchestratorContext & { ideaId: string; platform?: Platform; withImage?: boolean },
+  idea: IdeaRow,
+  platform: Platform,
+  twin: IdeaRow,
+  twinDraft: NonNullable<Awaited<ReturnType<typeof getDraft>>>,
+): Promise<DraftResult> {
+  const { workspaceId, turnId = null } = ctx
+  const body = twinDraft.body
+  const source = twinDraft.source === 'live' ? 'live' : 'fixture'
+  const model = twinDraft.model ?? 'shared'
+  if ((idea.status === 'suggested' || idea.status === 'drafted') && twin.title !== idea.title) {
+    await updateIdea(workspaceId, idea.id, { title: twin.title })
+  }
+  const draft = await upsertDraft({ ideaId: idea.id, platform, body, generatedBy: 'caption', model, source, contentFormat: idea.content_format })
+  await appendIdeaFeedback(workspaceId, idea.id, {
+    instruction: null,
+    note: `Shares one post with the ${PLATFORM_LABEL[twin.platform as Platform]} entry — same caption.`,
+    platform,
+    revision: draft?.revision ?? 1,
+    target: 'caption',
+    body,
+  })
+  await insertLineage({ workspaceId, fromType: 'content_idea', fromId: twin.id, toType: 'draft', toId: draft?.id ?? idea.id, agentId: 'caption' })
+  if (idea.status === 'suggested') await updateIdea(workspaceId, idea.id, { status: 'drafted' })
+  await insertActivity({
+    workspaceId,
+    agentId: 'caption',
+    message: `${PLATFORM_LABEL[platform]} post shares the ${PLATFORM_LABEL[twin.platform as Platform]} caption for “${twin.title.slice(0, 60)}”`,
+    status: 'ok',
+  })
+  publish({
+    type: 'draft.generated',
+    agentId: 'caption',
+    ...(turnId === null ? {} : { turnId }),
+    message: `Draft shared from the ${PLATFORM_LABEL[twin.platform as Platform]} post for “${twin.title}”`,
+    data: { ideaId: idea.id, platform, revision: draft?.revision ?? 1, source, sharedFrom: twin.id },
+  })
+  const media = ctx.withImage === false ? null : await renderIdeaImage({ ...ctx, ideaId: idea.id, platform, captionBody: body })
+  return {
+    ideaId: idea.id,
+    platform,
+    body,
+    revision: draft?.revision ?? 1,
+    source,
+    model,
+    contentFormat: idea.content_format,
+    hooks: [],
+    grounding: [],
+    media,
+    skills: [],
   }
 }
 

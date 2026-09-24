@@ -1,0 +1,61 @@
+{
+  "entries": [
+    {
+      "id": "kb-1",
+      "title": "Signal \u00b7 AI agent evaluation",
+      "category": "Signals",
+      "content": "Scraped signal for AI agent evaluation. Topics: agent evaluation, long-horizon tasks, rubric-based scoring, partial credit, constraint violations, evaluation harness.",
+      "tags": [
+        "agents",
+        "evaluation"
+      ]
+    },
+    {
+      "id": "kb-2",
+      "title": "Research \u00b7 Rubrics as rewards",
+      "category": "Research",
+      "content": "Rubric-based reward models improve post-training on tasks without verifiable answers. Preference data quality matters more than quantity. Reward model design and reward hacking are central risks.",
+      "tags": [
+        "reward modeling",
+        "post-training"
+      ]
+    },
+    {
+      "id": "kb-3",
+      "title": "Research \u00b7 RL environments",
+      "category": "Research",
+      "content": "Reinforcement learning environments with verifiable rewards and tool use are required to train long-horizon AI agents. Stateful environments expose failures that single-turn benchmarks miss.",
+      "tags": [
+        "rl environments",
+        "rlvr"
+      ]
+    },
+    {
+      "id": "kb-4",
+      "title": "Voice \u00b7 research-credible, anti-hype",
+      "category": "Brand Voice",
+      "content": "Research-credible, anti-hype, confident, declarative, plain English. No motivational cliches and no promotional openers.",
+      "tags": [
+        "voice"
+      ]
+    },
+    {
+      "id": "kb-5",
+      "title": "Rule 7 \u00b7 Relevance",
+      "category": "Brand Guideline",
+      "content": "The topic must be meaningfully relevant to reinforcement learning, post-training, agentic systems, evaluation and synthetic data.",
+      "tags": [
+        "relevance"
+      ]
+    },
+    {
+      "id": "kb-6",
+      "title": "Crypto trading bots",
+      "category": "Excluded Topic",
+      "content": "Crypto trading and token price speculation are out of scope for the brand.",
+      "tags": [
+        "excluded"
+      ]
+    }
+  ]
+}

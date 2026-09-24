@@ -13,6 +13,7 @@ import cron, { type ScheduledTask } from 'node-cron'
 import { config } from './config'
 import { publishNotices, composeBrief, sweepForNotices } from './assistant/watch'
 import { buildKnowledge, runDiscoveryPipeline } from './orchestrator'
+import { runSkill } from './agents/runtime'
 import { currentWorkspaceId } from './db/repo'
 import { publishActivity } from './events'
 
@@ -80,8 +81,8 @@ export function startScheduler(): RegisteredJob[] {
   /*
    * DISCOVERY, ON A TIMER.
    *
-   * Registered only when DISCOVERY_CRON is set: a run costs Apify credit and
-   * several minutes of crawling, so it is opted into rather than started by the
+   * Registered only when DISCOVERY_CRON is set: a run spends Claude Code usage
+   * on the Claude Bridge's searches, so it is opted into rather than started by the
    * act of installing the product.
    *
    * The keyword rota decides WHAT this captures; this decides WHEN. Keeping them
@@ -96,6 +97,19 @@ export function startScheduler(): RegisteredJob[] {
       fn: async () => {
         const workspaceId = await currentWorkspaceId()
         await runDiscoveryPipeline({ workspaceId, trigger: 'cron' })
+      },
+    })
+  }
+
+  if (config.knowledge.competitorMonitorCron !== '') {
+    register({
+      id: 'competitors.monitor',
+      description: 'Profile the competitors that are due by their monitoring frequency',
+      schedule: config.knowledge.competitorMonitorCron,
+      timezone,
+      fn: async () => {
+        const workspaceId = await currentWorkspaceId()
+        await runSkill('analysis.competitor.intel', { runId: '', runOffset: 0, competitorForce: true }, { workspaceId, trigger: 'cron' })
       },
     })
   }

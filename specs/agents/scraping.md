@@ -5,7 +5,7 @@
   stale the first time an agent changes.
 -->
 
-# Sherlock — Scraping Agent · Keyword-driven capture across LinkedIn, Instagram, X, Facebook and the open web
+# Sherlock — Scraping Agent · Platform-level trend discovery on LinkedIn, Instagram, Facebook and X
 
 - **Id**: `scraping`
 - **Stage**: `discover`
@@ -13,7 +13,7 @@
 - **Skills**: 11
 - **Handlers**: `server/src/agents/scraping/handlers.ts`
 
-Resolves the active keyword set and captures each term on every platform lane in turn — LinkedIn, Instagram, X, Facebook — and once against the open web. The four platform lanes are read by Apify actors, which read the platform itself and state real reaction counts; the open web is read by crawl4ai, which reads what a search engine indexed and states none. Without an Apify token a platform lane degrades to the crawl4ai reading rather than disappearing, and every row records which of the two answered. Each captured page is scored against the brand topic set and the live Knowledge Base before it is admitted, so what reaches the pipeline is on-brand as well as on-keyword. Harvests the hashtags out of the bodies that carry them, then reads the strongest tags independently of the keyword query that surfaced them.
+Resolves the active keyword set, then discovers what is trending about it. Capture is platform-level trend discovery through the Claude Bridge: for LinkedIn, Instagram, Facebook and X separately, at most three focused searches built from the Knowledge Base, brand context and keywords find what is being posted; only posts verifiably published inside the window (48 hours by default, dated from their post ids) that mention an Ethara keyword are kept, grouped into trends, newest first, and handed to the Validation Agent with their hashtags, URLs and authors. No other scraping service is used, and the bridge writes no content. Facebook posts cannot be dated, so Facebook is skipped with the reason. Nothing states reaction counts. Each captured page is scored against the brand topic set and the live Knowledge Base before it is admitted, so what reaches the pipeline is on-brand as well as on-keyword. Harvests the hashtags out of the bodies that carry them, then reads the strongest tags independently of the keyword query that surfaced them.
 
 ## Skills
 
@@ -33,32 +33,33 @@ Loads the active keywords, sorts them by weight, slices to the per-run ceiling a
 
 ### `scraping.source.connect`
 
-Checks whether either capture source is reachable — the Apify token for the platform lanes, the crawl4ai sidecar for the open web — and reports which one will answer each lane this run, naming the reason where one cannot.
+Checks which lanes the Claude Bridge can serve this run — each platform and the open web — and names the reason for any lane it cannot.
 
 | Knob | Default | Description |
 |---|---|---|
 | `maxParallel` | `4` | How many source checks run at once while establishing what is reachable. |
-| `failIfNoSource` | `false` | On, a run stops at the source check when neither Apify nor crawl4ai is configured rather than proceeding to five empty lanes. Off lets the run continue and report the emptiness lane by lane. |
+| `failIfNoSource` | `false` | On, a run stops at the source check when the Claude Bridge cannot run rather than proceeding to five empty lanes. Off lets the run continue and report the emptiness lane by lane. |
 
 ### `scraping.linkedin.fetch`
 
-The capture call. Reads every enabled platform lane through its Apify actor and the open web through crawl4ai, scores what comes back against the brand topics and the Knowledge Base, and admits only what aligns. A lane that returns nothing is reported, never substituted.
+The capture call, run platform by platform through the Claude Bridge: a few focused searches built from the Knowledge Base, brand context and keywords find what is being posted on LinkedIn, Instagram, Facebook and X in the recency window; only posts whose date can be verified inside the window and that mention an Ethara keyword are kept; they are grouped into trends with their hashtags, URLs and authors, newest first, and handed to the Validation Agent. It writes no content and no calendar.
 
 | Knob | Default | Description |
 |---|---|---|
-| `maxItemsPerKeyword` | `25` | The ceiling on posts captured for each keyword on each enabled lane. Platform lanes bill per result, so this is the main driver of cost; the open-web lane loads a real browser page per item, so it is also the main driver of run time. The APIFY_MAX_ITEMS_PER_KEYWORD deployment ceiling caps this regardless of what is set here. |
+| `maxSearchesPerPlatform` | `5` | How many focused searches the Claude Bridge runs on EACH platform per capture, every one scoped to that platform (site:linkedin.com/posts, instagram.com/p, x.com/…/status, facebook.com). Each search ORs several Ethara keywords together. Six is the hard ceiling in the bridge configuration. |
+| `maxPostsPerTrend` | `5` | The most posts kept for any one trend, newest first. Five is also the hard ceiling in the bridge configuration. |
 | `minEnglishRatio` | `8` | A readability floor, not a topic one. The share of a post’s words that are English function words — "the", "of", "is" — which English prose puts at 25–40% and other languages put near zero. Real platform capture returns workshop and recruitment posts in other languages that score well on brand alignment, because "Agentic AI" and "data" appear in them verbatim; this is what keeps them off an English brand’s calendar. Posts shorter than twelve words are exempt and counted separately, because there is not enough text to judge. Zero switches the floor off. |
 | `minAuthorFollowers` | `0` | A quality floor: posts from accounts smaller than this are dropped. Only applied where the source actually states a follower count — a post with none stated is kept and counted separately, never read as an account with zero followers. Zero switches the floor off. |
-| `datePosted` | `past-week` | How far back a platform lane looks. Only the platform lanes can honour this — a search-engine query cannot express a date range, so the open-web lane reads whatever is indexed and the window is not applied to it. |
-| `sortBy` | `date` | Whether a platform lane asks for the freshest posts or the strongest. Date suits trend detection; relevance suits a narrow keyword that returns little. Not expressible on the open-web lane. |
-| `includeLinkedin` | `true` | Searches linkedin.com for each keyword. By far the best indexed of the four, and the primary publishing surface. |
-| `includeInstagram` | `true` | Searches instagram.com. Indexes very little to a logged-out crawl; expect thin or empty lanes, which are reported as such. |
-| `includeX` | `true` | Searches x.com and twitter.com together, since both host the same posts. |
-| `includeFacebook` | `true` | Searches facebook.com. Like Instagram, mostly login-walled; what is captured is public pages and posts the engine indexed. |
-| `includeOpenWeb` | `true` | A fifth, unscoped lane that reads the web at large. Where the substantive material usually is — research, documentation and analysis that no platform hosts. |
+| `datePosted` | `past-week` | How far back discovery looks. The default, the past week, answers two questions in one pass: what is trending TODAY (posts published on the current date, labelled and shown first) and what was trending over the last seven days. A post is kept only when its date can be verified inside this window (decoded from its post id), so an undated post is left out. Search engines index social posts late — often by days — so today is often thin; that is reported, never filled in. |
+| `learnNewHashtags` | `true` | On, hashtags found on validated, Ethara-relevant posts that Ethara does not track yet are saved to the Knowledge Base as “Discovered Hashtag” entries (citing the posts), and the next discovery run searches the strongest of them too — so the search follows what is trending instead of only the configured keywords. Off, nothing is learned. |
+| `maxNewHashtagsPerRun` | `10` | The most new hashtags one run adds to the Knowledge Base, the most frequent first. |
+| `showOlderWhenEmpty` | `false` | On, a platform with no relevant post verified inside the window lists its newest relevant posts from before it (up to about six months back) instead of nothing — real posts with real dates, labelled “older than the window”, never presented as current. They go through validation like any other post, and the calendar still prefers anything fresher. Off, such a platform reports empty. |
+| `listUndatedPlatforms` | `false` | On, platforms whose post ids carry no date (Facebook) are searched too, and their relevant posts are listed with “date not stated”. They are shown for reference only and never passed on as dated evidence. Off skips such platforms without spending a search. |
+| `includeLinkedin` | `true` | Discovers trends in LinkedIn posts through the Claude Bridge; each post is dated from its id. The primary publishing surface. |
+| `includeInstagram` | `true` | Discovers trends in Instagram posts and reels through the Claude Bridge; each is dated from its shortcode. Search engines index little of Instagram, so expect thin results, reported as such. |
+| `includeX` | `true` | Discovers trends in X posts through the Claude Bridge; each is dated from its status id. |
+| `includeFacebook` | `true` | Facebook through the Claude Bridge. Facebook post ids carry no date, so no post can be verified inside the window; the platform is skipped, with that reason, rather than spending searches it cannot use. |
 | `minBrandRelevance` | `20` | A captured page must score at least this against the brand topic set and the Knowledge Base to be admitted. Zero keeps everything the search engine returned, on-topic or not. |
-| `retries` | `1` | How many times a failed capture is retried with exponential backoff before the lane is recorded as empty. |
-| `maxParallel` | `2` | How many keyword-and-lane pairs crawl at once. Each one drives a headless browser, so raising this competes for the same local CPU. |
 
 ### `scraping.account.capture`
 
@@ -90,7 +91,7 @@ Reads the strongest hashtags as search terms in their own right, giving a volume
 |---|---|---|
 | `expandTop` | `6` | How many of the best-aligned candidates get read independently. Each is an extra crawl, so this trades accuracy against run time. |
 | `itemsPerHashtag` | `4` | How deep to read each hashtag. |
-| `enabled` | `true` | Off, hashtag volume is read only from the keyword results, which over-weights whatever the keyword happened to surface. |
+| `enabled` | `false` | Off by default: platform trend discovery already searches the leading keywords as hashtags within its per-platform search budget, and each expansion would be an extra search. On, the strongest tags are read again as search terms of their own. |
 
 ### `scraping.engagement.capture`
 

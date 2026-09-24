@@ -625,8 +625,8 @@ const TOP_LEVEL = [
  *
  * Deliberately narrow. A span is only treated as a path when it begins with a
  * real top-level directory, which excludes the three things that otherwise look
- * like paths and are not: Docker images (`pgvector/pgvector:pg17`), Ollama model
- * tags (`x/flux2-klein:latest`), and prose-relative filenames (`graph.ts`,
+ * like paths and are not: Docker images (`pgvector/pgvector:pg17`), model
+ * tags (`gemini-embedding-001`, `flux2-klein-4b`), and prose-relative filenames (`graph.ts`,
  * `content-scraper/SKILL.md`) that name a file without saying where it lives.
  *
  * Under-reporting is the correct bias here: a check that flags model tags as

@@ -28,7 +28,6 @@ import { describe, expect, it } from 'vitest'
 import { BRAND, enforceBrandVoice } from '@shared/brand-voice'
 import { CONTENT_FORMATS, HOOK_PATTERNS } from '@shared/agent-contract'
 import { SKILL_BY_ID, defaultSkillConfig } from '@shared/agent-registry'
-import { explainApifyFailure } from '../server/src/integrations/apify'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    1 · A MISSING FIGURE IS NOT A LOW ONE
@@ -353,79 +352,6 @@ describe('ADR-012 · the platform discovers keywords instead of only re-ranking 
       'utf8',
     )
     expect(handlers).toContain('activeDiscoveredKeywords')
-  })
-})
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   8 · APIFY FAILURES ARE EXPLAINED, NOT ECHOED
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-describe('rule 6 · an Apify refusal names its fix', () => {
-  /*
-   * Behavioural, not textual.
-   *
-   * The first version of this test asserted that `apify.ts` CONTAINED the
-   * strings `platform-feature-disabled` and `token-not-found` — the JSON
-   * `error.type` values the old HTTP client parsed. When execution moved to the
-   * CLI those types stopped appearing, the reasons started arriving as stderr
-   * text, and the test failed while the behaviour it cared about was intact.
-   *
-   * A test that breaks when the mechanism changes but the behaviour does not is
-   * testing the wrong thing. So this calls the function.
-   */
-  it('distinguishes an exhausted account from a rejected credential', () => {
-    const exhausted = explainApifyFailure(
-      new Error('Run: Calling Actor apidojo/tweet-scraper\n\nError: Monthly usage hard limit exceeded'),
-      'apidojo/tweet-scraper',
-    )
-    const unauthenticated = explainApifyFailure(
-      new Error('Error: You are not logged in with your Apify account.'),
-      'apidojo/tweet-scraper',
-    )
-
-    // Two failures that look alike from outside and need different actions.
-    expect(exhausted).toMatch(/ACCOUNT limit/)
-    expect(exhausted).toMatch(/billing/i)
-    expect(unauthenticated).toMatch(/holds no credentials/i)
-    expect(unauthenticated).toMatch(/apify login|APIFY_API_TOKEN/)
-    expect(exhausted).not.toBe(unauthenticated)
-  })
-
-  it('says plainly that a usage limit is not a configuration problem', () => {
-    const said = explainApifyFailure(new Error('Monthly usage hard limit exceeded'), 'x/y')
-    expect(said).toMatch(/not a[\s\S]{0,40}configuration problem/)
-  })
-
-  it('names the actor when one has been withdrawn', () => {
-    const said = explainApifyFailure(new Error('Actor not found'), 'someone/gone-actor')
-    expect(said).toContain('someone/gone-actor')
-    expect(said).toMatch(/actor-index/)
-  })
-
-  it('never echoes a token, even when the CLI does', () => {
-    // A failed `apify login` has been observed to print the credential back.
-    const said = explainApifyFailure(
-      new Error('login failed for apify_api_SECRETVALUE123abc'),
-      'x/y',
-    )
-    expect(said).not.toContain('apify_api_SECRETVALUE123abc')
-    expect(said).toContain('«token»')
-  })
-})
-
-describe('the HTTP client is gone, not merely bypassed', () => {
-  it('leaves no second execution path in apify.ts', () => {
-    const apify = readFileSync(join(ROOT, 'server/src/integrations/apify.ts'), 'utf8')
-    // Two paths reading the same actors is the "second scraper" the brief
-    // forbids, and which one ran would be decided by whichever failed first.
-    for (const gone of ['fetchJson', 'runActor(', 'searchBody', 'normalisePost', 'authHeaders']) {
-      expect(apify, `${gone} still present`).not.toContain(gone)
-    }
-  })
-
-  it('routes execution through the skill workflow', () => {
-    const apify = readFileSync(join(ROOT, 'server/src/integrations/apify.ts'), 'utf8')
-    expect(apify).toContain('scrapeViaSkill')
   })
 })
 

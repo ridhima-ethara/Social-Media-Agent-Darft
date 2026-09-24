@@ -64,7 +64,7 @@ def main(argv: list[str]) -> int:
     print(f"  posts captured  : {summary['posts_captured']}")
     print(f"  keywords trending: {summary['keywords_trending']}")
     print(f"  hashtags        : {summary['hashtags_consolidated']}")
-    print(f"  calendar        : {summary['ideas_on_calendar']} primary · {summary['ideas_in_suggestions']} suggestions")
+    print(f"  calendar        : {summary['ideas_on_calendar']} topics placed · {summary['ideas_not_placed']} not placed")
     print(f"  images rendered : {summary['images_rendered']}")
     print(f"  knowledge       : {summary['knowledge_learned']} learned · "
           f"{summary['knowledge_merged']} merged · {summary['knowledge_withheld']} withheld")

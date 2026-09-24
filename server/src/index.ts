@@ -54,7 +54,7 @@ async function main(): Promise<void> {
    * node-cron. A deploy, an OOM or a crashed sidecar mid-run leaves
    * `pipeline_runs` with a row stuck at `running` forever: the console shows a
    * phantom in-flight run, "is anything running" stops being answerable, and
-   * the Apify credit that run spent bought nothing anybody can see.
+   * the Claude Code usage that run spent bought nothing anybody can see.
    *
    * Safe by construction: nothing in THIS process can be running at the moment
    * this process starts, so every `running` row found here is from a previous

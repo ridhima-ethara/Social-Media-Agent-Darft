@@ -9,6 +9,8 @@
  * without a cycle. `_register.ts` is where the handlers are actually loaded.
  */
 
+import type { PlatformTrend } from '../../bridges/claude-bridge/trends/platform-trends'
+import type { SocialMediaListener } from '../analysis/social-listener/types'
 import type {
   Confidence,
   ContentFormat,
@@ -345,7 +347,8 @@ export interface PlannedIdea {
   confidence: number
   priorityScore: number
   platformRank: number | null
-  calendarSlot: 'primary' | 'suggestion'
+  /** Every placed idea is a dated calendar topic; an unplaced one is dropped, never kept aside. */
+  calendarSlot: 'primary'
   isNewTrend: boolean
   format: EditorialFormat
   angle: string
@@ -356,6 +359,11 @@ export interface PlannedIdea {
   conflicts: string[]
   /** A cross-platform variant points back at the idea it was adapted from. */
   variantOf?: string
+  /**
+   * The Meta twin this entry shares ONE post with — Facebook ↔ Instagram. The
+   * second of the two to be written reuses the first one's caption.
+   */
+  sharesPostWith?: Platform
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -710,6 +718,23 @@ export interface PipelinePayload extends Record<string, unknown> {
   competitorPosts?: CompetitorPostRecord[]
   captureSource?: 'live' | 'fixture'
   captureFallbackReasons?: string[]
+  /**
+   * What the Claude Bridge found trending on each platform in the capture
+   * window — topic, hashtags, post URLs, dates, authors, matched Ethara
+   * keywords and a computed reason. Carried to the Validation Agent beside
+   * `posts`, which holds the same posts in the capture contract.
+   */
+  platformTrends?: PlatformTrend[]
+  /** The Analysis Agent's Social Media Listener report (SocialFetch + Claude). */
+  socialMediaListener?: SocialMediaListener
+  /** Set by the "Run listener" action: fetch fresh even when a recent report exists. */
+  listenerForceRefresh?: boolean
+  /** Competitor Intelligence: these competitors now (the tab's Run action); absent = the due ones, capped per pipeline run. */
+  competitorIds?: string[]
+  /** Competitor Intelligence: run even inside a pipeline, whatever the per-run cap. */
+  competitorForce?: boolean
+  /** Competitor Intelligence: override the depth knob for this run. */
+  competitorDepth?: 'quick' | 'deep'
   trends?: KeywordTrend[]
   trendingKeywords?: KeywordTrend[]
   hashtagGroups?: RankedHashtagGroup[]
@@ -720,5 +745,7 @@ export interface PipelinePayload extends Record<string, unknown> {
   opportunities?: Opportunity[]
   topHashtags?: HashtagCandidate[]
   ideas?: PlannedIdea[]
+  /** The platforms `calendar.platform.select` planned for this run. */
+  platformsInPlay?: Platform[]
   weightWarning?: string
 }

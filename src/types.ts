@@ -7,6 +7,7 @@
  * Law 8: state is server-truth. This file is that truth's shape.
  */
 
+import type { SocialMediaListener } from '@shared/social-listener'
 import type {
   AgentId,
   AgentRunStatus,
@@ -49,6 +50,8 @@ export type PageId =
   | 'leadership'
   | 'orchestration'
   | 'intelligence'
+  /** The Analysis Agent's Social Media Listener report. */
+  | 'listener'
   | 'studio'
   | 'assistant'
   | 'knowledge'
@@ -354,6 +357,17 @@ export interface LeadershipDecision {
   published?: boolean
 }
 
+/** The post-ready horizon as `/api/state` sends it (`server/src/calendar-horizon.ts`). */
+export interface CalendarHorizonView {
+  /** Today in the workspace's time zone. */
+  today: string
+  /** Dates whose topics are written now — today, and tomorrow when the schedule requires it. */
+  postReadyDates: string[]
+  horizon: 'today' | 'today-and-tomorrow'
+  avoidWeekends: boolean
+  timeZone: string
+}
+
 export interface Idea {
   id: string
   source_item_id: string | null
@@ -362,6 +376,10 @@ export interface Idea {
   source_url: string | null
   source_title: string | null
   source_name: string | null
+  /** The Validation Agent's verdict on the source post — the topic's validation status. */
+  source_validation?: string | null
+  /** The brand pillar the topic belongs to, computed server-side; null when it touches none. */
+  content_pillar?: string | null
   hashtag_url: string | null
   title: string
   description: string | null
@@ -761,9 +779,9 @@ export interface ApiHealth {
   /**
    * One entry per external service, keyed as the server reports it.
    *
-   * `apify` carries an extra `platformLanes` field naming which implementation
-   * the four platform lanes will actually bind — `apify` when a token is set,
-   * `unavailable` when it is not. It is reported rather than inferred because "why
+   * `claudeBridge` carries an extra `platformLanes` field naming which
+   * implementation the Scraping Agent's platform lanes will actually bind —
+   * `claude-bridge` when it can run, `unavailable` when it cannot. It is reported rather than inferred because "why
    * does this post have no reaction count" should be answerable from the health
    * payload instead of from the zeros on a card.
    *
@@ -777,11 +795,11 @@ export interface ApiHealth {
     {
       configured: boolean
       reason: string
-      platformLanes?: 'apify' | 'unavailable'
+      platformLanes?: 'claude-bridge' | 'unavailable'
       /** Ordered text providers, primary first. Only present on `text`. */
-      chain?: Array<'ollama' | 'gcp'>
+      chain?: Array<'gcp'>
       /** The provider behind the primary, or null when there is none. */
-      backup?: 'ollama' | 'gcp' | null
+      backup?: 'gcp' | null
     }
   >
   assistant?: { provider: string; configured: boolean; reason: string }
@@ -837,6 +855,16 @@ export interface StatePayload {
   voiceSampleCount: number
   trackedAccounts: TrackedAccount[]
   pipeline: PipelineRun | null
+  /**
+   * Which dates are post-ready and which hold a topic only, resolved by the
+   * server from the operator's knobs. Absent standalone; `resolveHorizon()`
+   * then applies the registry defaults.
+   */
+  calendarHorizon?: CalendarHorizonView
+  /** The Analysis Agent's latest Social Media Listener report (SocialFetch + Claude), or null before the first run. */
+  socialListener?: (SocialMediaListener & { stored_at: string }) | null
+  /** Whether SocialFetch has a key, so the screen can say why it cannot run. */
+  socialListenerConfigured?: boolean
   platformLabels: Record<string, string>
   assistant: {
     conversation: AssistantConversation | null

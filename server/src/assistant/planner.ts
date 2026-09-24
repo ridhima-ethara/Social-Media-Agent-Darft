@@ -84,10 +84,6 @@ const PRELUDES: Record<string, Array<{ toolId: string; why: string }>> = {
     { toolId: 'idea.list', why: 'Confirm which post is being rejected' },
   ],
   'idea.move': [{ toolId: 'idea.list', why: 'Read the week so the new slot does not collide' }],
-  'idea.promote': [
-    { toolId: 'idea.list', why: 'Read the platform’s current top ten to see what would be displaced' },
-  ],
-  'idea.demote': [{ toolId: 'idea.list', why: 'Read the current calendar slot' }],
   'draft.generate': [{ toolId: 'idea.list', why: 'Find the idea to write for' }],
   'draft.instruct': [{ toolId: 'idea.list', why: 'Locate the draft being revised' }],
   'image.render': [{ toolId: 'idea.list', why: 'Locate the post the creative belongs to' }],

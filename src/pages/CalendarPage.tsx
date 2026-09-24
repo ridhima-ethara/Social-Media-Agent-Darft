@@ -1,12 +1,18 @@
 /**
  * WEEKLY CALENDAR
  *
- * Capacity is the first thing you see: five pips per platform, filled or
- * free, with the count waiting below the cut beside them. The week itself
- * carries only drafted work, seven columns on a shallow arc, each card a
- * title with a small creative under it. The ranked queue on the right is what
- * this screen is actually for: every idea below the cut shows the rank it
- * holds, and promoting one states exactly what it displaces before it does.
+ *   Validated topics → Calendar Agent
+ *     → today:     post ready
+ *     → tomorrow:  post ready when the posting schedule requires it
+ *     → later:     topic only, in the Topic Queue → Generate Post on demand
+ *
+ * Capacity is the first thing you see: five pips per platform, filled or free.
+ * The week shows every placed topic; a post-ready day's card carries its
+ * written post, and a later day's card is a topic with no caption, image or
+ * hashtags. Below the week, the Topic Queue lists those future topics with
+ * their date, platform, content pillar, source trend and validation status —
+ * editable, reorderable, and each with its own Generate Post. There is no
+ * suggestion list: an idea the calendar did not place is not kept aside.
  *
  * The assistant lives in a popover under Ask Ethara, scoped to this week.
  */
@@ -17,6 +23,7 @@ import { prefersReducedMotion, useStore } from '../store'
 import { CalendarAssistant } from '../components/assistant/calendar-assistant'
 import { PlatformIcon, PLATFORM_LABEL, PLATFORM_TOKEN } from '../components/ui'
 import { BackToHub } from '../components/layout'
+import { isPostReadyDay, isQueuedTopic, resolveHorizon, type CalendarHorizonView } from '../lib/calendar-horizon'
 import type { Idea, IdeaStatus, Platform } from '../types'
 
 const PLATFORMS: Platform[] = ['linkedin', 'instagram', 'x', 'facebook']
@@ -41,9 +48,6 @@ const COLUMN_WIDTH_KEY = 'ethara.calendar.columnWidth'
 
 /** Above this width a card stops clamping and shows the whole topic and hook. */
 const WIDE_CARD_AT = 260
-
-/** A day holding this many posts stops offering a "promote one" slot. */
-const DAY_FULL_AT = 3
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -340,12 +344,27 @@ export function CalendarPage() {
   const [askOpen, setAskOpen] = useState(false)
   const gridRef = useRef<HTMLDivElement | null>(null)
   const moveIdea = useStore((s) => s.moveIdea)
-  const scheduleIdeaOnDay = useStore((s) => s.scheduleIdeaOnDay)
   const deleteIdea = useStore((s) => s.deleteIdea)
+  const generatePost = useStore((s) => s.generatePost)
+  const generatingPosts = useStore((s) => s.generatingPosts)
+  const serverHorizon = useStore((s) => s.calendarHorizon)
+  const horizon = useMemo(() => resolveHorizon(serverHorizon), [serverHorizon])
 
   /* ── Card size ────────────────────────────────────────────────────── */
-  /** So a day with room can point at the only place a post reaches a slot. */
+  /** The Topic Queue, so a topic card and an empty day can point at it. */
   const queueRef = useRef<HTMLElement | null>(null)
+  /** The queue row a topic card asked to be shown, briefly lit. */
+  const [queueFocus, setQueueFocus] = useState<string | null>(null)
+  const showInQueue = (ideaId: string): void => {
+    setQueueFocus(ideaId)
+    const row = queueRef.current?.querySelector<HTMLElement>(`[data-topic="${CSS.escape(ideaId)}"]`)
+    ;(row ?? queueRef.current)?.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'center' })
+  }
+  useEffect(() => {
+    if (queueFocus === null) return
+    const timer = window.setTimeout(() => setQueueFocus(null), 1600)
+    return () => window.clearTimeout(timer)
+  }, [queueFocus])
 
   /*
    * ── Column width, one value for all seven columns ──────────────────────
@@ -460,8 +479,8 @@ export function CalendarPage() {
   /*
    * THE PAGE FOLLOWS THE CARD.
    *
-   * The ranked queue sits BELOW the week grid, so dragging a suggestion onto a
-   * day means dragging upward — and on a full week the grid is already off the
+   * The Topic Queue sits BELOW the week grid, so dragging a card from low on
+   * the page onto a day means dragging upward — and on a full week the grid is already off the
    * top of the viewport by the time you reach the queue. `dayUnder()` resolves
    * by `elementFromPoint`, which only ever sees what is actually on screen, so
    * the drop found no day and silently did nothing. The card picked up fine and
@@ -510,14 +529,10 @@ export function CalendarPage() {
     if (phase !== 'end' || !current) return
     const target = dayUnder(p) ?? current.overIso
     if (!target) return
-    const isSuggestion = current.idea.calendar_slot !== 'primary'
-    // A suggestion promotes onto the day even when its stored date already
-    // matches — it was never on the grid. A primary only counts as a move when
-    // the day actually changes.
-    if (isSuggestion) {
-      setJustMoved(current.idea.id)
-      void scheduleIdeaOnDay(current.idea.id, target)
-    } else if (target !== current.idea.scheduled_date) {
+    // Every card is already on the calendar; a drop only counts when the day
+    // actually changes. Moving a topic writes nothing — its post is generated
+    // on demand, or by the next run once its date is post-ready.
+    if (target !== current.idea.scheduled_date) {
       setJustMoved(current.idea.id)
       void moveIdea(current.idea.id, target)
     }
@@ -548,28 +563,52 @@ export function CalendarPage() {
   /* Swipe or two-finger scroll the grid to move a week. */
   const weekSwipe = useWeekSwipe((direction) => setWeekOffset((w) => w + direction))
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart])
-  const todayIso = isoDate(new Date())
+  const todayIso = horizon.today
   const weekIsos = useMemo(() => new Set(days.map(isoDate)), [days])
 
   /*
-   * THE SLOT DECIDES WHERE A POST IS SHOWN. NOTHING ELSE.
+   * EVERY PLACED TOPIC IS ON THE GRID. THERE IS NO SIDE LIST.
    *
-   * The grid used to carry only WRITTEN work — `primary && status !== 'suggested'`
-   * — while the queue carried `suggestion || status === 'suggested'`. Those two
-   * tests are not complements, and an idea could satisfy neither: promoting a
-   * suggestion sets its slot to `primary` and leaves its status at `suggested`,
-   * so a card dropped on a day disappeared from the queue's point of view and
-   * never arrived on the grid. Two rows were in exactly that state in the
-   * database when this was found.
-   *
-   * So the slot is now the only question asked, and the two lists are true
-   * complements: a post is on the grid or in the queue, never both and never
-   * neither. A placed post that has not been written yet says so on its face
-   * rather than being hidden — see `unwritten` on the card.
+   * The calendar keeps dated topics only. A post-ready date (today, tomorrow
+   * when the schedule requires it) carries its written post; a later date
+   * carries the topic alone, and the same topic is listed in the Topic Queue
+   * below with its Generate Post. A written post on a later date — generated on
+   * demand, or by an earlier release — is simply a post on the grid.
    */
   const live = ideas.filter((i) => i.status !== 'rejected')
   const primary = live.filter((i) => i.calendar_slot === 'primary')
-  const queued = live.filter((i) => i.calendar_slot !== 'primary')
+  const topicQueue = primary
+    .filter((i) => isQueuedTopic(i, horizon))
+    .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date) || timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
+
+  /*
+   * ONE ROW PER TOPIC, NOT ONE PER PLATFORM.
+   *
+   * The Calendar Agent plans a cross-platform variant per platform, so a single
+   * topic arrives as four ideas (LinkedIn, Instagram, X, Facebook) that all sit
+   * in the `primary` slot. Listing them as four rows made the queue read as four
+   * different topics — the same subject repeated, which is exactly the thing a
+   * queue must not do.
+   *
+   * So the table groups by topic: the soonest idea represents the group, and the
+   * platforms it will publish to are shown together. The per-platform ideas are
+   * untouched — `topicQueue` above still feeds the per-platform capacity counts,
+   * and Generate Post still acts on a real idea.
+   */
+  const topicGroups = useMemo(() => {
+    const groups = new Map<string, { lead: Idea; platforms: Platform[]; ideas: Idea[] }>()
+    for (const idea of topicQueue) {
+      const key = (idea.source_topic ?? idea.title ?? idea.id).trim().toLowerCase()
+      const existing = groups.get(key)
+      if (existing === undefined) {
+        groups.set(key, { lead: idea, platforms: [idea.platform], ideas: [idea] })
+        continue
+      }
+      existing.ideas.push(idea)
+      if (!existing.platforms.includes(idea.platform)) existing.platforms.push(idea.platform)
+    }
+    return [...groups.values()]
+  }, [topicQueue])
   const weekPrimary = primary.filter((i) => weekIsos.has(i.scheduled_date))
   useCardFlip(gridRef, weekPrimary, isoDate(days[0] as Date), justMoved)
 
@@ -610,8 +649,8 @@ export function CalendarPage() {
 
   const capacity = PLATFORMS.map((platform) => {
     const placed = weekPrimary.filter((i) => i.platform === platform).length
-    const waiting = queued.filter((i) => i.platform === platform).length
-    return { platform, placed, free: Math.max(0, cap - placed), waiting }
+    const topics = topicQueue.filter((i) => i.platform === platform).length
+    return { platform, placed, free: Math.max(0, cap - placed), topics }
   })
   const totalPlaced = weekPrimary.length
   const totalFree = capacity.reduce((s, c) => s + c.free, 0)
@@ -636,7 +675,7 @@ export function CalendarPage() {
   /*
    * The page grows with its content and `main` scrolls it. Inner scrollers
    * here trapped the height: the week section held `flex-1 overflow-auto`, so
-   * it consumed the viewport, never grew, and the suggestions beneath it
+   * it consumed the viewport, never grew, and the Topic Queue beneath it
    * could not be reached by scrolling the page.
    */
   return (
@@ -650,8 +689,8 @@ export function CalendarPage() {
      *
      * `<main>` in the shell already carries `overflow-y-auto`, so letting this
      * column take its natural height is all that is needed: the whole page
-     * scrolls as one document, and the per-platform suggestion columns keep
-     * their own bounded scroll for the long tail.
+     * scrolls as one document, and the Topic Queue keeps its own bounded
+     * scroll for a long plan.
      */
     <div className="-mx-4 -mt-4 -mb-2 flex flex-col">
       {/* ── Command bar ─────────────────────────────────────────────────── */}
@@ -677,15 +716,15 @@ export function CalendarPage() {
          * pips per platform, filled or free — and nothing drew them. The panel
          * below counts twenty slots in one number, which cannot say WHICH
          * platform is full; two of these strips full and two empty reads at a
-         * glance and is the fact that decides what to promote next. Every pip
-         * is one real slot: filled ones are posts placed this week.
+         * glance. Every pip is one real slot: filled ones are topics or posts
+         * placed this week.
          */}
         <div className="ml-5 hidden items-center gap-3.5 rounded-[10px] border border-line bg-surface/60 px-3 py-1.5 xl:flex">
           {capacity.map((c) => (
             <span
               key={c.platform}
               className="flex items-center gap-1.5"
-              title={`${PLATFORM_LABEL[c.platform]}: ${c.placed} of ${cap} placed this week · ${c.waiting} waiting below the cut`}
+              title={`${PLATFORM_LABEL[c.platform]}: ${c.placed} of ${cap} placed this week · ${c.topics} future topic(s) in the Topic Queue`}
             >
               <PlatformIcon platform={c.platform} size={10} />
               <span className="flex gap-[3px]" aria-hidden="true">
@@ -702,7 +741,7 @@ export function CalendarPage() {
                 ))}
               </span>
               <span className="sr-only">
-                {PLATFORM_LABEL[c.platform]}: {c.placed} of {cap} placed, {c.waiting} waiting
+                {PLATFORM_LABEL[c.platform]}: {c.placed} of {cap} placed, {c.topics} in the Topic Queue
               </span>
             </span>
           ))}
@@ -798,7 +837,7 @@ export function CalendarPage() {
               {totalPlaced} slot{totalPlaced === 1 ? '' : 's'} placed
             </h2>
             <span className="text-[10.5px] text-ink-3">
-              {totalFree} of {cap * PLATFORMS.length} slots free · promote a suggestion to fill a day, or drag a card to another day
+              {totalFree} of {cap * PLATFORMS.length} slots free · today{horizon.postReadyDates.length > 1 ? ' and tomorrow are' : ' is'} post-ready; later days hold topics — generate a post from the Topic Queue, or drag a card to another day
             </span>
             <span className="flex-1" />
             {columnWidth > 0 ? (
@@ -868,12 +907,9 @@ export function CalendarPage() {
                 .filter((idea) => idea.scheduled_date === iso)
                 .sort((a, b) => timeValue(a.scheduled_time) - timeValue(b.scheduled_time))
               const isToday = iso === todayIso
-              // A suggestion is not on the grid, so any day under it is a valid
-              // drop; a primary only highlights a day other than the one it holds.
-              const isDropTarget =
-                drag !== null &&
-                drag.overIso === iso &&
-                (drag.idea.calendar_slot !== 'primary' || drag.idea.scheduled_date !== iso)
+              const isPostReady = horizon.postReadyDates.includes(iso)
+              // A card only highlights a day other than the one it holds.
+              const isDropTarget = drag !== null && drag.overIso === iso && drag.idea.scheduled_date !== iso
               return (
                 <div
                   key={iso}
@@ -899,6 +935,13 @@ export function CalendarPage() {
                     <span className="flex-1" />
                     {isToday ? (
                       <span className="mono rounded-full border border-magenta/40 px-2 py-px text-[7px] font-semibold uppercase tracking-[0.12em] text-magenta-ink">today</span>
+                    ) : isPostReady ? (
+                      <span
+                        className="mono rounded-full border border-accent/40 px-2 py-px text-[7px] font-semibold uppercase tracking-[0.12em] text-accent-bright"
+                        title="Tomorrow is a posting day, so its post is written ahead"
+                      >
+                        post-ready
+                      </span>
                     ) : dayIdeas.length > 0 ? (
                       <span className="mono text-[7.5px] uppercase tracking-[0.1em] text-ink-3">
                         {dayIdeas.length} post{dayIdeas.length === 1 ? '' : 's'}
@@ -906,23 +949,30 @@ export function CalendarPage() {
                     ) : null}
                   </header>
 
-                  {dayIdeas.map((idea) => (
-                    <SlotCard
-                      key={idea.id}
-                      idea={idea}
-                      wide={isWide}
-                      dragging={drag?.idea.id === idea.id}
-                      landed={justMoved === idea.id}
-                      onOpen={() => openReview(idea.id)}
-                      onDrag={onCardDrag}
-                      onWithdraw={() => void deleteIdea(idea.id)}
-                    />
-                  ))}
+                  {dayIdeas.map((idea) => {
+                    const topicOnly = isQueuedTopic(idea, horizon)
+                    return (
+                      <SlotCard
+                        key={idea.id}
+                        idea={idea}
+                        horizon={horizon}
+                        wide={isWide}
+                        dragging={drag?.idea.id === idea.id}
+                        landed={justMoved === idea.id}
+                        generating={generatingPosts.includes(idea.id)}
+                        // A future topic has no post to open; it is shown in
+                        // the Topic Queue, where it is edited and generated.
+                        onOpen={() => (topicOnly ? showInQueue(idea.id) : openReview(idea.id))}
+                        onGenerate={() => void generatePost(idea.id)}
+                        onDrag={onCardDrag}
+                        onWithdraw={() => void deleteIdea(idea.id)}
+                      />
+                    )
+                  })}
 
-                  {/* A day with room. It says where a dragged card would land,
-                      and otherwise points at the queue — which is the only way
-                      a post actually reaches a slot. */}
-                  {dayIdeas.length < DAY_FULL_AT || isDropTarget ? (
+                  {/* A day with room. It says where a dragged card would land;
+                      an empty day says so and points at the Topic Queue. */}
+                  {dayIdeas.length === 0 || isDropTarget ? (
                     <button
                       type="button"
                       onClick={() => queueRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
@@ -930,7 +980,7 @@ export function CalendarPage() {
                         isDropTarget ? 'border-accent text-accent-bright' : 'border-line-strong text-ink-3 hover:border-magenta/50 hover:text-magenta-ink'
                       } ${dayIdeas.length === 0 ? 'min-h-[110px]' : ''}`}
                     >
-                      {isDropTarget ? 'move here' : dayIdeas.length === 0 ? 'no posts · promote one' : 'promote one'}
+                      {isDropTarget ? 'move here' : 'no posts · topic queue ↓'}
                     </button>
                   ) : null}
 
@@ -964,15 +1014,7 @@ export function CalendarPage() {
           </div>
         </section>
 
-        <Queue
-          queueRef={queueRef}
-          queued={queued}
-          capacity={capacity}
-          weekPrimary={weekPrimary}
-          cap={cap}
-          onDrag={onCardDrag}
-          draggingId={drag?.idea.id ?? null}
-        />
+        <TopicQueue queueRef={queueRef} groups={topicGroups} focusId={queueFocus} />
       </div>
 
       {/* The card in flight. Pointer-transparent, so the day under the pointer
@@ -993,11 +1035,9 @@ export function CalendarPage() {
           <p className={`mt-1.5 text-[10.5px] font-medium ${drag.overIso && drag.overIso !== drag.idea.scheduled_date ? 'text-accent-bright' : 'text-ink-3'}`}>
             {drag.overIso === null
               ? 'Drop on a day'
-              : drag.idea.calendar_slot !== 'primary'
-                ? `Schedule on ${dayLabelOf(drag.overIso)}`
-                : drag.overIso === drag.idea.scheduled_date
-                  ? 'Already on this day'
-                  : `Move to ${dayLabelOf(drag.overIso)}`}
+              : drag.overIso === drag.idea.scheduled_date
+                ? 'Already on this day'
+                : `Move to ${dayLabelOf(drag.overIso)}`}
           </p>
         </div>
       ) : null}
@@ -1028,9 +1068,9 @@ const TOUCH_HOLD_MS = 220
  * after the press still landing inside it — pointer capture was only taken once
  * the drag had already begun. Pointer events arrive every few milliseconds, not
  * every pixel, so one quick flick off the card jumped the gesture straight past
- * its own handler: no ghost, no drop target, no error, and a suggestion dragged
- * onto a day did nothing at all. Measured, a first move of sixteen pixels out of
- * a queue row skipped it every time. The window always hears the pointer.
+ * its own handler: no ghost, no drop target, no error, and a card dragged onto
+ * a day did nothing at all. Measured, a first move of sixteen pixels skipped it
+ * every time. The window always hears the pointer.
  *
  * `draggable` is deliberately not used: this file's history records three
  * attempts built on it, and the lesson was that the HTML5 drag API and a
@@ -1052,7 +1092,7 @@ function useCardPress({
   const press = useRef<{ id: number; dragging: boolean; timer: number | null } | null>(null)
   const detach = useRef<(() => void) | null>(null)
 
-  // A card unmounted mid-press — promoted, withdrawn, or the week paged — must
+  // A card unmounted mid-press — moved, withdrawn, or the week paged — must
   // not leave its listeners behind on the window.
   useEffect(() => () => detach.current?.(), [])
 
@@ -1135,41 +1175,57 @@ function useCardPress({
 
 function SlotCard({
   idea,
+  horizon,
   wide,
   dragging,
   landed,
+  generating,
   onOpen,
+  onGenerate,
   onDrag,
   onWithdraw,
 }: {
   idea: Idea
+  horizon: CalendarHorizonView
   wide: boolean
   dragging: boolean
   landed: boolean
+  generating: boolean
   onOpen: () => void
+  onGenerate: () => void
   onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
   onWithdraw: () => void
 }) {
   /*
-   * A placed post the Content Agent has not written yet. It is shown — hiding
-   * it is what made a dropped card vanish — but it must never read as ready to
-   * publish, so it carries its own chip and a dashed edge instead of a status.
+   * THREE STATES A PLACED CARD CAN BE IN BEFORE REVIEW.
+   *
+   *   A future TOPIC — dated after the post-ready horizon, no post by design.
+   *   Neutral ink, "TOPIC · IN QUEUE": nothing is missing, it waits for
+   *   Generate Post.
+   *
+   *   A POST DUE — a post-ready date (today, or tomorrow when required) whose
+   *   post has not been written yet: the run is writing it, or it failed.
+   *   Warning amber, because this one is expected to exist.
+   *
+   *   A written post — its own status chip.
    */
   const unwritten = idea.status === 'suggested' && !idea.draft?.body
-  // This week's unwritten posts are written by the pipeline; later weeks are
-  // placed on purpose and wait their turn, so they say "queued", not "missing" —
-  // in a neutral ink rather than the warning amber.
-  const queued = unwritten && idea.scheduled_date >= isoDate(addDays(startOfWeek(new Date()), 7))
-  const ink = queued
+  const topicOnly = isQueuedTopic(idea, horizon)
+  const due = unwritten && !topicOnly && isPostReadyDay(idea, horizon)
+  const ink = topicOnly
     ? 'var(--color-ink-3)'
     : unwritten
       ? 'var(--color-warn)'
       : (STATUS_INK[idea.status] ?? 'var(--color-ink-3)')
-  const chip = queued
-    ? 'CAPTION QUEUED'
-    : unwritten
-      ? 'NO CAPTION YET'
-      : (STATUS_CHIP[idea.status] ?? idea.status.toUpperCase())
+  const chip = generating
+    ? 'GENERATING…'
+    : topicOnly
+      ? 'TOPIC · IN QUEUE'
+      : due
+        ? 'POST DUE'
+        : unwritten
+          ? 'NO POST YET'
+          : (STATUS_CHIP[idea.status] ?? idea.status.toUpperCase())
   const colour = PLATFORM_TOKEN[idea.platform]
   const topic = topicOf(idea)
   const hook = hookOf(idea)
@@ -1186,7 +1242,11 @@ function SlotCard({
       data-flip={idea.id}
       role="button"
       tabIndex={0}
-      aria-label={`Open “${idea.title}” for editing. Drag to another day to reschedule it.`}
+      aria-label={
+        topicOnly
+          ? `Topic “${idea.title}” — no post yet. Opens its row in the Topic Queue. Drag to another day to reschedule it.`
+          : `Open “${idea.title}” for editing. Drag to another day to reschedule it.`
+      }
       onPointerDown={onPointerDown}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -1197,7 +1257,7 @@ function SlotCard({
       className={`group relative flex cursor-grab select-none flex-col overflow-hidden rounded-[11px] border bg-surface-2/60 px-2.5 py-2.5 transition-[border-color,translate,box-shadow,opacity] duration-[var(--dur-base)] active:cursor-grabbing ${
         dragging
           ? 'border-dashed border-accent/50 opacity-35'
-          : `${queued ? 'border-dashed border-line-strong' : unwritten ? 'border-dashed border-warn/45' : 'border-line'} hover:!translate-y-[-2px] hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]`
+          : `${topicOnly ? 'border-dashed border-line-strong' : unwritten ? 'border-dashed border-warn/45' : 'border-line'} hover:!translate-y-[-2px] hover:border-accent/60 hover:shadow-[0_14px_36px_-16px_var(--color-glow)]`
       } ${landed ? 'anim-pop-in' : ''}`}
       style={{ touchAction: 'manipulation' }}
     >
@@ -1262,348 +1322,327 @@ function SlotCard({
         </span>
         <span className="mono shrink-0 text-[8.5px] text-accent-bright" title="Confidence">{idea.confidence}</span>
       </div>
+
+      {/* A card with no post yet can have one generated for it alone — the
+          same action as its Topic Queue row. Stops the press so a click here is
+          never read as a drag or an open. */}
+      {unwritten ? (
+        <button
+          type="button"
+          disabled={generating}
+          onPointerDown={(event) => event.stopPropagation()}
+          onPointerUp={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); onGenerate() }}
+          className="mt-2 self-start rounded-[7px] border border-magenta/40 px-2 py-[3px] text-[9.5px] font-semibold text-magenta-ink transition-colors duration-[var(--dur-fast)] hover:border-magenta/70 hover:bg-magenta/12 disabled:cursor-wait disabled:opacity-60"
+        >
+          {generating ? 'Generating…' : 'Generate post'}
+        </button>
+      ) : null}
     </article>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   THE QUEUE — every idea below the cut, one column per platform
+   THE TOPIC QUEUE — every future date's validated topic, and its Generate Post
    ───────────────────────────────────────────────────────────────────────────
-   The design draws the four platforms side by side, each headed by how many
-   ideas are waiting on it, each row carrying the rank it holds there. A
-   platform with nothing waiting keeps its column and says so — a missing
-   column would read as a platform the agents forgot.
+   One row per topic dated after the post-ready horizon, in date order: date,
+   topic, platform, content pillar, source trend, validation status, and the
+   action. Nothing here has a caption, image or hashtags — pressing Generate
+   Post writes the complete post for that ONE topic, and the row leaves the
+   queue for the grid. The topic's line, date and platform are editable; the
+   arrows reorder the queue by handing its dates out again in the new order.
+   Nothing is deleted: withdraw keeps the topic and its reasons on record.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-function Queue({
+const VALIDATION_INK: Record<string, string> = {
+  validated: 'var(--color-good)',
+  needs_review: 'var(--color-warn)',
+  pending: 'var(--color-ink-3)',
+  duplicate: 'var(--color-ink-3)',
+  rejected: 'var(--color-critical)',
+}
+
+function TopicQueue({
   queueRef,
-  queued,
-  capacity,
-  weekPrimary,
-  cap,
-  onDrag,
-  draggingId,
+  groups,
+  focusId,
 }: {
   queueRef: React.Ref<HTMLElement>
-  queued: Idea[]
-  capacity: Array<{ platform: Platform; placed: number; free: number; waiting: number }>
-  weekPrimary: Idea[]
-  cap: number
-  onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
-  draggingId: string | null
+  /** One entry per TOPIC. `platforms` is every platform that topic publishes to. */
+  groups: Array<{ lead: Idea; platforms: Platform[]; ideas: Idea[] }>
+  focusId: string | null
 }) {
-  const promoteIdea = useStore((s) => s.promoteIdea)
+  const generatePost = useStore((s) => s.generatePost)
+  const generatingPosts = useStore((s) => s.generatingPosts)
+  const editTopic = useStore((s) => s.editTopic)
+  const reorderTopicQueue = useStore((s) => s.reorderTopicQueue)
   const deleteIdea = useStore((s) => s.deleteIdea)
-  const openReview = useStore((s) => s.openReview)
-  const [armed, setArmed] = useState<string | null>(null)
 
-  /* What each platform has free, and what a promotion there would displace. */
-  const seats = new Map(
-    capacity.map((c) => {
-      const placed = weekPrimary.filter((i) => i.platform === c.platform)
-      return [
-        c.platform,
-        {
-          free: c.free,
-          weakest: placed.length >= cap && placed.length > 0
-            ? placed.reduce((lo, i) => (i.confidence < lo.confidence ? i : lo))
-            : null,
-        },
-      ] as const
-    }),
-  )
+  const topics = groups.map((g) => g.lead)
 
-  /** A platform's waiting ideas, strongest rank first. */
-  const waitingOn = (platform: Platform): Idea[] =>
-    queued
-      .filter((i) => i.platform === platform)
-      .sort((a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence)
+  const move = (index: number, by: -1 | 1): void => {
+    const target = index + by
+    if (target < 0 || target >= topics.length) return
+    const ids = topics.map((t) => t.id)
+    const [picked] = ids.splice(index, 1)
+    if (picked === undefined) return
+    ids.splice(target, 0, picked)
+    void reorderTopicQueue(ids)
+  }
 
   return (
-    <section ref={queueRef} className="flex w-full shrink-0 flex-col px-[18px] pb-7 pt-3" aria-label="Ranked queue">
+    <section ref={queueRef} className="flex w-full shrink-0 flex-col px-[18px] pb-7 pt-3" aria-label="Topic Queue">
       <header className="flex flex-wrap items-baseline gap-2.5 pb-3">
-        <h2 className="text-[15px] font-semibold tracking-[-0.015em] text-ink">More suggestions</h2>
+        <h2 className="text-[15px] font-semibold tracking-[-0.015em] text-ink">Topic Queue</h2>
         <span className="text-[10.5px] text-ink-3">
-          {queued.length === 0
-            ? 'everything the agents formed is on the calendar'
-            : `${queued.length} ranked below the cut · promote one onto a day, or drag it there`}
+          {topics.length === 0
+            ? 'no future topics waiting — every placed date is post-ready or already written'
+            : `${topics.length} validated topic${topics.length === 1 ? '' : 's'} on future dates · one row per topic, adapted per platform · topic only, no post yet · generate one when you need it`}
         </span>
       </header>
 
-      <div className="grid items-start gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
-        {capacity.map((c) => {
-          const rows = waitingOn(c.platform)
-          const colour = PLATFORM_TOKEN[c.platform]
-          const seat = seats.get(c.platform)
-          return (
-            <div
-              key={c.platform}
-              aria-label={`${PLATFORM_LABEL[c.platform]} suggestions`}
-              className="glass-panel flex min-w-0 flex-col gap-3 rounded-[14px] p-4"
-            >
-              <div className="flex items-center gap-2.5">
-                <span
-                  className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px]"
-                  style={{ background: `color-mix(in srgb, ${colour} 16%, transparent)`, border: `1px solid color-mix(in srgb, ${colour} 40%, transparent)` }}
-                >
-                  <PlatformIcon platform={c.platform} size={11} />
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">{PLATFORM_LABEL[c.platform]}</span>
-                <span
-                  className="mono shrink-0 rounded-full border border-line-strong px-2 py-px text-[8.5px] tracking-[0.04em] text-ink-3"
-                  title={`${c.free} of ${cap} ${PLATFORM_LABEL[c.platform]} slots free this week`}
-                >
-                  {rows.length} waiting
-                </span>
-              </div>
-
-              {rows.length === 0 ? (
-                <div className="rounded-[10px] border border-dashed border-line-strong px-3 py-5 text-center text-[10.5px] text-ink-3">
-                  No suggestions waiting
-                </div>
-              ) : (
-                /*
-                 * FIVE IN VIEW, THE REST BEHIND A SCROLL.
-                 *
-                 * Every waiting idea used to render in the column, so a platform
-                 * holding thirty of them produced a single column thousands of
-                 * pixels tall and pushed everything below the fold off the page.
-                 * The ranking is the point of this list — the strongest few are
-                 * what an operator acts on — so the column is sized to about five
-                 * rows and the remainder stays reachable by scrolling rather than
-                 * being hidden or truncated away.
-                 *
-                 * TWO THINGS THIS DELIBERATELY DOES NOT DO.
-                 *
-                 * It sets `overscroll-auto` rather than relying on the default.
-                 * `index.css` applies `overscroll-behavior: contain` to `*`, so
-                 * every scroller in the product refuses to chain by default —
-                 * removing the local `overscroll-contain` class was not enough,
-                 * and reaching the end of one platform's list still dead-ended
-                 * instead of handing the gesture to the page. `overscroll-auto`
-                 * opts this one list back in, which is what a reader expects from
-                 * a list inside a scrolling document.
-                 *
-                 * And it does not omit `min-h-0`. A flex child will not shrink
-                 * below its content height without it, which is the standard way
-                 * an `overflow-y-auto` inside `flex-col` silently refuses to
-                 * scroll. `max-h` alone is not enough once the parent is a flex
-                 * container.
-                 *
-                 * `pr-1` leaves room for the scrollbar so a row's buttons do not
-                 * sit under it.
-                 */
-                <div
-                  className="flex max-h-[34rem] min-h-0 flex-col gap-3 overflow-y-auto overscroll-auto pr-1"
-                  aria-label={`${PLATFORM_LABEL[c.platform]} ranked suggestions, scrollable`}
-                >
-                {rows.map((idea, i) => {
-                  const isArmed = armed === idea.id
-                  return (
-                    <QueueRow
-                      key={idea.id}
-                      idea={idea}
-                      index={i}
-                      isArmed={isArmed}
-                      free={seat?.free ?? 0}
-                      weakestTitle={seat?.weakest?.title ?? null}
-                      cap={cap}
-                      dragging={draggingId === idea.id}
-                      onDrag={onDrag}
-                      onOpen={() => openReview(idea.id)}
-                      onPromote={() => {
-                        if (!isArmed) { setArmed(idea.id); return }
-                        setArmed(null)
-                        void promoteIdea(idea.id)
-                      }}
-                      onWithdraw={() => {
-                        if (isArmed) { setArmed(null); return }
-                        void deleteIdea(idea.id)
-                      }}
-                    />
-                  )
-                })}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
+      {topics.length === 0 ? (
+        <div className="glass-panel rounded-[14px] px-4 py-6 text-center text-[11px] text-ink-3">
+          The Calendar Agent writes today&rsquo;s post, and tomorrow&rsquo;s when the posting schedule requires it. Later dates appear here as topics after the next run.
+        </div>
+      ) : (
+        <div className="glass-panel overflow-x-auto rounded-[14px]">
+          <table className="w-full min-w-[920px] border-collapse text-left">
+            <thead>
+              <tr className="mono border-b border-line text-[8.5px] uppercase tracking-[0.1em] text-ink-3">
+                <th scope="col" className="w-[64px] px-3 py-2 font-medium">Order</th>
+                <th scope="col" className="px-2 py-2 font-medium">Date</th>
+                <th scope="col" className="px-2 py-2 font-medium">Topic</th>
+                <th scope="col" className="px-2 py-2 font-medium">Platform</th>
+                <th scope="col" className="px-2 py-2 font-medium">Content pillar</th>
+                <th scope="col" className="px-2 py-2 font-medium">Source / trend</th>
+                <th scope="col" className="px-2 py-2 font-medium">Validation</th>
+                <th scope="col" className="px-3 py-2 text-right font-medium">Action</th>
+              </tr>
+            </thead>
+            <tbody className="tabular">
+              {groups.map((group, index) => (
+                <TopicRow
+                  key={group.lead.id}
+                  topic={group.lead}
+                  platforms={group.platforms}
+                  index={index}
+                  last={index === groups.length - 1}
+                  focused={focusId === group.lead.id}
+                  generating={group.ideas.some((i) => generatingPosts.includes(i.id))}
+                  onUp={() => move(index, -1)}
+                  onDown={() => move(index, 1)}
+                  onEdit={(patch) => void editTopic(group.lead.id, patch)}
+                  onGenerate={() => void generatePost(group.lead.id)}
+                  onWithdraw={() => void deleteIdea(group.lead.id)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   )
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   A QUEUE ROW — a ranked suggestion that can be dragged onto a calendar day
-   ───────────────────────────────────────────────────────────────────────────
-   The same gesture as the calendar's SlotCard, read by the same hook: a press
-   that travels becomes a drag, one that does not opens the post. Promote and
-   Withdraw stop the pointer at their own edge so a press on them never starts
-   a drag. Dropping the row on a day PROMOTES it onto the calendar and lands it
-   there, via scheduleIdeaOnDay.
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function QueueRow({
-  idea,
+function TopicRow({
+  topic,
+  platforms,
   index,
-  isArmed,
-  free,
-  weakestTitle,
-  cap,
-  dragging,
-  onDrag,
-  onOpen,
-  onPromote,
+  last,
+  focused,
+  generating,
+  onUp,
+  onDown,
+  onEdit,
+  onGenerate,
   onWithdraw,
 }: {
-  idea: Idea
+  topic: Idea
+  /** Every platform this topic publishes to — the whole cross-platform group. */
+  platforms: Platform[]
   index: number
-  isArmed: boolean
-  free: number
-  weakestTitle: string | null
-  cap: number
-  dragging: boolean
-  onDrag: (idea: Idea, phase: DragPhase, point: DragPoint, rect?: DOMRect) => void
-  onOpen: () => void
-  onPromote: () => void
+  last: boolean
+  focused: boolean
+  generating: boolean
+  onUp: () => void
+  onDown: () => void
+  onEdit: (patch: { title?: string; date?: string; platform?: Platform }) => void
+  onGenerate: () => void
   onWithdraw: () => void
 }) {
-  const angle = typeof idea.analysis.angle === 'string' ? idea.analysis.angle : topicOf(idea)
+  const [editing, setEditing] = useState(false)
+  const [draftTitle, setDraftTitle] = useState(topic.title)
 
-  const { node, onPointerDown } = useCardPress({ idea, onDrag, onOpen })
-
-  /*
-   * THE ROW'S OWN CONTROLS, AND NOTHING ELSE, SWALLOW THE PRESS.
-   *
-   * The title used to be a <button> carrying these same handlers, and that is
-   * the part of a row a person actually grabs. Stopping the pointer there meant
-   * the article never recorded a press, so dragging a suggestion onto a day
-   * silently did nothing — no ghost, no drop, no error. Only Promote and
-   * Withdraw stop the pointer now; everywhere else on the row starts a drag.
-   */
-  const stop = {
-    onPointerDown: (event: React.PointerEvent) => event.stopPropagation(),
-    onPointerUp: (event: React.PointerEvent) => event.stopPropagation(),
-    onKeyDown: (event: React.KeyboardEvent) => event.stopPropagation(),
+  const commitTitle = (): void => {
+    setEditing(false)
+    const next = draftTitle.trim()
+    if (next.length >= 3 && next !== topic.title) onEdit({ title: next })
+    else setDraftTitle(topic.title)
   }
 
+  const trend = topic.source_topic ?? topic.hashtag_display
+  const validation = topic.source_validation ?? null
+  const validationInk = validation ? (VALIDATION_INK[validation] ?? 'var(--color-ink-3)') : 'var(--color-ink-3)'
+  const arrow =
+    'flex h-[20px] w-[20px] items-center justify-center rounded-[6px] border border-line-strong text-[10px] text-ink-3 transition-colors hover:border-accent hover:text-accent-bright disabled:cursor-not-allowed disabled:opacity-30'
+
   return (
-    <article
-      ref={node}
-      role="button"
-      tabIndex={0}
-      onPointerDown={onPointerDown}
-      onKeyDown={(event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return
-        event.preventDefault()
-        onOpen()
-      }}
-      aria-label={`Open “${idea.title}”. Drag it onto a day to schedule it.`}
-      className={`group relative cursor-grab select-none border-t border-line pt-3 outline-none transition-opacity duration-200 active:cursor-grabbing ${
-        dragging ? 'opacity-35' : 'hover:opacity-90'
+    <tr
+      data-topic={topic.id}
+      className={`border-b border-line/70 align-top text-[11.5px] text-ink-2 transition-colors duration-[var(--dur-base)] last:border-b-0 ${
+        focused ? 'bg-accent/[0.12]' : 'hover:bg-surface-3/40'
       }`}
-      style={{ animation: `eth-row-stream 200ms ${EASE} ${index * 40}ms both`, touchAction: 'manipulation' }}
+      style={{ animation: `eth-row-stream 200ms ${EASE} ${Math.min(index, 12) * 30}ms both` }}
     >
-      {/*
-        WITHDRAW ON HOVER — the same action as the footer button, one gesture away.
-
-        The footer already carries Withdraw, but reaching it means reading the row
-        first. Clearing a queue of thirty suggestions is a scanning job, so the
-        cross sits where the eye already is and appears only on hover, keeping the
-        resting row uncluttered.
-
-        Hidden while the row is armed: in that state the footer pair reads
-        Confirm / Cancel, and a third control that withdrew outright would sit
-        beside a Cancel that does the opposite.
-
-        `stop` is essential — every other part of the row starts a drag, so
-        without it a click here would be read as the beginning of one.
-
-        Nothing is destroyed. This withdraws: the idea keeps its title, rank and
-        reasons and its status becomes rejected, so the lineage stays
-        reconstructable. The label says withdraw for that reason.
-      */}
-      {isArmed ? null : (
-        <button
-          type="button"
-          {...stop}
-          onClick={onWithdraw}
-          aria-label={`Withdraw “${idea.title}”`}
-          title="Withdraw this suggestion — it keeps its rank and reasons, and nothing is deleted"
-          className="absolute right-0 top-2.5 z-10 flex h-[22px] w-[22px] items-center justify-center rounded-[7px] border border-line-strong bg-surface-2 text-ink-3 opacity-0 transition-[opacity,color,border-color] duration-[160ms] hover:border-critical hover:text-critical focus-visible:opacity-100 group-hover:opacity-100"
-        >
-          <X size={12} aria-hidden="true" />
-        </button>
-      )}
-
-      <div className="flex items-start gap-2 pr-7">
-        <span className="tabular mono shrink-0 pt-[2px] text-[10px] font-semibold text-ink-3" title="Rank on its platform">
-          #{idea.platform_rank ?? '–'}
-        </span>
-        <span className="min-w-0 flex-1" title={idea.title}>
-          <span className="line-clamp-2 block text-[12px] font-semibold leading-[1.4] text-ink">
-            {idea.title}
-            {idea.is_new_trend ? <span className="mono ml-1.5 text-[8px] font-medium text-magenta">NEW</span> : null}
-          </span>
-          <span className="mono mt-[3px] block truncate text-[8.5px] text-ink-3" title={angle}>
-            <span aria-hidden="true">↳ </span>{angle}
-          </span>
-        </span>
-      </div>
-
-      <div className="mt-2 flex items-center gap-2">
-        <span className="tabular text-[10.5px] font-semibold text-ink-2" title="Confidence">{idea.confidence}%</span>
-        <span className="flex-1" />
-        <button
-          type="button"
-          {...stop}
-          onClick={onPromote}
-          className={`shrink-0 rounded-[8px] border px-3 py-[5px] text-[10.5px] font-semibold transition-colors duration-[220ms] ${
-            isArmed
-              ? 'border-magenta bg-magenta text-on-accent hover:brightness-110'
-              : 'border-magenta/40 text-magenta-ink hover:border-magenta/70 hover:bg-magenta/12'
-          }`}
-        >
-          {isArmed ? 'Confirm' : 'Promote'}
-        </button>
-        <button
-          type="button"
-          {...stop}
-          onClick={onWithdraw}
-          className="shrink-0 rounded-[8px] border border-line-strong px-3 py-[5px] text-[10.5px] font-medium text-ink-2 transition-colors duration-[220ms] hover:border-line-strong hover:text-ink"
-        >
-          {isArmed ? 'Cancel' : 'Withdraw'}
-        </button>
-      </div>
-
-      {/* Promotion can displace a placed post, so it states the
-          consequence and waits. Nothing here is irreversible. */}
-      {isArmed ? (
-        <div
-          className={`mt-2 border-l pl-[9px] ${free > 0 ? 'border-good/60' : 'border-serious/60'}`}
-          style={{ animation: `eth-row-stream 260ms ${EASE} both` }}
-        >
-          {free > 0 ? (
-            <>
-              <div className="mono text-[9px] uppercase tracking-[0.12em] text-good-ink">A slot is free</div>
-              <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
-                Takes the first open slot on {PLATFORM_LABEL[idea.platform]}. Nothing is displaced.
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="mono text-[9px] uppercase tracking-[0.12em] text-serious">Promoting this displaces</div>
-              <div className="mt-1 text-[11px] leading-relaxed text-ink-2">
-                #{cap} <strong className="font-semibold">“{weakestTitle ?? 'the weakest placed post'}”</strong> — which returns to this queue with its rank. Nothing is deleted.
-              </div>
-            </>
-          )}
-          {idea.status === 'suggested' ? (
-            <div className="mt-1 text-[11px] text-ink-3">no caption yet · written with the pipeline if it lands this week; a later week waits in the caption queue</div>
-          ) : null}
+      <td className="px-3 py-2.5">
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={onUp} disabled={index === 0} className={arrow} aria-label={`Move “${topic.title}” earlier in the queue`} title="Earlier — takes the previous topic's date">
+            ↑
+          </button>
+          <button type="button" onClick={onDown} disabled={last} className={arrow} aria-label={`Move “${topic.title}” later in the queue`} title="Later — takes the next topic's date">
+            ↓
+          </button>
         </div>
-      ) : null}
-    </article>
+      </td>
+
+      <td className="whitespace-nowrap px-2 py-2.5">
+        <input
+          type="date"
+          value={String(topic.scheduled_date).slice(0, 10)}
+          onChange={(event) => {
+            if (event.target.value) onEdit({ date: event.target.value })
+          }}
+          aria-label={`Date for “${topic.title}”`}
+          className="mono rounded-[6px] border border-line-strong bg-surface px-1.5 py-[3px] text-[10.5px] text-ink outline-none focus:border-accent"
+        />
+        <span className="mono ml-1.5 text-[9.5px] text-ink-3">{clock(topic.scheduled_time)}</span>
+      </td>
+
+      <td className="min-w-[220px] px-2 py-2.5">
+        {editing ? (
+          <input
+            autoFocus
+            value={draftTitle}
+            onChange={(event) => setDraftTitle(event.target.value)}
+            onBlur={commitTitle}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commitTitle()
+              if (event.key === 'Escape') {
+                setDraftTitle(topic.title)
+                setEditing(false)
+              }
+            }}
+            aria-label="Topic"
+            className="w-full rounded-[6px] border border-accent bg-surface px-2 py-[3px] text-[11.5px] text-ink outline-none"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setDraftTitle(topic.title)
+              setEditing(true)
+            }}
+            title="Edit this topic — editing never writes a post"
+            className="text-left font-semibold leading-snug text-ink hover:text-accent-bright"
+          >
+            {topic.title}
+            {topic.is_new_trend ? <span className="mono ml-1.5 text-[8px] font-medium text-magenta">NEW</span> : null}
+          </button>
+        )}
+      </td>
+
+      <td className="whitespace-nowrap px-2 py-2.5">
+        {/*
+          EVERY PLATFORM THIS TOPIC GOES TO, IN ONE CELL.
+
+          A topic is planned once and adapted per platform, so the row shows the
+          whole set. The select edits the lead idea's platform; the extra icons
+          state the others rather than implying the topic is four topics.
+        */}
+        <span className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1">
+            {platforms.map((p) => (
+              <PlatformIcon key={p} platform={p} size={10} />
+            ))}
+          </span>
+          {platforms.length > 1 ? (
+            <span className="mono text-[9.5px] text-ink-3" title={platforms.map((p) => PLATFORM_LABEL[p]).join(', ')}>
+              ×{platforms.length}
+            </span>
+          ) : (
+            <select
+              value={topic.platform}
+              onChange={(event) => onEdit({ platform: event.target.value as Platform })}
+              aria-label={`Platform for “${topic.title}”`}
+              className="rounded-[6px] border border-line-strong bg-surface px-1 py-[2px] text-[10.5px] text-ink outline-none focus:border-accent"
+            >
+              {PLATFORMS.map((p) => (
+                <option key={p} value={p}>
+                  {PLATFORM_LABEL[p]}
+                </option>
+              ))}
+            </select>
+          )}
+        </span>
+      </td>
+
+      <td className="px-2 py-2.5">
+        {topic.content_pillar ? (
+          <span className="rounded-full border border-accent/30 px-2 py-[2px] text-[9.5px] text-accent-bright">{topic.content_pillar}</span>
+        ) : (
+          <span className="text-[10px] text-ink-3" title="The topic touches none of Ethara's declared pillars">none matched</span>
+        )}
+      </td>
+
+      <td className="max-w-[220px] px-2 py-2.5">
+        {trend ? <span className="block truncate text-magenta-ink" title={trend}>#{trend.replace(/^#/, '')}</span> : null}
+        {topic.source_url ? (
+          <a
+            href={topic.source_url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="block truncate text-[10px] text-ink-3 underline decoration-line-strong underline-offset-2 hover:text-accent-bright"
+            title={topic.source_title ?? topic.source_url}
+          >
+            {topic.source_name ?? topic.source_title ?? 'source post'}
+          </a>
+        ) : !trend ? (
+          <span className="text-[10px] text-ink-3">no source recorded</span>
+        ) : null}
+      </td>
+
+      <td className="whitespace-nowrap px-2 py-2.5">
+        <span
+          className="mono rounded-[5px] px-[6px] py-px text-[8.5px] uppercase tracking-[0.08em]"
+          style={{ color: validationInk, background: `color-mix(in srgb, ${validationInk} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${validationInk} 34%, transparent)` }}
+          title={validation ? `The Validation Agent's verdict on this topic's source post` : 'No captured source post to validate'}
+        >
+          {validation ? validation.replace('_', ' ') : 'not stated'}
+        </span>
+      </td>
+
+      <td className="whitespace-nowrap px-3 py-2.5 text-right">
+        <button
+          type="button"
+          onClick={onGenerate}
+          disabled={generating}
+          className="rounded-[8px] border border-magenta/50 bg-magenta/10 px-3 py-[5px] text-[10.5px] font-semibold text-magenta-ink transition-colors duration-[220ms] hover:border-magenta hover:bg-magenta/20 disabled:cursor-wait disabled:opacity-60"
+        >
+          {generating ? 'Generating…' : 'Generate Post'}
+        </button>
+        <button
+          type="button"
+          onClick={onWithdraw}
+          aria-label={`Withdraw “${topic.title}”`}
+          title="Withdraw this topic — it keeps its reasons on record, and nothing is deleted"
+          className="ml-1.5 inline-flex h-[24px] w-[24px] items-center justify-center rounded-[7px] border border-line-strong text-ink-3 align-middle transition-colors hover:border-critical hover:text-critical"
+        >
+          <X size={11} aria-hidden="true" />
+        </button>
+      </td>
+    </tr>
   )
 }
 

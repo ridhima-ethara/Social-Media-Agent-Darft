@@ -2,8 +2,8 @@
 THE BACKGROUND PAINTER
 
 FLUX.2 Klein, the local background painter for the Python agent tier. Mirrors
-`server/src/agents/image/image-models/flux2-klein.ts` — same model, same two
-transports, same prompt, same seed rule — so a brief painted by either tier
+`server/src/agents/image/image-models/flux2-klein.ts` — same model, same
+transport, same prompt, same seed rule — so a brief painted by either tier
 produces the same picture.
 
 BACKGROUND PIXELS ONLY. Rule 12 says no diffusion model is ever asked to render
@@ -12,13 +12,9 @@ are composited over the result as vectors by `imagery.render_image`, which is
 the real enforcement: a model that ignored the instruction still could not put
 text on the finished creative, because the finished creative is drawn locally.
 
-TWO TRANSPORTS, ONE MODEL
-Ollama holds the weights and advertises `capabilities: ["image"]`, but as of
-0.33.3 its HTTP API refuses image models outright. So this tries Ollama first
-and falls through to mflux, the MLX port of the same model, run as a subprocess.
-That is transport selection, not model substitution: an operator who asked for
-FLUX.2 Klein gets FLUX.2 Klein either way, and the transport that served is
-recorded. When Ollama ships REST support the first branch simply starts winning.
+ONE TRANSPORT: mflux, the MLX port of the model, run as a subprocess. (An
+earlier version also tried Ollama's HTTP API first, but Ollama has been removed
+from the product; mflux was always the transport that actually painted.)
 
 DEGRADE, NEVER FAIL. Every failure path returns a reason instead of raising.
 The Image Agent renders the brand layer on its own when nothing painted, and
@@ -30,25 +26,18 @@ than both.
 from __future__ import annotations
 
 import base64
-import json
 import os
 import shutil
 import subprocess
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from core.models import DEFAULT_MFLUX_MODEL, DEFAULT_OLLAMA_IMAGE_MODEL, resolved
+from core.models import DEFAULT_MFLUX_MODEL, resolved
 
 # Transport binding is environment, not operator settings — the same split
 # `core/llm.py` makes. Which machine a model runs on is deployment; how the
 # agent behaves once it has one is configuration, and that lives in the registry.
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
-OLLAMA_IMAGE_MODEL = resolved("OLLAMA_IMAGE_MODEL", DEFAULT_OLLAMA_IMAGE_MODEL)
-OLLAMA_IMAGE_TIMEOUT_S = int(os.environ.get("OLLAMA_IMAGE_TIMEOUT_MS", "600000")) // 1000
-
 MFLUX_PYTHON = os.environ.get("MFLUX_PYTHON", "").strip()
 MFLUX_MODEL = resolved("MFLUX_MODEL", DEFAULT_MFLUX_MODEL)
 MFLUX_STEPS = int(os.environ.get("MFLUX_STEPS", "4"))
@@ -74,22 +63,18 @@ def _mflux_cli() -> Path | None:
     return Path(found) if found else None
 
 
-def ollama_configured() -> bool:
-    return bool(OLLAMA_BASE_URL)
-
-
 def mflux_configured() -> bool:
     return _mflux_cli() is not None
 
 
 def is_configured() -> bool:
-    return ollama_configured() or mflux_configured()
+    return mflux_configured()
 
 
 def unavailable_reason() -> str:
     if is_configured():
         return ""
-    return "neither OLLAMA_BASE_URL nor MFLUX_PYTHON is set, so FLUX.2 Klein has no transport"
+    return "MFLUX_PYTHON is not set, so FLUX.2 Klein has no transport"
 
 
 def build_prompt(background_prompt: str) -> str:
@@ -127,33 +112,6 @@ def seed_for(headline: str, concept: str, platform: str) -> int:
     for char in f"{headline}|{concept}|{platform}":
         hash_ = ((hash_ ^ ord(char)) * 16777619) & 0xFFFFFFFF
     return hash_ % 2_147_483_647
-
-
-def _paint_with_ollama(prompt: str, width: int, height: int) -> dict[str, str]:
-    """The preferred transport: the weights are already there, no second runtime."""
-    body = json.dumps({
-        "model": OLLAMA_IMAGE_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"width": width, "height": height},
-    }).encode()
-    request = urllib.request.Request(
-        f"{OLLAMA_BASE_URL}/api/generate",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=OLLAMA_IMAGE_TIMEOUT_S) as response:
-        payload = json.loads(response.read().decode())
-
-    images = payload.get("images") or []
-    if not images:
-        # This is the documented 0.33.3 behaviour, not an outage. Named exactly
-        # so the operator does not go looking for a broken daemon.
-        raise RuntimeError(
-            payload.get("error")
-            or "Ollama returned no image — its HTTP API still refuses image models"
-        )
-    return {"base64": images[0], "mime_type": "image/png"}
 
 
 def _paint_with_mflux(prompt: str, width: int, height: int, seed: int) -> dict[str, str]:
@@ -253,19 +211,6 @@ def paint_background(
         }
 
     full_prompt = build_prompt(prompt)
-    failures: list[str] = []
-
-    if ollama_configured():
-        try:
-            image = _paint_with_ollama(full_prompt, snap(width), snap(height))
-            return {
-                "painted": True, "painter": PAINTER_ID, "transport": "ollama",
-                "model": OLLAMA_IMAGE_MODEL,
-                "data_uri": f"data:{image['mime_type']};base64,{image['base64']}",
-                "prompt_used": full_prompt,
-            }
-        except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, ValueError) as error:
-            failures.append(f"Ollama transport declined — {error}")
 
     if mflux_configured():
         try:
@@ -279,11 +224,12 @@ def paint_background(
                 "prompt_used": full_prompt,
             }
         except (RuntimeError, OSError) as error:
-            failures.append(f"mflux transport failed — {error}")
+            return {
+                "painted": False, "painter": painter, "transport": "none",
+                "reason": f"FLUX.2 Klein could not paint — {error}",
+            }
 
-    # Both transports named, so the operator sees why each one declined rather
-    # than a single collapsed "unavailable".
     return {
         "painted": False, "painter": painter, "transport": "none",
-        "reason": f"no FLUX.2 Klein transport succeeded — {'; '.join(failures)}",
+        "reason": unavailable_reason(),
     }

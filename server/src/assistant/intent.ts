@@ -479,11 +479,7 @@ export function extractEntities(utterance: string, toolId: string): Record<strin
     entities.activeOnly = false
   }
 
-  /* ── Slot / status ────────────────────────────────────────────────────── */
-  if (wants('slot')) {
-    if (/\bsuggestions?\b/.test(lower)) entities.slot = 'suggestion'
-    else if (/\b(calendar|primary|scheduled)\b/.test(lower)) entities.slot = 'primary'
-  }
+  /* ── Status ───────────────────────────────────────────────────────────── */
   if (wants('status')) {
     if (/\bawaiting leadership|with leadership|pending leadership\b/.test(lower)) {
       entities.status = 'pending_leadership'

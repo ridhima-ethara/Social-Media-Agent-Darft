@@ -24,7 +24,7 @@ packages/agents/
 | 4 | `server/src/agents/<id>/handlers.ts` | The skill handlers — one file per agent, registered by id |
 | 5 | `shared/agent-registry.ts` | The same skill ids, with every knob declared and described |
 | 6 | `packages/skills/<skill>/SKILL.md` | The behavioural specification the handlers implement and the prompt points at |
-| 7 | `server/src/integrations/*` | The connectors the handlers reach through — each behind `ServiceAdapter` with `isConfigured()` and `unavailableReason()`. `capture.ts` routes a scraping lane to Apify or crawl4ai; `integrationReport()` sweeps them all for `/health` |
+| 7 | `server/src/integrations/*` | The connectors the handlers reach through — each behind `ServiceAdapter` with `isConfigured()` and `unavailableReason()`. `capture.ts` routes a platform lane to the Claude Bridge (`server/src/bridges/claude-bridge/`) and the open web to Parallel; `integrationReport()` sweeps them all for `/health` |
 
 ## The invariants `npm run agent:check` enforces
 

@@ -20,6 +20,7 @@ import {
   HOOK_PATTERN_BRIEF,
   HOOK_PATTERN_LABEL,
   SIGNALS_CATEGORY,
+  DISCOVERED_HASHTAG_CATEGORY,
 } from '../../../../shared/agent-contract'
 import {
   temperatureFromPercent,
@@ -198,7 +199,7 @@ registerSkill<CaptionPayload>('generation.caption.voice', async (payload, ctx) =
    */
   const grounding: GroundingEntry[] = rows
     .map(toGroundingEntry)
-    .filter((entry) => entry.category !== SIGNALS_CATEGORY)
+    .filter((entry) => entry.category !== SIGNALS_CATEGORY && entry.category !== DISCOVERED_HASHTAG_CATEGORY)
 
   if (grounding.length === 0 && requireGrounding) {
     throw new Error(
@@ -1381,7 +1382,7 @@ registerSkill<CaptionPayload>('generation.caption.sourceLink', (payload, ctx) =>
    * deterministically on the idea id, which spreads the pool across the calendar
    * and still yields the same citation for the same post on every re-run.
    */
-  const citable = grounding.filter((entry) => entry.category !== SIGNALS_CATEGORY)
+  const citable = grounding.filter((entry) => entry.category !== SIGNALS_CATEGORY && entry.category !== DISCOVERED_HASHTAG_CATEGORY)
 
   const byUrl = new Map<string, { title: string; url: string; publishedAt?: string }>()
   for (const candidate of citable.flatMap((entry) => entry.sources ?? [])) {

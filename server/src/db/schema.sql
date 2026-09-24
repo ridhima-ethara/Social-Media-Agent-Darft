@@ -287,8 +287,9 @@ CREATE TABLE IF NOT EXISTS content_ideas (
   confidence            SMALLINT NOT NULL DEFAULT 0,
   priority_score        SMALLINT NOT NULL DEFAULT 0,
   platform_rank         SMALLINT,
-  -- The top-10-per-platform rule: only 'primary' ideas take a calendar slot.
-  calendar_slot         TEXT NOT NULL DEFAULT 'suggestion'
+  -- Every idea the calendar keeps is 'primary' — a dated topic (ADR-016). There
+  -- is no suggestion list; 'suggestion' survives only on withdrawn legacy rows.
+  calendar_slot         TEXT NOT NULL DEFAULT 'primary'
                         CHECK (calendar_slot IN ('primary','suggestion')),
   status                TEXT NOT NULL DEFAULT 'suggested'
                         CHECK (status IN ('suggested','drafted','in_review','pending_leadership',
@@ -726,7 +727,7 @@ CREATE INDEX IF NOT EXISTS assistant_briefs_workspace_created_idx
 ALTER TABLE pipeline_runs   ADD COLUMN IF NOT EXISTS turn_id UUID;
 ALTER TABLE agent_runs      ADD COLUMN IF NOT EXISTS turn_id UUID;
 ALTER TABLE agent_runs      ADD COLUMN IF NOT EXISTS trigger TEXT NOT NULL DEFAULT 'manual';
-ALTER TABLE content_ideas   ADD COLUMN IF NOT EXISTS calendar_slot TEXT NOT NULL DEFAULT 'suggestion';
+ALTER TABLE content_ideas   ADD COLUMN IF NOT EXISTS calendar_slot TEXT NOT NULL DEFAULT 'primary';
 ALTER TABLE content_ideas   ADD COLUMN IF NOT EXISTS platform_rank SMALLINT;
 ALTER TABLE content_ideas   ADD COLUMN IF NOT EXISTS priority_score SMALLINT NOT NULL DEFAULT 0;
 ALTER TABLE hashtags        ADD COLUMN IF NOT EXISTS in_top_set BOOLEAN NOT NULL DEFAULT false;
@@ -1070,3 +1071,88 @@ CREATE INDEX IF NOT EXISTS scraped_items_untranscribed_idx
 -- The views filter and the high-signal flag both read this.
 CREATE INDEX IF NOT EXISTS scraped_items_views_idx
   ON scraped_items (workspace_id, views DESC) WHERE views_available;
+
+-- ── No suggestion list (ADR-016) ───────────────────────────────────────────
+-- The calendar keeps dated topics only: today's post is written, tomorrow's
+-- when the schedule requires it, and every later date holds its topic in the
+-- Topic Queue. An unplaced 'suggestion' left by an earlier release is withdrawn
+-- with its reason — never deleted — and one that already had a post written is
+-- simply on the calendar. Idempotent: once applied, no row matches either.
+ALTER TABLE content_ideas ALTER COLUMN calendar_slot SET DEFAULT 'primary';
+UPDATE content_ideas
+   SET status = 'rejected',
+       leadership_decision = COALESCE(leadership_decision, '{}'::jsonb) ||
+         jsonb_build_object('decision', 'withdrawn',
+                            'reason', 'The calendar no longer keeps a suggestion list; this idea was never placed on a date and had no post.',
+                            'at', now()),
+       updated_at = now()
+ WHERE calendar_slot = 'suggestion' AND status = 'suggested';
+UPDATE content_ideas
+   SET calendar_slot = 'primary', updated_at = now()
+ WHERE calendar_slot = 'suggestion' AND status NOT IN ('suggested', 'rejected');
+
+-- ── Social Media Listener reports (Analysis Agent · analysis.social.listen) ──
+-- One row per listener run: the full report as the Analysis Agent produced it
+-- from SocialFetch data. Kept, never overwritten, so a report stays traceable
+-- to the run and credits that produced it.
+CREATE TABLE IF NOT EXISTS social_listener_reports (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id     UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  pipeline_run_id  UUID,
+  trigger          TEXT NOT NULL DEFAULT 'manual',
+  report           JSONB NOT NULL,
+  credits_used     INTEGER NOT NULL DEFAULT 0,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS social_listener_reports_workspace_idx
+  ON social_listener_reports (workspace_id, created_at DESC);
+
+-- ── Competitor Intelligence (Analysis Agent · analysis.competitor.intel) ──
+-- The Competitor Universe is data, not code: add, edit, deactivate or re-tier a
+-- competitor here (or through the API) and the next run follows it. Seeded
+-- with the P0/P1 universe by the server on first read, never over an edit.
+CREATE TABLE IF NOT EXISTS competitors (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id          UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  slug                  TEXT NOT NULL,
+  name                  TEXT NOT NULL,
+  tier                  TEXT NOT NULL DEFAULT 'P1' CHECK (tier IN ('P0', 'P1')),
+  category              TEXT NOT NULL DEFAULT '',
+  description           TEXT NOT NULL DEFAULT '',
+  website_url           TEXT NOT NULL DEFAULT '',
+  social_urls           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  keywords              JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status                TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  monitoring_frequency  TEXT NOT NULL DEFAULT 'monthly' CHECK (monitoring_frequency IN ('weekly', 'monthly', 'manual')),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_analyzed_at      TIMESTAMPTZ,
+  UNIQUE (workspace_id, slug)
+);
+
+-- One row per profile version: kept, never overwritten, so every version can
+-- be compared with the one before it (the change log) and traced to its sources.
+CREATE TABLE IF NOT EXISTS competitor_profiles (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id   UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  competitor_id  UUID NOT NULL REFERENCES competitors(id) ON DELETE CASCADE,
+  version        INTEGER NOT NULL,
+  profile        JSONB NOT NULL,
+  generated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (competitor_id, version)
+);
+CREATE INDEX IF NOT EXISTS competitor_profiles_latest_idx
+  ON competitor_profiles (competitor_id, version DESC);
+
+-- The cross-competitor market analysis, one row per run.
+CREATE TABLE IF NOT EXISTS competitor_market_reports (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id   UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  report         JSONB NOT NULL,
+  generated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS competitor_market_reports_workspace_idx
+  ON competitor_market_reports (workspace_id, generated_at DESC);
+-- Ethara.AI's own entry: profiled the same way, so it can be compared with the
+-- competitors — never counted as one, never in the market analysis.
+ALTER TABLE competitors ADD COLUMN IF NOT EXISTS is_self BOOLEAN NOT NULL DEFAULT false;

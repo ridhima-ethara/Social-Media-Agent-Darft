@@ -50,6 +50,8 @@ export const SKILLS = [
   'analysis.competitor.compare',
   'analysis.hashtag.consolidate',
   'analysis.recommendation.explain',
+  'analysis.social.listen',
+  'analysis.competitor.intel',
 ] as const
 
 /** Where this agent's handlers live, relative to the repo root. */

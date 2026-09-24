@@ -1,0 +1,97 @@
+{
+  "$comment": "SYNTHETIC TEST DATA \u2014 not LinkedIn content. Handles are fictional (sample-*), and activity ids are constructed so the timestamp they encode matches each post's intended age relative to reference_time. Used by `npm run test:linkedin-trends` and the vitest suite; never by a production adapter list.",
+  "reference_time": "2026-09-23T09:00:00Z",
+  "posts": [
+    {
+      "url": "https://www.linkedin.com/posts/sample-researcher-a_ai-agent-evaluation-needs-more-than-activity-7508404784332907187-x1y2",
+      "author": "Sample Researcher A",
+      "title": "AI agent evaluation needs more than pass@1",
+      "text": "AI agent evaluation needs more than pass@1. We ran 400 long-horizon tasks and found that success on the final step hides partial-credit failures in the middle of the trajectory. Rubric-based scoring caught 3x more constraint violations than outcome-only checks. #AIAgents #AgentEvaluation #LLM #AI"
+    },
+    {
+      "url": "https://www.linkedin.com/feed/update/urn:li:activity:7508404784332907187/",
+      "title": "AI agent evaluation needs more than pass@1",
+      "text": null,
+      "hashtags": [
+        "AgentEvaluation"
+      ]
+    },
+    {
+      "url": "https://in.linkedin.com/posts/sample-researcher-a_ai-agent-evaluation-needs-more-than-activity-7508404784332907187-x1y2?utm_source=share",
+      "title": "AI agent evaluation needs more than pass@1",
+      "text": null
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-engineer-b_rlvr-verifiable-rewards-activity-7508057495961777092-x1y2",
+      "title": "RLVR: why verifiable rewards changed our post-training runs",
+      "text": "RLVR in practice: verifiable rewards removed most of the reward hacking we saw with a learned reward model on maths and code tasks. The open question is how to extend it to tasks without a checker. #RLVR #ReinforcementLearning #PostTraining"
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-lab-c_post-training-lessons-activity-7507649809613046997-x1y2",
+      "title": "Three lessons from a quarter of LLM post-training",
+      "text": "Three lessons from a quarter of LLM post-training: preference data quality beats quantity, evaluation harnesses must be versioned with the model, and RLHF regressions show up first in long-context tasks. #PostTraining #RLHF #ModelEvaluation",
+      "engagement": {
+        "reactions": 412,
+        "comments": 37,
+        "reposts": 22
+      }
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-researcher-d_rl-environments-for-agents-activity-7507347819725116902-x1y2",
+      "title": "RL environments are the new bottleneck for AI agents",
+      "text": "Reinforcement learning environments are becoming the bottleneck for training AI agents. Stateful, verifiable environments with tool use let us measure long-horizon behaviour instead of single-turn answers. We compared three environment designs on the same reward model. #RLEnvironments #AIAgents #ReinforcementLearning"
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-growth-e_ai-agents-game-changing-activity-7507997097984386807-x1y2",
+      "title": "Game-changing AI agents are here",
+      "text": "Game-changing, revolutionary AI agents will 10x your team overnight. Book a demo today and unlock the power of autonomous agents! #AI #Innovation #AIAgents #FutureOfWork"
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-researcher-f_ai-agents-benchmarks-old-activity-7497578446848456456-x1y2",
+      "title": "AI agents benchmark roundup",
+      "text": "A roundup of AI agent benchmarks from last month: SWE-bench style tasks, web navigation and tool use. #AIAgents #Benchmarks"
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-marketer-g_q3-sales-tips-activity-7508072595456460825-x1y2",
+      "title": "5 sales tips for Q3",
+      "text": "Five sales tips to close Q3 strong: follow up faster, qualify harder, and always ask for referrals. #Sales #Marketing #Growth"
+    },
+    {
+      "url": "https://www.linkedin.com/in/sample-profile-k/",
+      "title": "Sample Profile K - AI Agents Researcher",
+      "text": "Researcher working on AI agents and evaluation."
+    },
+    {
+      "url": "https://medium.com/@sample/ai-agents-evaluation-post",
+      "title": "AI agents evaluation (Medium)",
+      "text": "An article about AI agent evaluation on another host."
+    },
+    {
+      "url": "https://www.linkedin.com/pulse/synthetic-data-generation-reward-models-sample-author-l",
+      "published_at": "2026-09-19T08:00:00Z",
+      "title": "Synthetic data generation for reward models",
+      "text": "Synthetic data generation for reward models: we generated preference pairs with a rubric and filtered them with a verifier before post-training. #SyntheticData #RewardModeling"
+    },
+    {
+      "url": "https://www.linkedin.com/pulse/model-evaluation-harness-versioning-sample-author-m",
+      "published_at": null,
+      "title": "Versioning your model evaluation harness",
+      "text": "Model evaluation results are only comparable when the evaluation harness is versioned alongside the checkpoint. #ModelEvaluation #LLM"
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-reposter-h_repost-rl-environments-activity-7507362919219730730-x1y2",
+      "title": "Reposting: RL environments are the new bottleneck",
+      "text": "Reinforcement learning environments are becoming the bottleneck for training AI agents. Stateful, verifiable environments with tool use let us measure long-horizon behaviour instead of single-turn answers. We compared three environment designs on the same reward model. #RLEnvironments #AIAgents #ReinforcementLearning"
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-founder-i_seed-round-agent-startup-activity-7507695108096600635-x1y2",
+      "title": "We raised a seed round for our AI agent startup",
+      "text": "Excited to announce we raised a seed round led by top investors to build AI agents for enterprise workflows. #AIAgents #Funding #Startup"
+    },
+    {
+      "url": "https://www.linkedin.com/posts/sample-researcher-j_long-horizon-agents-activity-7506577745511070540-x1y2",
+      "title": "Long-horizon AI agents fail in the middle, not at the end",
+      "text": "Long-horizon AI agents rarely fail at the last step. In our traces most failures begin around step 40 of 120, when the agent loses track of an earlier constraint. #LongHorizon #AIAgents #AgentEvaluation"
+    }
+  ]
+}

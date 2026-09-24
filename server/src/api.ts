@@ -49,6 +49,9 @@ import * as bufferAdapter from './integrations/buffer'
 import { rasterise } from './integrations/rasterise'
 import { databaseReachable } from './db/pool'
 import {
+  type IdeaRow,
+  insertListenerReport,
+  latestListenerReport,
   createKeyword,
   currentWorkspaceId,
   deactivateKeyword,
@@ -80,7 +83,6 @@ import {
   listSkillOverrides,
   listSkillRuns,
   listSources,
-  primaryIdeasForPlatform,
   resolveQueueForEntity,
   resolveReviewQueueRow,
   setHashtagValidation,
@@ -122,7 +124,7 @@ import {
   listConversations,
   pendingConfirmation,
 } from './db/assistant-repo'
-import { describeImage } from './integrations/ollama'
+import { describeImage } from './integrations/gcp-llm'
 import { capabilities, registeredToolIds } from './assistant/tools/index'
 import { agentSpawn, describeAgentTier, isConfigured as agentTierConfigured } from './integrations/agent-tier'
 import { requireRole, requireSession, sessionOf } from './auth/guard'
@@ -131,13 +133,21 @@ import { availableImageModels } from './agents/image/image-models/index'
 import { integrationReport,
   describeGcpAuth,
   gcpAuthAvailable,
+  platformLaneUnavailableReason,
 } from './integrations'
+import { runTrendIntelligence } from './bridges/claude-bridge/pipeline'
+import { bridgeUnavailableReason } from './bridges/claude-bridge/capture-source'
+import { renderMarkdown } from './bridges/claude-bridge/output/markdown'
+import { trendToolInputSchema } from './bridges/claude-bridge/schemas/trend-output'
+import { discoverPlatformTrends } from './bridges/claude-bridge/trends/platform-trends'
+import { platformTrendsArgs, renderPlatformTrends } from './bridges/claude-bridge/tools/linkedin-trend-intelligence'
 import {
   applyInstruction,
   approveMarketing,
   buildKnowledge,
   decideLeadership,
   generateDraft,
+  generatePostForTopic,
   publishIdea,
   refreshAnalytics,
   renderIdeaImage,
@@ -145,10 +155,43 @@ import {
   runDiscoveryPipeline,
 } from './orchestrator'
 import { bus, publish, recentEvents, subscribe, toSseFrame, REPLAY_SIZE } from './events'
-import { PLATFORM_LABEL } from './agents/corpus'
+import { labelToMinutes, PLATFORM_LABEL } from './agents/corpus'
+import { resolveCalendarHorizon } from './calendar-horizon'
+import { contentPillarFor } from '../../shared/content-pillars'
 import { persistAgentRun } from './agents/persist-run'
-import { runSkill } from './agents/runtime'
-import type { CaptionPayload } from './agents/skills/index'
+import { resolveConfig, runSkill } from './agents/runtime'
+import { fetchGlassdoor } from './agents/analysis/social-listener/glassdoor'
+import { buildReputation } from './agents/analysis/social-listener/reputation'
+import { ensureSelf as ensureSelfProfile, ensureUniverse, isDue as isCompetitorDue, markEnded as markCompetitorRunEnded, markQueued as markCompetitorRunQueued, normalized as competitorIntelligenceNow, runStatus as competitorRunStatus } from './agents/analysis/competitor-intel'
+import { marketingSkillsAvailable, skillSource, toolBindings } from './agents/analysis/competitor-intel/marketing-skills'
+import { seoConfigured } from './agents/analysis/competitor-intel/seo'
+import {
+  deleteCompetitor,
+  getCompetitor,
+  insertCompetitor,
+  latestMarketReport,
+  latestProfile,
+  listCompetitors,
+  profileByVersion,
+  profileVersions,
+  updateCompetitor,
+} from './db/competitor-repo'
+import { COMPETITOR_STATUSES, COMPETITOR_TIERS, MONITORING_FREQUENCIES } from '../../shared/competitor-intel'
+
+/** Claude settings for the listener's reputation pass, from the skill's knobs (the same ones the listener run uses). */
+function listenerClaudeOptions(knobs: Record<string, unknown>) {
+  return {
+    enabled: knobs.claudeAnalysis !== false,
+    model: typeof knobs.claudeModel === 'string' && knobs.claudeModel !== '' ? knobs.claudeModel : 'sonnet',
+    maxBudgetUsd: Number(knobs.claudeBudgetCents ?? 50) / 100,
+    timeoutMs: 180_000,
+    batchSize: Number(knobs.claudeBatchSize ?? 40),
+  }
+}
+import type { SocialMediaListener } from '../../shared/social-listener'
+import type { CaptionPayload, PipelinePayload } from './agents/skills/index'
+import { socialFetchConfigured, socialFetchUnavailableReason } from './integrations/socialfetch'
+import { fetchLayerConfigured, fetchLayerUnavailableReason } from './integrations/fetchlayer'
 import { describeWhisper, whisperTranscribe } from './integrations/whisper'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -534,15 +577,32 @@ export function createApiRouter(): Router {
             config.core.publishMode === 'live' && bufferAdapter.isConfigured(),
           detail: bufferAdapter.describeBuffer(),
         },
-        // WHICH source the four platform lanes will bind, for the same reason
+        // The Analysis Agent's Social Media Listener data source.
+        socialFetch: { configured: socialFetchConfigured(), reason: socialFetchUnavailableReason() },
+        // The Social Media Listener's Glassdoor source (FetchLayer).
+        fetchLayer: { configured: fetchLayerConfigured(), reason: fetchLayerUnavailableReason() },
+        // WHICH source the platform lanes will bind, for the same reason
         // `text.resolved` is reported below: "why does this post carry no
         // reaction count" should be answerable here rather than inferred from
-        // the zeros on the card.
-        apify: {
-          configured: statuses.apify.configured,
-          reason: statuses.apify.reason,
-          platformLanes: statuses.apify.platformLanes,
-        },
+        // the zeros on the card. The Scraping Agent's platform lanes are the
+        // Claude Bridge; Apify is no longer one of its sources.
+        claudeBridge: (() => {
+          const reason = platformLaneUnavailableReason()
+          // Per lane, because each platform module can be unavailable on its own
+          // (Facebook, whose posts cannot be dated, skips itself in capture).
+          const lanes = Object.fromEntries(
+            [...PLATFORMS, undefined].map((p) => {
+              const why = bridgeUnavailableReason(p)
+              return [p ?? 'web', { runs: why === '', reason: why === '' ? 'Ready' : why }]
+            }),
+          )
+          return {
+            configured: reason === '',
+            reason: reason === '' ? 'Configured' : reason,
+            platformLanes: reason === '' ? ('claude-bridge' as const) : ('unavailable' as const),
+            lanes,
+          }
+        })(),
         // The second engine's process boundary. Reported here for the same reason
         // crawl4ai is: it is a spawned sidecar, and "why did Run agents do
         // nothing" must be answerable from the health payload rather than from a
@@ -560,12 +620,6 @@ export function createApiRouter(): Router {
           // here is how a 401 at caption time gets to look like a working setup.
           configured: gcpAuthAvailable(),
           reason: describeGcpAuth(),
-        },
-        ollama: {
-          configured: statuses.ollama.configured,
-          reason: statuses.ollama.reason,
-          textModel: statuses.ollama.textModel,
-          imageModel: statuses.ollama.imageModel,
         },
         // Semantic retrieval. `coverage` is the load-bearing part: an embedder
         // that is configured but has embedded nothing yet still retrieves
@@ -1630,11 +1684,12 @@ export function createApiRouter(): Router {
   api.get(
     '/ideas',
     route(async (req, _res, workspaceId) => ({
+      // Calendar topics only — there is no suggestion list to return.
       ideas: await listIdeas(workspaceId, {
         ...(typeof req.query.platform === 'string'
           ? { platform: req.query.platform as Platform }
           : {}),
-        ...(typeof req.query.slot === 'string' ? { slot: req.query.slot as 'primary' } : {}),
+        slot: 'primary',
         limit: Number(req.query.limit ?? 200),
       }),
     })),
@@ -1820,7 +1875,8 @@ export function createApiRouter(): Router {
             ])
             .optional(),
           draft: z.string().optional(),
-          calendarSlot: z.enum(['primary', 'suggestion']).optional(),
+          /** A topic's own line, edited in the Topic Queue. Editing never writes a post. */
+          title: z.string().trim().min(3).max(200).optional(),
         }),
         req.body,
       )
@@ -1829,33 +1885,12 @@ export function createApiRouter(): Router {
       const idea = await getIdea(workspaceId, id)
       if (!idea) throw new Error('No such idea.')
 
-      let demoted: { id: string; title: string } | null = null
-
-      // The per-platform cap, enforced server-side: promoting past it demotes the
-      // weakest primary and says so.
-      if (body.calendarSlot === 'primary' && idea.calendar_slot !== 'primary') {
-        const cap = Number(defaultSkillConfig('calendar.rank.select').topPerPlatform ?? 5)
-        // Counted in the week this post is landing in, not across all time.
-        const primaries = await primaryIdeasForPlatform(
-          workspaceId,
-          body.platform ?? idea.platform,
-          body.date ?? idea.scheduled_date,
-        )
-        if (primaries.length >= cap) {
-          const weakest = primaries[primaries.length - 1]
-          if (weakest && weakest.id !== id) {
-            await updateIdea(workspaceId, weakest.id, { calendarSlot: 'suggestion' })
-            demoted = { id: weakest.id, title: weakest.title }
-          }
-        }
-      }
-
       const updated = await updateIdea(workspaceId, id, {
         ...(body.date === undefined ? {} : { scheduledDate: body.date }),
         ...(body.time === undefined ? {} : { scheduledTime: body.time }),
         ...(body.platform === undefined ? {} : { platform: body.platform }),
         ...(body.status === undefined ? {} : { status: body.status }),
-        ...(body.calendarSlot === undefined ? {} : { calendarSlot: body.calendarSlot }),
+        ...(body.title === undefined ? {} : { title: body.title }),
       })
 
       if (body.draft !== undefined) {
@@ -1869,7 +1904,69 @@ export function createApiRouter(): Router {
         })
       }
 
-      return { ok: true, idea: updated, demoted }
+      return { ok: true, idea: updated }
+    }),
+  )
+
+  /*
+   * GENERATE POST — one topic, on demand.
+   *
+   * Future dates hold a validated topic only. This writes the complete post —
+   * caption, hashtags, creative — for the ONE topic named, and never overwrites
+   * an existing post unless `regenerate` is sent explicitly.
+   */
+  api.post(
+    '/ideas/:id/generate-post',
+    longRoute(async (req, _res, workspaceId) => {
+      const body = parseBody(z.object({ regenerate: z.boolean().optional() }), req.body ?? {})
+      return generatePostForTopic({
+        workspaceId,
+        trigger: 'api',
+        ideaId: String(req.params.id),
+        ...(body.regenerate === undefined ? {} : { regenerate: body.regenerate }),
+      })
+    }),
+  )
+
+  /*
+   * REORDER THE TOPIC QUEUE.
+   *
+   * The queue's dates and times are its slots; reordering hands those same
+   * slots to the topics in the new order, so moving a topic up gives it an
+   * earlier date. Only topics with no post yet, dated after the post-ready
+   * horizon, can be reordered — a written post keeps its date.
+   */
+  api.post(
+    '/calendar/topic-queue/order',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(z.object({ ids: z.array(z.string().uuid()).min(2).max(200) }), req.body)
+      if (new Set(body.ids).size !== body.ids.length) throw new Error('A topic appears twice in the new order.')
+      const horizon = await resolveCalendarHorizon(workspaceId)
+      const topics: IdeaRow[] = []
+      for (const id of body.ids) {
+        const idea = await getIdea(workspaceId, id)
+        if (!idea) throw new Error('No such topic.')
+        const date = String(idea.scheduled_date).slice(0, 10)
+        if (idea.status !== 'suggested' || idea.calendar_slot !== 'primary') {
+          throw new Error(`“${idea.title}” already has a post, so it keeps its date.`)
+        }
+        if (date <= horizon.today || horizon.postReadyDates.includes(date)) {
+          throw new Error(`“${idea.title}” is post-ready (${date}), not in the Topic Queue.`)
+        }
+        topics.push(idea)
+      }
+      const slots = topics
+        .map((t) => ({ date: String(t.scheduled_date).slice(0, 10), time: t.scheduled_time }))
+        .sort((a, b) => a.date.localeCompare(b.date) || labelToMinutes(a.time) - labelToMinutes(b.time))
+      let moved = 0
+      for (const [index, topic] of topics.entries()) {
+        const slot = slots[index]
+        if (!slot) continue
+        if (slot.date === String(topic.scheduled_date).slice(0, 10) && slot.time === topic.scheduled_time) continue
+        await updateIdea(workspaceId, topic.id, { scheduledDate: slot.date, scheduledTime: slot.time })
+        moved += 1
+      }
+      return { ok: true, moved }
     }),
   )
 
@@ -2344,6 +2441,284 @@ export function createApiRouter(): Router {
     })
   })
 
+  /* ── CLAUDE BRIDGE · LinkedIn trend intelligence ─────────────────────────── */
+  /*
+   * The same pipeline the Claude Code tool runs, for the app: trends read from
+   * the Knowledge Base, brand voice and keyword configuration, newest first.
+   * A long route because a live run drives Claude Code web searches.
+   * `?format=markdown` adds the rendered table beside the JSON.
+   */
+  api.post(
+    '/bridges/linkedin-trends',
+    longRoute(async (req) => {
+      const input = parseBody(trendToolInputSchema, req.body)
+      const output = await runTrendIntelligence({ input, mode: 'tool' })
+      return req.query.format === 'markdown' ? { ...output, markdown: renderMarkdown(output) } : output
+    }),
+  )
+
+  /*
+   * Platform-level trend discovery on its own — the Scraping Agent's capture
+   * without the rest of the pipeline. Reads only; writes nothing.
+   */
+  /*
+   * THE SOCIAL MEDIA LISTENER (Analysis Agent · analysis.social.listen).
+   *
+   * GET returns the latest report; POST runs the skill now, always fresh, and
+   * returns what it produced. SocialFetch is the only data source; the report
+   * states the credits it spent and the sample it rests on.
+   */
+  api.get(
+    '/analysis/social-listener',
+    route(async (_req, _res, workspaceId) => {
+      const latest = await latestListenerReport(workspaceId)
+      return {
+        configured: socialFetchConfigured(),
+        reason: socialFetchUnavailableReason(),
+        report: latest?.report ?? null,
+        createdAt: latest?.created_at ?? null,
+      }
+    }),
+  )
+
+  /*
+   * GLASSDOOR ONLY — refresh the listener report's Glassdoor block without
+   * re-reading the social platforms (which spends SocialFetch credits). The
+   * latest report is kept as it is; a new report row is saved with the fresh
+   * Glassdoor block beside the same platform data, so history stays intact.
+   */
+  api.post(
+    '/analysis/social-listener/glassdoor',
+    longRoute(async (_req, _res, workspaceId) => {
+      if (!fetchLayerConfigured()) throw new HttpError(503, fetchLayerUnavailableReason() ?? 'FetchLayer is not configured.')
+      const skill = SKILL_BY_ID['analysis.social.listen']
+      if (!skill) throw new Error('The Social Media Listener skill is not registered.')
+      const overrides = await listSkillOverrides(workspaceId)
+      const knobs = resolveConfig(skill, overrides.get(skill.id)?.config, undefined)
+      if (knobs.includeGlassdoor === false) throw new HttpError(409, 'Glassdoor is switched off in the Social Media Listener settings.')
+      const glassdoor = await fetchGlassdoor({
+        employer: String(knobs.glassdoorEmployer ?? 'Ethara.AI'),
+        reviewLimit: Number(knobs.glassdoorReviewLimit ?? 15),
+      })
+      const latest = await latestListenerReport<SocialMediaListener>(workspaceId)
+      if (!latest) {
+        // No platform report to sit beside yet: say so rather than inventing an empty one.
+        return { glassdoor, saved: false, reason: 'No Social Media Listener report exists yet — run the listener once to attach Glassdoor to it.' }
+      }
+      const report: SocialMediaListener = { ...latest.report, glassdoor }
+      // Glassdoor feeds the reputation, so the ORM layer is re-read with it.
+      const orm = await buildReputation(report, listenerClaudeOptions(knobs))
+      report.answers = orm.answers
+      report.reputation = orm.reputation
+      await insertListenerReport(workspaceId, report, { trigger: 'glassdoor', creditsUsed: 0 })
+      publish({
+        type: 'activity',
+        agentId: 'analysis',
+        message:
+          glassdoor.status === 'ok'
+            ? `Social Media Listener · Glassdoor refreshed: ${glassdoor.overall_rating ?? '—'}/5 · ${glassdoor.reviews_analyzed} review(s) read`
+            : `Social Media Listener · Glassdoor: ${glassdoor.reason ?? glassdoor.status}`,
+        data: { status: glassdoor.status === 'ok' ? 'ok' : 'warn' },
+      })
+      return { glassdoor, saved: true }
+    }),
+  )
+
+  /*
+   * REPUTATION ONLY — re-run the ORM layer (and the three answers) over the
+   * latest stored report: no SocialFetch or FetchLayer call, only Claude.
+   */
+  api.post(
+    '/analysis/social-listener/reputation',
+    longRoute(async (_req, _res, workspaceId) => {
+      const latest = await latestListenerReport<SocialMediaListener>(workspaceId)
+      if (!latest) throw new HttpError(409, 'No Social Media Listener report exists yet — run the listener once first.')
+      const skill = SKILL_BY_ID['analysis.social.listen']
+      if (!skill) throw new Error('The Social Media Listener skill is not registered.')
+      const overrides = await listSkillOverrides(workspaceId)
+      const knobs = resolveConfig(skill, overrides.get(skill.id)?.config, undefined)
+      const orm = await buildReputation(latest.report, listenerClaudeOptions(knobs))
+      const report: SocialMediaListener = {
+        ...latest.report,
+        answers: orm.answers,
+        reputation: orm.reputation,
+        claude_cost_usd: Math.round((latest.report.claude_cost_usd + orm.costUsd) * 10_000) / 10_000,
+      }
+      await insertListenerReport(workspaceId, report, { trigger: 'reputation', creditsUsed: 0 })
+      publish({
+        type: 'activity',
+        agentId: 'analysis',
+        message: `Social Media Listener · reputation: ${orm.reputation.overview.status.replace('_', ' ')}${orm.reputation.overview.net_sentiment !== null ? ` (net ${orm.reputation.overview.net_sentiment})` : ''} · ${orm.reputation.recommended_responses.length} recommended response(s)`,
+        data: { status: orm.reputation.by === 'claude' ? 'ok' : 'warn' },
+      })
+      return { report, createdAt: new Date().toISOString() }
+    }),
+  )
+
+  /*
+   * COMPETITOR INTELLIGENCE (Analysis Agent · analysis.competitor.intel).
+   *
+   * The universe is data: list, add, edit, deactivate, remove. A run is started
+   * here and proceeds in the background (a universe takes many minutes); the
+   * tab polls `/status`. Profiles are versioned; any version can be read.
+   */
+  const competitorBody = z.object({
+    name: z.string().trim().min(1).max(120),
+    slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(60).optional(),
+    tier: z.enum(COMPETITOR_TIERS),
+    category: z.string().trim().max(80).default(''),
+    description: z.string().trim().max(600).default(''),
+    website_url: z.string().trim().url().or(z.literal('')).default(''),
+    social_urls: z.array(z.string().trim().url()).max(20).default([]),
+    keywords: z.array(z.string().trim().min(1).max(60)).max(30).default([]),
+    status: z.enum(COMPETITOR_STATUSES).default('active'),
+    monitoring_frequency: z.enum(MONITORING_FREQUENCIES).default('monthly'),
+  })
+
+  api.get(
+    '/analysis/competitors',
+    route(async (_req, _res, workspaceId) => {
+      await ensureUniverse(workspaceId)
+      await ensureSelfProfile(workspaceId)
+      const src = skillSource()
+      return {
+        universe: await listCompetitors(workspaceId),
+        intelligence: await competitorIntelligenceNow(workspaceId),
+        market: await latestMarketReport(workspaceId),
+        status: competitorRunStatus(workspaceId),
+        methodology: {
+          repository: src?.repository ?? null,
+          commit: src?.commit ?? null,
+          synced_at: src?.synced_at ?? null,
+          skills: src?.skills ?? [],
+          available: marketingSkillsAvailable(),
+          tools: toolBindings(seoConfigured()),
+        },
+      }
+    }),
+  )
+
+  api.get(
+    '/analysis/competitors/status',
+    route(async (_req, _res, workspaceId) => ({ status: competitorRunStatus(workspaceId) })),
+  )
+
+  api.post(
+    '/analysis/competitors',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(competitorBody, req.body)
+      const slug = body.slug ?? body.name.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      const created = await insertCompetitor(workspaceId, { ...body, slug })
+      if (!created) throw new HttpError(409, `A competitor with the slug “${slug}” already exists.`)
+      return { competitor: created }
+    }),
+  )
+
+  api.patch(
+    '/analysis/competitors/:id',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(competitorBody.omit({ slug: true }).partial(), req.body)
+      const updated = await updateCompetitor(workspaceId, String(req.params.id), body)
+      if (!updated) throw new HttpError(404, 'No such competitor.')
+      return { competitor: updated }
+    }),
+  )
+
+  api.delete(
+    '/analysis/competitors/:id',
+    route(async (req, _res, workspaceId) => {
+      const removed = await deleteCompetitor(workspaceId, String(req.params.id))
+      if (!removed) throw new HttpError(404, 'No such competitor.')
+      return { removed: true }
+    }),
+  )
+
+  api.get(
+    '/analysis/competitors/:id/profile',
+    route(async (req, _res, workspaceId) => {
+      const id = String(req.params.id)
+      const competitor = await getCompetitor(workspaceId, id)
+      if (!competitor) throw new HttpError(404, 'No such competitor.')
+      const version = typeof req.query.version === 'string' ? Number(req.query.version) : null
+      const profile = version !== null && Number.isInteger(version) ? await profileByVersion(workspaceId, id, version) : await latestProfile(workspaceId, id)
+      return { competitor, profile, versions: await profileVersions(workspaceId, id) }
+    }),
+  )
+
+  api.post(
+    '/analysis/competitors/run',
+    route(async (req, _res, workspaceId) => {
+      const body = parseBody(
+        z.object({ competitorIds: z.array(z.string().uuid()).max(100).optional(), depth: z.enum(['quick', 'deep']).optional(), dueOnly: z.boolean().optional() }),
+        req.body,
+      )
+      if (competitorRunStatus(workspaceId).running) throw new HttpError(409, 'A Competitor Intelligence run is already in progress.')
+      await ensureUniverse(workspaceId)
+      const universe = await listCompetitors(workspaceId)
+      const ids =
+        body.competitorIds && body.competitorIds.length > 0
+          ? body.competitorIds
+          : universe.filter((c) => !c.is_self && c.status === 'active' && (body.dueOnly !== true || isCompetitorDue(c, new Date()))).map((c) => c.id)
+      if (ids.length === 0) throw new HttpError(409, body.dueOnly ? 'No active competitor is due.' : 'No active competitor to analyse.')
+      // In the background: the tab polls /status. The skill run is recorded like any other.
+      markCompetitorRunQueued(workspaceId, ids.length)
+      void runSkill<PipelinePayload>(
+        'analysis.competitor.intel',
+        { runId: '', runOffset: 0, competitorIds: ids, competitorForce: true, ...(body.depth ? { competitorDepth: body.depth } : {}) },
+        { workspaceId, trigger: 'api' },
+      )
+        .then(({ record }) => {
+          markCompetitorRunEnded(workspaceId, record.status === 'failed' ? (record.note ?? 'The skill failed.') : null)
+          publish({ type: 'activity', agentId: 'analysis', message: `Competitor Intelligence finished · ${record.note ?? record.status}`, data: { status: record.status === 'failed' ? 'warn' : 'ok' } })
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          markCompetitorRunEnded(workspaceId, message)
+          publish({ type: 'activity', agentId: 'analysis', message: `Competitor Intelligence failed: ${message}`, data: { status: 'error' } })
+        })
+      return { started: true, competitors: ids.length }
+    }),
+  )
+
+  api.post(
+    '/analysis/social-listener/run',
+    longRoute(async (_req, _res, workspaceId) => {
+      if (!socialFetchConfigured()) throw new HttpError(503, socialFetchUnavailableReason() ?? 'SocialFetch is not configured.')
+      const { payload, record } = await runSkill<PipelinePayload>(
+        'analysis.social.listen',
+        { runId: '', runOffset: 0, listenerForceRefresh: true },
+        { workspaceId, trigger: 'api' },
+      )
+      if (!payload.socialMediaListener) {
+        throw new HttpError(502, record.note ?? `The Social Media Listener did not produce a report (${record.status}).`)
+      }
+      publish({
+        type: 'activity',
+        agentId: 'analysis',
+        message: `Social Media Listener refreshed · ${payload.socialMediaListener.sample_size.posts} posts, ${payload.socialMediaListener.sample_size.comments} comments`,
+        data: { status: 'ok' },
+      })
+      return { report: payload.socialMediaListener, status: record.status }
+    }),
+  )
+
+  api.post(
+    '/bridges/platform-trends',
+    longRoute(async (req) => {
+      const args = parseBody(platformTrendsArgs, req.body)
+      const report = await discoverPlatformTrends({
+        // "Today" is the workspace's date, as in the Scraping Agent's run.
+        timeZone: config.core.tz,
+        ...(args.hours ? { windowHours: args.hours } : {}),
+        ...(args.platforms ? { platforms: args.platforms } : {}),
+        ...(args.keywords
+          ? { keywords: args.keywords.map((term) => ({ term, weight: 100, category: 'Requested', synonyms: synonymsFor(term), scheduled: null })) }
+          : {}),
+      })
+      return req.query.format === 'markdown' ? { ...report, markdown: renderPlatformTrends(report) } : report
+    }),
+  )
+
   return api
 }
 
@@ -2488,6 +2863,7 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
   }
 
   const transcript = conversation ? await conversationTranscript(conversation.id, 40) : { turns: [] }
+  const listenerLatest = await latestListenerReport(workspaceId)
 
   return {
     workspace: {
@@ -2503,8 +2879,14 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     hashtags,
     topHashtags,
     scraped,
-    ideas: ideas.map((i) => ({
+    /*
+     * No suggestion list. Every idea on the calendar is a dated topic; a row an
+     * older release parked as a suggestion (all withdrawn by the ADR-016
+     * migration, kept for lineage) is not returned.
+     */
+    ideas: ideas.filter((i) => i.calendar_slot !== 'suggestion').map((i) => ({
       ...i,
+      content_pillar: contentPillarFor(i.title, i.source_topic, i.description),
       calendarSlot: i.calendar_slot,
       platformRank: i.platform_rank,
       draft: draftMap[`${i.id}|${i.platform}`] ?? null,
@@ -2536,6 +2918,15 @@ async function buildState(workspaceId: string): Promise<Record<string, unknown>>
     voiceSampleCount,
     trackedAccounts,
     pipeline: run,
+    /** The latest Social Media Listener report, for the Dashboard's Analysis card. */
+    socialListener: listenerLatest ? { ...listenerLatest.report, stored_at: listenerLatest.created_at } : null,
+    socialListenerConfigured: socialFetchConfigured(),
+    /*
+     * Which dates are post-ready (a written post) and which hold a topic only.
+     * Resolved here, from the operator's knobs and the workspace time zone, so
+     * the screen never computes its own "today" and disagrees with the writer.
+     */
+    calendarHorizon: await resolveCalendarHorizon(workspaceId),
     platformLabels: PLATFORM_LABEL,
     assistant: {
       conversation,

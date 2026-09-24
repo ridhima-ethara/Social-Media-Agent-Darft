@@ -58,7 +58,7 @@ export interface ToolSpec {
    * `calendar.spread`, and `calendar.reshuffle`. One sentence there rewrites a
    * week, and nobody can picture the blast radius before seeing it.
    *
-   * Single-idea edits — `idea.move`, `idea.promote`, `idea.demote` — do NOT
+   * Single-idea edits — `idea.move` — do NOT
    * carry it. They briefly did, and it was wrong: "move that to Friday" names
    * one post, its effect is obvious from the sentence, and a gate in front of
    * it turns a one-second instruction into a two-step dialogue. Confirming
@@ -485,7 +485,7 @@ export const TOOLS: ToolSpec[] = [
   {
     id: 'idea.list',
     name: 'List ideas',
-    summary: 'The calendar and the ranked suggestions beneath it.',
+    summary: 'The calendar: post-ready posts and the dated topics in the Topic Queue.',
     agentId: 'calendar',
     risk: 'safe',
     args: z
@@ -493,11 +493,10 @@ export const TOOLS: ToolSpec[] = [
         platform: platformEnum.optional(),
         status: z.string().optional().describe('Filter by idea status'),
         day: dayRef.optional().describe('Only ideas on this day'),
-        slot: z.enum(['primary', 'suggestion']).optional(),
         limit: z.number().int().min(1).max(100).optional(),
       })
       .strict(),
-    returns: 'Ideas with their platform, slot, date, time, rank, confidence and status.',
+    returns: 'Topics with their platform, date, time, rank, confidence, status and whether a post exists.',
     group: 'Calendar',
     examples: [
       'what is on the calendar',
@@ -505,7 +504,7 @@ export const TOOLS: ToolSpec[] = [
       'what is scheduled for thursday',
       'list the linkedin posts this week',
       'what is pending leadership',
-      'show me the suggestions',
+      'show me the topic queue',
     ],
   },
   {
@@ -530,26 +529,6 @@ export const TOOLS: ToolSpec[] = [
       'reschedule the carousel to tuesday',
       'put it on thursday at 9am',
       'move that post to instagram',
-    ],
-  },
-  {
-    id: 'idea.promote',
-    name: 'Promote to the calendar',
-    summary: 'Gives a suggestion a calendar slot, demoting the lowest-ranked primary if the platform is full.',
-    agentId: 'calendar',
-    risk: 'mutating',
-    args: z
-      .object({
-        id: z.string().optional(),
-        title: z.string().optional(),
-      })
-      .strict(),
-    returns: 'The promoted idea, and whatever was demoted to make room.',
-    group: 'Calendar',
-    examples: [
-      'promote that suggestion to the calendar',
-      'put that on the calendar',
-      'promote the reward modeling idea',
     ],
   },
   {
@@ -585,26 +564,6 @@ export const TOOLS: ToolSpec[] = [
     ],
   },
 
-  {
-    id: 'idea.demote',
-    name: 'Demote to suggestions',
-    summary: 'Takes an idea off the calendar and returns it to the ranked suggestions.',
-    agentId: 'calendar',
-    risk: 'mutating',
-    args: z
-      .object({
-        id: z.string().optional(),
-        title: z.string().optional(),
-      })
-      .strict(),
-    returns: 'The idea, now a suggestion.',
-    group: 'Calendar',
-    examples: [
-      'take that off the calendar',
-      'demote that to suggestions',
-      'move that back to suggestions',
-    ],
-  },
 
   /* ── Drafting ──────────────────────────────────────────────────────────── */
   /* ── Calendar, in bulk ─────────────────────────────────────────────────
@@ -703,8 +662,9 @@ export const TOOLS: ToolSpec[] = [
   },
   {
     id: 'draft.generate',
-    name: 'Write a draft',
-    summary: 'Writes the caption for an idea, grounded in the Knowledge Base, and renders its creative.',
+    name: 'Generate a post',
+    summary:
+      'Generates the complete post — caption grounded in the Knowledge Base, hashtags and creative — for ONE calendar topic. A topic that already has a post is left untouched unless regeneration is asked for.',
     agentId: 'caption',
     risk: 'mutating',
     args: z
@@ -713,6 +673,10 @@ export const TOOLS: ToolSpec[] = [
         title: z.string().optional().describe('The idea, by title'),
         day: dayRef.optional().describe('The idea scheduled on this day'),
         platform: platformEnum.optional(),
+        regenerate: z
+          .boolean()
+          .optional()
+          .describe('Rewrite a post that already exists. Only when the operator explicitly asked to regenerate or rewrite it.'),
       })
       .strict(),
     returns: 'The draft body, the rendered creative and the brand compliance verdict.',
@@ -723,6 +687,8 @@ export const TOOLS: ToolSpec[] = [
       'generate the caption',
       "draft thursday's linkedin post and show me the creative",
       'write that post',
+      'generate the post for that topic',
+      'regenerate that post',
     ],
   },
   {

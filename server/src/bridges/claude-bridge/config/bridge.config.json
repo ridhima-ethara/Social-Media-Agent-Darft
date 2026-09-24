@@ -1,0 +1,259 @@
+{
+  "$comment": "Claude Bridge \u2014 trend intelligence for LinkedIn, Instagram, X, Facebook and the open web, acquired through Claude Code. Every tunable lives here; the LINKEDIN_TRENDS_* / CLAUDE_BRIDGE_* env vars named in README.md override a few. Nothing campaign-specific belongs in this file: keywords, brand voice and the Knowledge Base are read from the SMA itself.",
+  "trend_window_days": 14,
+  "max_keywords": 20,
+  "max_queries_per_keyword": 5,
+  "max_results_per_query": 20,
+  "max_total_queries": 40,
+  "default_result_limit": 20,
+  "minimum_brand_relevance": "medium",
+  "sort": "published_at_desc",
+  "sort_date_granularity": "day",
+  "include_undated": true,
+  "include_author_names": false,
+  "snippet_max_chars": 280,
+  "require_knowledge_base": true,
+  "freshness_bands": {
+    "very_recent_max_days": 1,
+    "recent_max_days": 3,
+    "current_max_days": 7,
+    "aging_max_days": 14
+  },
+  "query_forms": [
+    {
+      "id": "exact",
+      "kind": "post",
+      "template": "\"{keyword}\""
+    },
+    {
+      "id": "hashtag",
+      "kind": "hashtag",
+      "template": "#{keyword_hashtag}"
+    },
+    {
+      "id": "synonym",
+      "kind": "topic",
+      "template": "\"{synonym}\""
+    },
+    {
+      "id": "qualified",
+      "kind": "post",
+      "template": "\"{keyword}\" {qualifier}"
+    }
+  ],
+  "query_qualifiers": [
+    "research",
+    "engineering"
+  ],
+  "include_brand_domains_as_topics": true,
+  "acquisition": {
+    "adapters": [
+      "claude_code",
+      "sma_captures",
+      "manual_urls"
+    ],
+    "scraping_agent_adapters": [
+      "claude_code",
+      "manual_urls"
+    ],
+    "stop_after_consecutive_failures": 2,
+    "per_adapter": {
+      "claude_code": {
+        "max_queries": 30,
+        "max_results_per_query": 10,
+        "concurrency": 2,
+        "timeout_ms": 480000
+      },
+      "sma_captures": {
+        "max_queries": 40,
+        "max_results_per_query": 20,
+        "concurrency": 4
+      },
+      "manual_urls": {
+        "max_queries": 40,
+        "max_results_per_query": 50,
+        "concurrency": 4
+      },
+      "fixture": {
+        "max_queries": 40,
+        "max_results_per_query": 50,
+        "concurrency": 4
+      },
+      "socialfetch": {
+        "max_queries": 5,
+        "max_results_per_query": 20,
+        "concurrency": 1
+      }
+    },
+    "claude_code": {
+      "model": "sonnet",
+      "queries_per_session": 8,
+      "max_budget_usd_per_session": 1.5,
+      "allowed_tools": [
+        "WebSearch"
+      ],
+      "allowed_domains_by_platform": {
+        "x": [
+          "x.com"
+        ],
+        "linkedin": [
+          "linkedin.com"
+        ]
+      },
+      "research": {
+        "region": "Global",
+        "trend_count": 10,
+        "max_searches_per_session": 16,
+        "reference_files": [
+          "corpus/reference/BRAND_VOICE_INSTRUCTION_MAP.md",
+          "corpus/reference/CORPUS_SUMMARY.md",
+          "corpus/reference/KEYWORD_INSTRUCTION_MAP.md"
+        ],
+        "platform_notes": {
+          "linkedin": "Public search indexes LinkedIn posts weeks late, so a LinkedIn post from the current month is rarely findable. Research LinkedIn in two parts and label every trend with `window_status`:\n\n1. **Latest LinkedIn activity** (`window_status: \"latest_available\"`). Find the most recent individual LinkedIn posts on the topics. Search with the current month first (\"<topic>\" September 2026), then the previous month and the year (\"<topic>\" August 2026, \"<topic>\" 2026), then the hashtags. Use allowed_domains [\"linkedin.com\"]. Cite only individual post URLs: linkedin.com/posts/<author>_<slug>-activity-<id>-<code> or linkedin.com/feed/update/urn:li:activity:<id>. The 19-digit activity id encodes the publish time: shift it right by 22 bits to get Unix milliseconds, and use that as published_at. Prefer the newest. Report these with their true dates as the latest LinkedIn activity, never as current-month activity when they are older.\n2. **Trending now, for LinkedIn** (`window_status: \"current_month\"`). Find what is gaining attention in the current month on these topics across the public web: X posts, news, arXiv papers, AI-lab and company blogs, LinkedIn News stories and LinkedIn newsletters. Focus on what the LinkedIn audience is likely discussing: researchers, ML engineers, heads of AI and CTOs. Every piece of evidence must be from the current month. Name the source platform in `source`, and set `platform` to \"LinkedIn\" with the trend described as a topic for LinkedIn.\n\nNever cite profiles (/in/), company pages (/company/), job listings (/jobs/) or search pages. A /pulse article or LinkedIn News story can support part 2 only when its search result shows a current-month date. Prefer researchers, ML engineers, AI labs and heads of AI over recruiters, course sellers and generic reposts. Return both parts: up to half the trends from part 1 and the rest from part 2. Say in platforms_with_insufficient_data which part came up short and why."
+        }
+      }
+    },
+    "manual_urls_file": null,
+    "scraping_agent": {
+      "max_queries_per_keyword": 2
+    }
+  },
+  "context": {
+    "knowledge_base": {
+      "sources": [
+        "database",
+        "file"
+      ],
+      "search_paths": [
+        "backend/data",
+        "data",
+        "knowledge",
+        "kb"
+      ],
+      "subject_categories": [
+        "Signals",
+        "Research",
+        "High Performer",
+        "Approved Post",
+        "Brand Voice",
+        "Brand Guideline",
+        "Brand Corpus"
+      ],
+      "exclusion_categories": [
+        "Excluded Topic",
+        "Rejected Post",
+        "Rejected Content"
+      ],
+      "max_entries": 900,
+      "max_vocabulary_terms": 900
+    },
+    "keywords": {
+      "sources": [
+        "database",
+        "seed"
+      ],
+      "prioritise_schedule": true,
+      "merge_sources": true
+    },
+    "excluded_terms": []
+  },
+  "relevance": {
+    "weights": {
+      "keyword": 0.5,
+      "topic": 0.25,
+      "knowledge_base": 0.25
+    },
+    "high_threshold": 0.55,
+    "medium_threshold": 0.3,
+    "topic_saturation": 3,
+    "kb_saturation": 6,
+    "multi_keyword_bonus": 0.15,
+    "query_match_factor": 0.6,
+    "hype_penalty_per_hit": 0.1,
+    "hype_penalty_cap": 0.4,
+    "restriction_penalty": 0.1
+  },
+  "ranking": {
+    "weights": {
+      "recency": 0.35,
+      "keyword_relevance": 0.2,
+      "topic_relevance": 0.15,
+      "hashtag_signal": 0.1,
+      "cross_query": 0.1,
+      "source_signal": 0.05,
+      "engagement": 0.05
+    },
+    "undated_recency_score": 0
+  },
+  "deduplication": {
+    "similarity_threshold": 0.85
+  },
+  "page_metadata": {
+    "enabled": true,
+    "max_pages_per_run": 80,
+    "concurrency": 8,
+    "timeout_ms": 8000,
+    "max_bytes": 400000,
+    "user_agent": "EtharaSMA-ClaudeBridge/1.0 (+trend research; obeys robots.txt)"
+  },
+  "platform_trends": {
+    "platforms": [
+      "linkedin",
+      "instagram",
+      "facebook",
+      "x"
+    ],
+    "window": "current_month",
+    "window_hours": 720,
+    "max_searches_per_platform": 30,
+    "default_searches_per_platform": 16,
+    "fixed_keyword_share": 0.5,
+    "broad_searches": 1,
+    "exclude_brand_named_searches": true,
+    "terms_per_search": 5,
+    "max_words_per_term": 2,
+    "max_results_per_search": 10,
+    "max_posts_per_trend": 5,
+    "analysis_batch_size": 25,
+    "minimum_brand_relevance": "low",
+    "source_adapters": {
+      "linkedin": "claude_code",
+      "instagram": "claude_code",
+      "facebook": "claude_code",
+      "x": "claude_code"
+    },
+    "recency_hint": true,
+    "fallback_to_latest": true,
+    "fallback_max_age_days": 365,
+    "fallback_max_posts": 10,
+    "include_undated": true,
+    "max_undated_posts": 10,
+    "broad_terms": [
+      "AI agents",
+      "agentic AI",
+      "reinforcement learning",
+      "LLM"
+    ],
+    "broad_hashtags": [
+      "#AIAgents",
+      "#AgenticAI",
+      "#ReinforcementLearning",
+      "#MachineLearning"
+    ],
+    "accept_related": true,
+    "related_min_signals": 2,
+    "related_minimum_relevance": "low",
+    "learned_hashtags_per_search": 2,
+    "corpus_topics": {
+      "enabled": true,
+      "max_terms": 32,
+      "max_hashtags": 16,
+      "corpus_searches": 2,
+      "hashtags_per_search": 2,
+      "model": "sonnet",
+      "max_budget_usd": 0.4
+    },
+    "search_all_keywords": true
+  }
+}

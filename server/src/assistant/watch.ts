@@ -159,8 +159,8 @@ export async function sweepForNotices(
         severity: 'info',
         message: `${PLATFORM_LABEL[platform]} has ${count} post${count === 1 ? '' : 's'} this week against a target of ${thresholds.minPerWeek}.`,
         action: {
-          label: 'Promote a suggestion',
-          utterance: `show me the ${platform} suggestions`,
+          label: 'Show the Topic Queue',
+          utterance: `list the ${platform} topics on the calendar`,
         },
         data: { platform, count, target: thresholds.minPerWeek },
       })
@@ -353,7 +353,7 @@ async function recommend(workspaceId: string, notices: AmbientNotice[]): Promise
   const gap = notices.find((n) => n.signal === 'calendar-gap')
   if (gap) {
     const platform = String(gap.data.platform)
-    return `I would promote a ${PLATFORM_LABEL[platform as Platform]} suggestion to close the gap.`
+    return `I would run discovery for ${PLATFORM_LABEL[platform as Platform]} to place more validated topics and close the gap.`
   }
 
   const anomaly = notices.find((n) => n.signal === 'metric-anomaly')

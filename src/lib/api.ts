@@ -10,6 +10,8 @@
  * event log. `subscribeToEvents` is liveness only.
  */
 
+import type { SocialMediaListener } from '@shared/social-listener'
+import type { Competitor, CompetitorIntelligence, CompetitorProfile, CompetitorRunStatus, MarketReport } from '@shared/competitor-intel'
 import type {
   ApiHealth,
   Draft,
@@ -221,7 +223,7 @@ export const api = {
     pipelineRunId: string
     status: string
     summary: Record<string, unknown>
-  }> => request('/pipeline/run', { method: 'POST', body, timeoutMs: 300_000 }),
+  }> => request('/pipeline/run', { method: 'POST', body, timeoutMs: 1_200_000 }),
 
   runs: (): Promise<{ agentRuns: unknown[]; skillRuns: unknown[]; latest: unknown }> =>
     request('/runs'),
@@ -355,10 +357,49 @@ export const api = {
       platform?: Platform
       status?: string
       draft?: string
-      calendarSlot?: 'primary' | 'suggestion'
+      /** A topic's own line, edited in the Topic Queue. Never writes a post. */
+      title?: string
     },
-  ): Promise<{ ok: boolean; idea: Idea; demoted: { id: string; title: string } | null }> =>
+  ): Promise<{ ok: boolean; idea: Idea }> =>
     request(`/ideas/${id}`, { method: 'PATCH', body }),
+
+  /**
+   * Generate Post — the complete post (caption, hashtags, creative) for ONE
+   * topic. An existing post comes back untouched unless `regenerate` is sent.
+   */
+  generatePost: (
+    id: string,
+    body: { regenerate?: boolean } = {},
+  ): Promise<{ ideaId: string; platform: Platform; generated: boolean; reason: string }> =>
+    request(`/ideas/${id}/generate-post`, { method: 'POST', body }),
+
+  /** Re-reads only Glassdoor (FetchLayer) and attaches it to the latest listener report. */
+  refreshGlassdoor: (): Promise<{ glassdoor: { status: string; reason: string | null }; saved: boolean; reason?: string }> =>
+    request('/analysis/social-listener/glassdoor', { method: 'POST', body: {}, timeoutMs: 180_000 }),
+
+  /** Re-runs the ORM layer (reputation + the three answers) over the latest report — Claude only, no SocialFetch call. */
+  analyseReputation: (): Promise<{ report: SocialMediaListener; createdAt: string }> =>
+    request('/analysis/social-listener/reputation', { method: 'POST', body: {}, timeoutMs: 300_000 }),
+
+  /* ── Competitor Intelligence (Analysis Agent) ── */
+  competitors: (): Promise<CompetitorsState> => request('/analysis/competitors', { timeoutMs: 60_000 }),
+  competitorStatus: (): Promise<{ status: CompetitorRunStatus }> => request('/analysis/competitors/status'),
+  competitorProfile: (id: string, version?: number): Promise<{ competitor: Competitor; profile: CompetitorProfile | null; versions: Array<{ version: number; generated_at: string; changes: number }> }> =>
+    request(`/analysis/competitors/${encodeURIComponent(id)}/profile${version ? `?version=${version}` : ''}`),
+  createCompetitor: (body: CompetitorDraft): Promise<{ competitor: Competitor }> => request('/analysis/competitors', { method: 'POST', body }),
+  updateCompetitor: (id: string, body: Partial<CompetitorDraft>): Promise<{ competitor: Competitor }> =>
+    request(`/analysis/competitors/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
+  deleteCompetitor: (id: string): Promise<{ removed: boolean }> => request(`/analysis/competitors/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  runCompetitors: (body: { competitorIds?: string[]; depth?: 'quick' | 'deep'; dueOnly?: boolean }): Promise<{ started: boolean; competitors: number }> =>
+    request('/analysis/competitors/run', { method: 'POST', body }),
+
+  /** Runs the Analysis Agent's Social Media Listener now, always fresh (SocialFetch + Claude). */
+  runSocialListener: (): Promise<{ report: SocialMediaListener; status: string }> =>
+    request('/analysis/social-listener/run', { method: 'POST', body: {} }),
+
+  /** Hands the Topic Queue's dates to its topics in this order. */
+  reorderTopicQueue: (ids: string[]): Promise<{ ok: boolean; moved: number }> =>
+    request('/calendar/topic-queue/order', { method: 'POST', body: { ids } }),
 
   deleteIdea: (id: string): Promise<{ withdrawn: boolean }> =>
     request(`/ideas/${id}`, { method: 'DELETE' }),
@@ -647,3 +688,22 @@ export async function currentSession(): Promise<SessionInfo | null> {
 export async function signOut(): Promise<void> {
   await request('/session', { method: 'DELETE' })
 }
+
+/** What the Competitor Intelligence tab reads. */
+export interface CompetitorsState {
+  universe: Competitor[]
+  intelligence: CompetitorIntelligence
+  market: MarketReport | null
+  status: CompetitorRunStatus
+  methodology: {
+    repository: string | null
+    commit: string | null
+    synced_at: string | null
+    skills: Array<{ name: string; version: string | null }>
+    available: { available: boolean; reason: string | null }
+    tools: Array<{ tool: string; bound_to: string; available: boolean; note: string }>
+  }
+}
+
+/** A competitor as the add / edit form sends it. */
+export type CompetitorDraft = Omit<Competitor, 'id' | 'slug' | 'created_at' | 'updated_at' | 'last_analyzed_at' | 'is_self'> & { slug?: string }

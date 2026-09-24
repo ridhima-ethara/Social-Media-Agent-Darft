@@ -7,7 +7,7 @@
 
 import { similarity } from '../../../../shared/brand-voice'
 import type { Confidence, ValidationVerdict } from '../../../../shared/agent-contract'
-import { SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
+import { DISCOVERED_HASHTAG_CATEGORY, SIGNALS_CATEGORY } from '../../../../shared/agent-contract'
 import {
   insertDiscoveredKeywords,
   keywordRankHistory,
@@ -774,7 +774,7 @@ registerSkill<PipelinePayload>('validation.duplicate.detect', async (payload, ct
     ? await listKnowledge(ctx.workspaceId, { activeOnly: true, limit: 500 })
     : []
   const knowledge = knowledgeAll.filter(
-    (entry) => !(entry.origin === 'learned' && entry.category === SIGNALS_CATEGORY),
+    (entry) => !(entry.origin === 'learned' && (entry.category === SIGNALS_CATEGORY || entry.category === DISCOVERED_HASHTAG_CATEGORY)),
   )
   const citedUrls = new Map<string, string>() // url → entry title
   for (const entry of knowledge) {

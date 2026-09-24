@@ -17,13 +17,10 @@ import { navFor } from '../components/layout'
 import { AgentHologram } from '../components/agent-hologram'
 import { Btn, Dialog, EmptyState, PLATFORM_LABEL, PLATFORM_TOKEN, PlatformIcon, fmt, timeAgo } from '../components/ui'
 import { exportCombined, exportPerPost } from '../lib/export'
+import { isQueuedTopic, resolveHorizon } from '../lib/calendar-horizon'
+import { SentimentBar } from '../components/social-listener'
 import type { AgentId, AgentState, Idea, PageId, Platform, ReviewQueueItem } from '../types'
 
-/**
- * Knowledge that is brand definition (configuration), not something learned.
- * Excluded by name so any category the Learning Agent produces counts as a lesson.
- */
-const BRAND_DEFINITION_CATEGORIES = ['Brand Corpus', 'Brand Voice', 'Brand Guideline', 'Visual Identity', 'Compliance Rule']
 const PLATFORMS: Platform[] = ['linkedin', 'instagram', 'x', 'facebook']
 const DAY_MS = 86_400_000
 
@@ -65,8 +62,6 @@ export function Dashboard() {
   const analytics = useStore((s) => s.analytics)
   const published = useStore((s) => s.published)
   const ideas = useStore((s) => s.ideas)
-  const knowledge = useStore((s) => s.knowledge)
-  const knowledgeCounts = useStore((s) => s.knowledgeCounts)
   const agents = useStore((s) => s.agents)
   const reviewQueue = useStore((s) => s.reviewQueue)
   const pendingConfirm = useStore((s) => s.assistant.pendingConfirm)
@@ -161,25 +156,36 @@ export function Dashboard() {
   )
 
   /*
-   * THE SUGGESTIONS CARD SHOWS SUGGESTIONS.
+   * THE TOPIC QUEUE, NOT A SUGGESTION LIST.
    *
-   * It listed the strongest drafts — posts already on the calendar — under a
-   * "Suggestions" heading, so the calendar's own posts appeared twice and the
-   * card never showed what More suggestions actually held. It now reads the
-   * same list More suggestions does: ideas ranked below the calendar cut,
-   * strongest rank first. With none waiting it says so.
+   * There is no suggestion list any more. This card reads the same set the
+   * Calendar's Topic Queue does — validated topics on future dates with no post
+   * yet — soonest first, so the next thing to generate is at the top.
    */
-  const suggestions = useMemo(
-    () =>
-      ideas.filter((i) => i.calendar_slot !== 'primary' && i.status !== 'rejected'),
-    [ideas],
+  const serverHorizon = useStore((s) => s.calendarHorizon)
+  const horizon = useMemo(() => resolveHorizon(serverHorizon), [serverHorizon])
+  const topicQueue = useMemo(
+    () => ideas.filter((i) => isQueuedTopic(i, horizon)),
+    [ideas, horizon],
   )
-  const topSuggestions = useMemo(
-    () =>
-      [...suggestions]
-        .sort((a, b) => (a.platform_rank ?? 99) - (b.platform_rank ?? 99) || b.confidence - a.confidence)
-        .slice(0, 4),
-    [suggestions],
+  const nextTopics = useMemo(
+    () => {
+      // ONE ENTRY PER TOPIC. The Calendar Agent plans a variant per platform, so
+      // the same subject arrives four times; listing all four made this card read
+      // as four different topics. The soonest variant represents the topic.
+      const seen = new Set<string>()
+      const unique: typeof topicQueue = []
+      for (const idea of [...topicQueue].sort(
+        (a, b) => a.scheduled_date.localeCompare(b.scheduled_date) || b.confidence - a.confidence,
+      )) {
+        const key = (idea.source_topic ?? idea.title ?? idea.id).trim().toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        unique.push(idea)
+      }
+      return unique.slice(0, 4)
+    },
+    [topicQueue],
   )
   /*
    * WHAT THE WEEK HOLDS — AND NEVER AN EMPTY LIST BESIDE A COUNT.
@@ -199,14 +205,19 @@ export function Dashboard() {
     if (ahead.length > 0) return { rows: ahead.slice(0, 3), ahead: true, total: all.length }
     return { rows: [...all].reverse().slice(0, 3), ahead: false, total: all.length }
   }, [week, today])
-  /** What the Content Intelligence panel shows: lessons if any, else the most-cited entries. */
-  const insightRows = useMemo(() => {
-    const lessons = knowledge.filter((e) => e.active && !BRAND_DEFINITION_CATEGORIES.includes(e.category)).slice(0, 3)
-    if (lessons.length > 0) return lessons
-    return [...knowledge].filter((e) => e.active).sort((a, b) => b.evidence_count - a.evidence_count).slice(0, 3)
-  }, [knowledge])
+  /* ── Analysis · Social Media Listener (replaces the Content Intelligence card) ── */
+  const listener = useStore((s) => s.socialListener ?? null)
+  const listenerPlatforms = useMemo(
+    () =>
+      listener
+        ? (['linkedin', 'instagram', 'facebook', 'x'] as const)
+            .map((k) => listener.platforms[k])
+            .filter((p): p is NonNullable<typeof p> => p !== undefined && p.status === 'ok')
+            .slice(0, 3)
+        : [],
+    [listener],
+  )
 
-  /** When nothing has been learned yet, the entries the agents lean on most. */
 
 
   /* ── Waiting on people ── */
@@ -226,7 +237,6 @@ export function Dashboard() {
   const oldestWait = [...awaitingLeadership.map((i) => i.marketing_approved_at ?? i.updated_at), ...openVerdicts.map((q) => q.created_at)].sort()[0]
 
   /* ── Lessons, agents, platforms ── */
-  const kbCount = knowledgeCounts?.active ?? knowledge.filter((k) => k.active).length
   const running = agents.filter((a) => a.status === 'running')
   const lastRun = agents.map((a) => a.last_run).filter((v): v is string => v !== null).sort().reverse()[0] ?? null
   const platformRows = PLATFORMS.map((platform) => ({
@@ -344,21 +354,55 @@ export function Dashboard() {
               */
               className="hub-tilt-left flex min-w-0 flex-col justify-start gap-3.5 min-h-0 overflow-y-auto overscroll-auto"
             >
-              <Panel title="Content Intelligence" hint={`${kbCount} entries`} onOpen={() => setPage('intelligence')} delay={120}>
-                {insightRows.length === 0 ? (
-                  <NotMeasured>The Knowledge Base is empty. Entries arrive once a research build has run.</NotMeasured>
+              {/*
+                ANALYSIS · SOCIAL MEDIA LISTENER.
+
+                This card used to list Knowledge Base entries under "Content
+                Intelligence". It now answers the Analysis Agent's question —
+                what is happening around Ethara.AI on its own social channels,
+                and what people are saying — from the latest listener report.
+                Opening it goes to the Social Listener screen.
+              */}
+              <Panel
+                title="Analysis"
+                hint={listener ? `${listener.sample_size.posts} posts · ${listener.sample_size.comments} comments` : 'social listener'}
+                onOpen={() => setPage('listener')}
+                delay={120}
+              >
+                {!listener ? (
+                  <NotMeasured>
+                    No Social Media Listener report yet. Open to run it — it reads Ethara.AI&rsquo;s LinkedIn, Instagram, Facebook and X through SocialFetch.
+                  </NotMeasured>
                 ) : (
                   <ul className="flex flex-col gap-[7px]">
-                    {insightRows.map((entry) => (
-                      <li key={entry.id}>
-                        <Row>
-                          <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border border-hud-strong bg-accent/12">
-                            <Sparkles size={11} className="text-accent-bright" aria-hidden="true" />
+                    <li>
+                      <Row>
+                        <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border border-hud-strong bg-accent/12">
+                          <Sparkles size={11} className="text-accent-bright" aria-hidden="true" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-[11.5px] font-medium text-ink">Audience sentiment</span>
+                          <span className="mt-1 block">
+                            <SentimentBar s={listener.cross_platform_insights.overall_sentiment} compact />
                           </span>
+                          <span className="mono mt-1 block truncate text-[8px] uppercase tracking-[0.1em] text-ink-3">
+                            {listener.cross_platform_insights.overall_sentiment
+                              ? `${listener.cross_platform_insights.overall_sentiment.positive_percent}% positive · ${listener.cross_platform_insights.overall_sentiment.classified} comments read`
+                              : 'no comments read'}
+                          </span>
+                        </span>
+                      </Row>
+                    </li>
+                    {listenerPlatforms.map((p) => (
+                      <li key={p.platform}>
+                        <Row>
+                          <PlatformIcon platform={p.platform as Platform} size={13} />
                           <span className="min-w-0">
-                            <span className="block truncate text-[11.5px] font-medium text-ink">{entry.title}</span>
+                            <span className="block truncate text-[11.5px] font-medium text-ink">
+                              {p.label} · {p.posts_analyzed} posts · avg {p.engagement.average_per_post ?? '—'} engagement
+                            </span>
                             <span className="mono mt-0.5 block truncate text-[8px] uppercase tracking-[0.1em] text-ink-3">
-                              {entry.category} · {entry.evidence_count} cited
+                              {p.topics.filter((t) => t.posts > 0)[0]?.topic ?? 'no topic'} leads · {p.comments_analyzed} comments
                             </span>
                           </span>
                         </Row>
@@ -402,19 +446,19 @@ export function Dashboard() {
                   )}
                 </Panel>
               ) : (
-                <Panel title="Suggestions" hint={`${suggestions.length} waiting`} onOpen={() => setPage('calendar')} delay={200} grow>
-                {topSuggestions.length === 0 ? (
-                  <NotMeasured>No suggestions.</NotMeasured>
+                <Panel title="Topic Queue" hint={`${topicQueue.length} future topic${topicQueue.length === 1 ? '' : 's'}`} onOpen={() => setPage('calendar')} delay={200} grow>
+                {nextTopics.length === 0 ? (
+                  <NotMeasured>No future topics waiting.</NotMeasured>
                 ) : (
                   <ul className="flex flex-col gap-[7px]">
-                    {topSuggestions.map((idea) => (
+                    {nextTopics.map((idea) => (
                       <li key={idea.id}>
                         <Row>
                           <Thumb src={idea.media?.dataUri ?? null} platform={idea.platform} className="h-[30px] w-10 shrink-0" />
                           <span className="min-w-0">
                             <span className="block truncate text-[11.5px] font-medium text-ink">{idea.title}</span>
                             <span className="mono mt-0.5 block truncate text-[8px] uppercase tracking-[0.1em] text-ink-3">
-                              {PLATFORM_LABEL[idea.platform]}{idea.platform_rank ? ` · #${idea.platform_rank}` : ''} · conf {idea.confidence}
+                              {PLATFORM_LABEL[idea.platform]} · {String(idea.scheduled_date).slice(5, 10)} · topic only
                             </span>
                           </span>
                         </Row>

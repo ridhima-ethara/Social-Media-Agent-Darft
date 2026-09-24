@@ -1,0 +1,15 @@
+{
+  "$comment": "Social Media Listener topic map. Each topic lists lower-case keywords or phrases matched as whole words in a post's text and hashtags. Edit freely; 'Other' is applied when nothing matches.",
+  "topics": [
+    { "topic": "AI / ML", "keywords": ["ai", "artificial intelligence", "machine learning", "ml", "llm", "llms", "model", "models", "genai", "generative ai", "deep learning"] },
+    { "topic": "AGI / RL / RLHF", "keywords": ["agi", "reinforcement learning", "rl", "rlhf", "rlvr", "reward", "reward model", "post-training", "post training", "alignment", "agents", "agent", "agentic"] },
+    { "topic": "Research", "keywords": ["research", "paper", "benchmark", "benchmarks", "evaluation", "evals", "study", "findings", "dataset", "long-horizon"] },
+    { "topic": "Partnerships / MoU", "keywords": ["mou", "memorandum", "partnership", "partner", "partnered", "collaboration", "signed", "university", "foundation", "lpu", "edunet"] },
+    { "topic": "Hiring / HR / POSH", "keywords": ["hiring", "we're hiring", "we are hiring", "intern", "interns", "internship", "join us", "careers", "posh", "workplace", "harassment", "culture", "associate"] },
+    { "topic": "Events / Masterclass", "keywords": ["event", "masterclass", "webinar", "workshop", "summit", "conference", "session", "hackathon", "meetup"] },
+    { "topic": "Product / Platform", "keywords": ["product", "platform", "launch", "launched", "infrastructure", "data engine", "service", "workflow", "workflows"] },
+    { "topic": "Engineering", "keywords": ["engineering", "engineer", "engineers", "developer", "code", "coding", "software", "systems", "gpu", "compute"] },
+    { "topic": "Company Updates", "keywords": ["milestone", "announce", "announcing", "update", "anniversary", "independence", "freedom", "team", "ecosystem", "journey"] },
+    { "topic": "Leadership", "keywords": ["ceo", "founder", "co-founder", "leadership", "leader", "vision", "suryansh", "scindia"] }
+  ]
+}

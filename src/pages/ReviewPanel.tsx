@@ -37,6 +37,7 @@ import {
 } from '../components/ui'
 import { defaultSkillConfig } from '../../shared/agent-registry'
 import type { Idea, Platform } from '../types'
+import { isQueuedTopic, resolveHorizon } from '../lib/calendar-horizon'
 
 /**
  * Where each platform's caption is cut.
@@ -269,7 +270,14 @@ export function ReviewPanel() {
   const addKnowledge = useStore((s) => s.addKnowledge)
   const updateSettings = useStore((s) => s.updateSettings)
 
+  const generatePost = useStore((s) => s.generatePost)
+  const generatingPosts = useStore((s) => s.generatingPosts)
+  const serverHorizon = useStore((s) => s.calendarHorizon)
+
   const idea = ideas.find((i) => i.id === reviewIdeaId)
+  // A future topic has no post until Generate Post is pressed; opening it here
+  // must not write one (ensureDraft/ensureImage skip it), and the panel says so.
+  const topicOnly = idea ? isQueuedTopic(idea, resolveHorizon(serverHorizon)) : false
   // A primitive, so effects can depend on identity of the POST rather than on
   // the identity of the object the last refetch happened to allocate.
   const ideaId = idea?.id ?? null
@@ -897,8 +905,18 @@ export function ReviewPanel() {
               ))}
             </div>
             <span className="mono truncate text-[11px] text-ink-3">
-              {draft ? `SpongeBob · rev ${draft.revision}` : 'Writing…'}
+              {draft ? `SpongeBob · rev ${draft.revision}` : topicOnly ? 'Topic only · no post yet' : 'Writing…'}
             </span>
+            {!draft && topicOnly ? (
+              <button
+                type="button"
+                disabled={generatingPosts.includes(idea.id)}
+                onClick={() => void generatePost(idea.id)}
+                className="shrink-0 rounded-[7px] border border-magenta/50 bg-magenta/10 px-2.5 py-[3px] text-[10.5px] font-semibold text-magenta-ink transition-colors hover:border-magenta hover:bg-magenta/20 disabled:cursor-wait disabled:opacity-60"
+              >
+                {generatingPosts.includes(idea.id) ? 'Generating…' : 'Generate Post'}
+              </button>
+            ) : null}
             <span
               className={`mono ml-auto shrink-0 text-[11px] ${body.length > CAPTION_CAP[idea.platform] ? 'text-critical-ink' : 'text-ink-3'}`}
               title={`${PLATFORM_LABEL[idea.platform]} captions are cut at ${CAPTION_CAP[idea.platform]} characters`}

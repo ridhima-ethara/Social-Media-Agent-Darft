@@ -12,35 +12,31 @@
  * draft is written by the floor and stamped with the reason.
  */
 
-export type TextModelId = 'ethara-writer' | 'ollama-qwen3' | 'gcp-gemini'
+export type TextModelId = 'ethara-writer' | 'gcp-gemini'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THE DEFAULT MODEL TAGS — ONE HOME
 
-   A model tag is a deployment fact, not a preference, and it was previously
-   stated in four places that disagreed: `config.ts` defaulted to `qwen3:14b`
-   while `server/.env.example` shipped `qwen3.5:latest`, so copying the example
-   file pulled a different model than the code expected — and the one the code
-   named was not installed at all.
-
-   These constants are the single home. `server/src/config.ts` reads them as its
-   `str()` fallbacks, and the Python tier mirrors them in `backend/core/models.py`
-   — a test asserts the two files agree character for character, because Python
+   A model tag is a deployment fact, not a preference. These constants are the
+   single home. `server/src/config.ts` reads them as its `str()` fallbacks, and
+   the Python tier mirrors the Anthropic tag in `backend/core/models.py` — a
+   test asserts the two files agree character for character, because Python
    cannot import TypeScript and a comment asking someone to remember is not a
    mechanism.
 
    THE RULE FOR CHANGING ONE: the tag named here must exist in the registry it
-   addresses. `ollama list` is the check for the two Ollama tags.
+   addresses.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Reasoning, captions, calendar copy. `qwen3.5:latest` is what `ollama pull qwen3.5` lands. */
-export const DEFAULT_OLLAMA_TEXT_MODEL = 'qwen3.5:latest'
-
-/** The hosted counterpart, used when `TEXT_MODEL_PROVIDER=gcp`. */
+/** The hosted model that writes captions, calendar copy and rewrites. */
 export const DEFAULT_GCP_TEXT_MODEL = 'gemini-2.5-pro'
 
-/** Embeddings. 768 dimensions — `schema.sql` fixes the column to match. */
-export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text'
+/**
+ * Embeddings. `gemini-embedding-001` at `outputDimensionality: 768`, which
+ * `schema.sql` fixes the column to match. Rides the same Google credential as
+ * Gemini text — no separate service or key.
+ */
+export const DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-001'
 
 /** The Python tier's hosted binding. That tier has no Gemini client. */
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5'
@@ -100,22 +96,11 @@ export const TEXT_MODELS: TextModelSpec[] = [
     typicalMs: 30,
   },
   {
-    id: 'ollama-qwen3',
-    label: 'Qwen3 (local)',
-    vendor: 'Ollama',
-    summary:
-      'Runs on the local Ollama daemon, so the draft and the evidence behind it never leave this machine. The default when a daemon is up.',
-    licence: 'Apache-2.0',
-    envKey: 'OLLAMA_BASE_URL',
-    adapterId: 'ollama.text',
-    typicalMs: 9000,
-  },
-  {
     id: 'gcp-gemini',
     label: 'Gemini 2.5 Pro',
     vendor: 'Google Cloud',
     summary:
-      'Hosted reasoning model. Fastest of the three on long rewrites, and the only one that sends the draft off the machine.',
+      'Hosted reasoning model. Writes and revises captions, scripts and calendar copy; the only model provider now that local models have been removed.',
     licence: 'Commercial · Google Cloud terms',
     envKey: 'GCP_API_KEY or GCP_SERVICE_ACCOUNT_JSON',
     selectable: true,
@@ -132,16 +117,17 @@ export const TEXT_MODEL_BY_ID: Record<string, TextModelSpec> = Object.fromEntrie
  * The adapter id that decides an image model's reachability.
  *
  * Lives here beside the text mapping because both answer the same question, and
- * the menu needs one rule for it. `z-image-turbo` has no adapter in the server's
- * reachability sweep, so it reports as unverifiable rather than as unconfigured
- * — claiming a definite "not configured" for something never checked would be a
- * dishonest report.
+ * the menu needs one rule for it. `z-image-turbo` and `flux2-klein` have no
+ * adapter in the server's reachability sweep — z-image is a self-hosted
+ * endpoint and FLUX.2 Klein is an mflux subprocess — so they report as
+ * unverifiable rather than as unconfigured. Claiming a definite "not configured"
+ * for something never checked would be a dishonest report.
  */
 export const IMAGE_MODEL_ADAPTER: Record<string, string | null> = {
   'brand-svg': '',
   'gcp-imagen': 'gcp.image',
   'gcp-gemini-image': 'gcp.image',
-  'flux2-klein': 'ollama.image',
+  'flux2-klein': null,
   'z-image-turbo': null,
 }
 

@@ -1,0 +1,19 @@
+# Ethara SocialAI — API tier (Express, :PORT from server/.env). Runs as ec2-user so
+# the Claude Bridge finds that user's Claude Code binary and login.
+# Install: sudo cp deploy/aws/ethara-*.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#          sudo systemctl enable --now ethara-api ethara-web nginx
+[Unit]
+Description=Ethara SocialAI API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+Environment=HOME=/home/ec2-user
+Environment=PATH=/home/ec2-user/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash -c 'cd "/home/ec2-user/Social-Media-Agent-2/Social Media Agent 2" && exec npm --prefix server run start'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

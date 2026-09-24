@@ -357,7 +357,13 @@ export const IDEA_STATUSES = [
 ] as const
 export type IdeaStatus = (typeof IDEA_STATUSES)[number]
 
-/** The per-platform cap (`topPerPlatform`, 5 by default): only `primary` ideas take a calendar slot. */
+/**
+ * Every idea the calendar keeps is `primary` — a dated topic. There is no
+ * suggestion list: ideas below the per-platform cap are not placed, and a
+ * displaced topic is withdrawn. `'suggestion'` remains only because rows
+ * written by earlier releases carry it (all of them withdrawn by migration);
+ * nothing writes it any more.
+ */
 export type CalendarSlot = 'primary' | 'suggestion'
 
 /**
@@ -378,6 +384,14 @@ export type CalendarSlot = 'primary' | 'suggestion'
  * disagree silently.
  */
 export const SIGNALS_CATEGORY = 'Signals'
+
+/**
+ * The Knowledge Base category for hashtags the Scraping Agent found on
+ * validated, Ethara-relevant posts that Ethara did not track yet. Each entry's
+ * title is the tag (`#AgenticRL`); the next discovery run adds the strongest
+ * of them to its hashtag search, so the search widens with what is trending.
+ */
+export const DISCOVERED_HASHTAG_CATEGORY = 'Discovered Hashtag'
 
 /**
  * The two entries in the roster that are NOT operational agents.

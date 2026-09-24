@@ -24,7 +24,7 @@ import type {
   SkillRunStatus,
   ValidationVerdict,
 } from '../../../shared/agent-contract'
-import { SIGNALS_CATEGORY } from '../../../shared/agent-contract'
+import { DISCOVERED_HASHTAG_CATEGORY, SIGNALS_CATEGORY } from '../../../shared/agent-contract'
 import { config } from '../config'
 import {
   embedMany,
@@ -718,6 +718,12 @@ export interface IdeaRow {
   source_url: string | null
   source_title: string | null
   source_name: string | null
+  /**
+   * The Validation Agent's verdict on the captured post this topic was formed
+   * from (`scraped_items.validation`). Shown in the Topic Queue as the topic's
+   * validation status; null when the topic has no captured source.
+   */
+  source_validation: string | null
   /** The strongest post carrying the originating hashtag, when the idea came from a tag. */
   hashtag_url: string | null
   title: string
@@ -777,7 +783,8 @@ export async function listIdeas(
 
   return query<IdeaRow>(
     `SELECT ci.*, h.display_tag AS hashtag_display, h.top_post_url AS hashtag_url,
-            si.url AS source_url, si.title AS source_title, si.source_name AS source_name
+            si.url AS source_url, si.title AS source_title, si.source_name AS source_name,
+            si.validation AS source_validation
        FROM content_ideas ci
        LEFT JOIN hashtags h ON h.id = ci.hashtag_id
        LEFT JOIN scraped_items si ON si.id = ci.source_item_id
@@ -791,7 +798,8 @@ export async function listIdeas(
 export async function getIdea(workspaceId: string, id: string): Promise<IdeaRow | null> {
   return queryOne<IdeaRow>(
     `SELECT ci.*, h.display_tag AS hashtag_display, h.top_post_url AS hashtag_url,
-            si.url AS source_url, si.title AS source_title, si.source_name AS source_name
+            si.url AS source_url, si.title AS source_title, si.source_name AS source_name,
+            si.validation AS source_validation
        FROM content_ideas ci
        LEFT JOIN hashtags h ON h.id = ci.hashtag_id
        LEFT JOIN scraped_items si ON si.id = ci.source_item_id
@@ -811,7 +819,8 @@ export async function findIdeasByTitle(
 ): Promise<IdeaRow[]> {
   return query<IdeaRow>(
     `SELECT ci.*, h.display_tag AS hashtag_display, h.top_post_url AS hashtag_url,
-            si.url AS source_url, si.title AS source_title, si.source_name AS source_name
+            si.url AS source_url, si.title AS source_title, si.source_name AS source_name,
+            si.validation AS source_validation
        FROM content_ideas ci
        LEFT JOIN hashtags h ON h.id = ci.hashtag_id
        LEFT JOIN scraped_items si ON si.id = ci.source_item_id
@@ -870,7 +879,6 @@ export async function updateIdea(
   )
 }
 
-/** Primary ideas on one platform, weakest rank last — used by the promote rule. */
 /**
  * The posts holding a calendar slot on one platform — the set the per-platform
  * cap is counted against.
@@ -894,7 +902,7 @@ export async function primaryIdeasForPlatform(
   platform: Platform,
   weekOf?: string | null,
 ): Promise<IdeaRow[]> {
-  const week = weekOf == null ? null : mondayOf(weekOf)
+  const week = weekOf === null || weekOf === undefined ? null : mondayOf(weekOf)
   return query<IdeaRow>(
     `SELECT ci.*, NULL::text AS hashtag_display
        FROM content_ideas ci
@@ -1752,11 +1760,19 @@ export async function finishPipelineRun(
   status: 'completed' | 'failed',
   summary: Record<string, unknown>,
 ): Promise<void> {
+  // Merged, not replaced: a stage may already have recorded part of the
+  // summary (the Scraping Agent records its platform discovery as it happens,
+  // so a run that captured nothing still says what each platform returned).
   await query(
-    `UPDATE pipeline_runs SET status = $2, summary = $3::jsonb, finished_at = now()
+    `UPDATE pipeline_runs SET status = $2, summary = summary || $3::jsonb, finished_at = now()
       WHERE id = $1`,
     [id, status, JSON.stringify(summary)],
   )
+}
+
+/** Adds keys to a run's summary while it is still running. */
+export async function mergePipelineRunSummary(id: string, patch: Record<string, unknown>): Promise<void> {
+  await query(`UPDATE pipeline_runs SET summary = summary || $2::jsonb WHERE id = $1`, [id, JSON.stringify(patch)])
 }
 
 export async function countPipelineRuns(workspaceId: string): Promise<number> {
@@ -2439,6 +2455,66 @@ export async function recordScrapedTopicsAsKnowledge(
   return { written, merged }
 }
 
+export interface DiscoveredHashtag {
+  /** As the posts wrote it, with the #. */
+  display: string
+  urls: Array<{ url: string; title: string; publishedAt?: string }>
+  platforms: string[]
+  /** The Ethara trends / topics it appeared with. */
+  topics: string[]
+}
+
+/**
+ * NEW HASHTAGS INTO THE KNOWLEDGE BASE.
+ *
+ * A hashtag found on validated, Ethara-relevant posts that Ethara did not
+ * track yet becomes a "Discovered Hashtag" entry — title `#Tag`, citing the
+ * posts that carried it — so the next discovery run searches it too. A tag
+ * already learned is merged (its citations grow), never duplicated.
+ */
+export async function recordDiscoveredHashtags(
+  workspaceId: string,
+  tags: readonly DiscoveredHashtag[],
+): Promise<{ written: string[]; merged: string[] }> {
+  const written: string[] = []
+  const merged: string[] = []
+  for (const tag of tags) {
+    const display = tag.display.startsWith('#') ? tag.display : `#${tag.display}`
+    const sources = tag.urls.filter((u) => u.url)
+    if (sources.length === 0) continue
+    const existing = await queryOne<{ id: string }>(
+      `SELECT id FROM knowledge_entries
+        WHERE workspace_id = $1 AND category = $2 AND lower(title) = lower($3) AND active = true
+        LIMIT 1`,
+      [workspaceId, DISCOVERED_HASHTAG_CATEGORY, display],
+    )
+    if (existing) {
+      await mergeKnowledgeEntry(existing.id, sources, false)
+      merged.push(display)
+      continue
+    }
+    const content =
+      `${display} was trending with Ethara topics (${tag.topics.slice(0, 4).join(', ') || 'related AI research'}) ` +
+      `on ${tag.platforms.join(', ')} — seen on ${sources.length} validated post${sources.length === 1 ? '' : 's'}. ` +
+      'Added by the Scraping Agent so the next discovery run searches it too.'
+    const inserted = await insertKnowledgeEntry({
+      workspaceId,
+      title: display,
+      category: DISCOVERED_HASHTAG_CATEGORY,
+      content,
+      source: 'Scrape',
+      sources,
+      hashtagId: null,
+      confidence: sources.length >= 3 ? 'High' : sources.length === 2 ? 'Medium' : 'Low',
+      origin: 'learned',
+      buildId: null,
+      tags: [display.replace(/^#/, ''), ...tag.topics].slice(0, 12),
+    })
+    if (inserted) written.push(display)
+  }
+  return { written, merged }
+}
+
 /** Links a duplicate to its original. The duplicate row itself stays. */
 export async function linkDuplicateItem(id: string, duplicateOfId: string): Promise<void> {
   await query(`UPDATE scraped_items SET duplicate_of_id = $2 WHERE id = $1`, [id, duplicateOfId])
@@ -2760,18 +2836,25 @@ export async function setLeadershipDecision(
   return getIdea(workspaceId, id)
 }
 
-/** Deletes nothing: an idea is withdrawn by status, and its history survives. */
-export async function withdrawIdea(workspaceId: string, id: string): Promise<boolean> {
+/**
+ * Deletes nothing: an idea is withdrawn by status, and its history survives.
+ * The reason is recorded because a withdrawal is an automated decision too
+ * when the calendar's cap makes it.
+ */
+export async function withdrawIdea(
+  workspaceId: string,
+  id: string,
+  reason = 'Removed from the calendar by the operator',
+): Promise<boolean> {
   const rows = await query(
     `UPDATE content_ideas
         SET status = 'rejected',
             leadership_decision = COALESCE(leadership_decision, '{}'::jsonb) ||
-              jsonb_build_object('decision','withdrawn','reason','Removed from the calendar by the operator','at', now()),
-            calendar_slot = 'suggestion',
+              jsonb_build_object('decision','withdrawn','reason',$3::text,'at', now()),
             updated_at = now()
       WHERE workspace_id = $1 AND id = $2
       RETURNING id`,
-    [workspaceId, id],
+    [workspaceId, id, reason],
   )
   return rows.length > 0
 }
@@ -4080,6 +4163,44 @@ export async function activeDiscoveredKeywords(workspaceId: string): Promise<Key
        FROM keywords
       WHERE workspace_id = $1 AND active AND origin = 'discovered'
       ORDER BY emergence_score DESC NULLS LAST, discovered_at DESC`,
+    [workspaceId],
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SOCIAL MEDIA LISTENER REPORTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface ListenerReportRow<TReport = Record<string, unknown>> {
+  id: string
+  pipeline_run_id: string | null
+  trigger: string
+  report: TReport
+  credits_used: number
+  created_at: string
+}
+
+export async function insertListenerReport<TReport extends object>(
+  workspaceId: string,
+  report: TReport,
+  opts: { pipelineRunId?: string | null; trigger?: string; creditsUsed: number },
+): Promise<ListenerReportRow<TReport>> {
+  const rows = await query<ListenerReportRow<TReport>>(
+    `INSERT INTO social_listener_reports (workspace_id, pipeline_run_id, trigger, report, credits_used)
+     VALUES ($1, $2, $3, $4::jsonb, $5)
+     RETURNING id, pipeline_run_id, trigger, report, credits_used, created_at`,
+    [workspaceId, opts.pipelineRunId ?? null, opts.trigger ?? 'manual', JSON.stringify(report), opts.creditsUsed],
+  )
+  return rows[0] as ListenerReportRow<TReport>
+}
+
+export async function latestListenerReport<TReport = Record<string, unknown>>(workspaceId: string): Promise<ListenerReportRow<TReport> | null> {
+  return queryOne<ListenerReportRow<TReport>>(
+    `SELECT id, pipeline_run_id, trigger, report, credits_used, created_at
+       FROM social_listener_reports
+      WHERE workspace_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1`,
     [workspaceId],
   )
 }

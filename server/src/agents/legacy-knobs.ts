@@ -37,8 +37,6 @@ const KEY_ALIASES: Record<string, Record<string, string>> = {
     concurrency: 'maxParallel',
   },
   'scraping.linkedin.fetch': {
-    // Was a bare count before the per-keyword scope was made explicit.
-    maxItems: 'maxItemsPerKeyword',
     dateRange: 'datePosted',
   },
   // `datePosted`, `sortBy` and `minAuthorFollowers` were connector parameters,
@@ -98,8 +96,10 @@ const VALUE_ALIASES: Record<string, Record<string, Record<string, string>>> = {
     datePosted: {
       '24h': 'past-24h',
       day: 'past-24h',
+      '48h': 'past-48h',
       week: 'past-week',
       month: 'past-month',
+      quarter: 'past-quarter',
     },
   },
   'knowledge.conflict.resolve': {

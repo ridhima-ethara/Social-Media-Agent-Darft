@@ -10,12 +10,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Download, ExternalLink, Play, X } from 'lucide-react'
 import { useStore } from '../store'
 import { Logo } from '../components/logo'
+import { PlatformBreakdown } from '../components/discovery-results-dialog'
+import { PlatformDiscoveryPanel, readDiscovery } from '../components/platform-discovery'
 import type { GraphBucket } from '../components/pipeline-graph'
 
 import { Badge, Btn, PlatformIcon, fmt, timeAgo } from '../components/ui'
 import { PLATFORMS } from '../../shared/agent-contract'
 import { defaultSkillConfig } from '../../shared/agent-registry'
-import type { LiveLane, Platform, ValidationVerdict } from '../types'
+import type { Platform, ValidationVerdict } from '../types'
 
 /**
  * The two capture knobs this screen can reason about, read from the registry
@@ -147,6 +149,7 @@ export function PipelineTheater() {
   const liveLanes = useStore((s) => s.scrapeRun.lanes)
   const liveVerdicts = useStore((s) => s.scrapeRun.verdicts)
   const liveNotes = useStore((s) => s.scrapeRun.notes)
+  const knowledge = useStore((s) => s.knowledge)
   const keywordCount = useStore((s) => s.keywords.filter((k) => k.active).length)
   const setPage = useStore((s) => s.setPage)
   const runScraping = useStore((s) => s.runScraping)
@@ -635,6 +638,61 @@ export function PipelineTheater() {
    * that station actually produced, so a station that did nothing says so
    * rather than showing a zero that reads as a failure.
    */
+  /*
+   * THE CLAUDE BRIDGE'S CONTEXT AND THE FOUR PLATFORMS.
+   *
+   * What the run recorded (`pipeline.summary.platformDiscovery`) wins; before
+   * any run has recorded one, the workspace's own counts stand in, labelled as
+   * such by the cards. The platforms follow the live lanes while a run is going
+   * and the recorded discovery after it.
+   */
+  const discovery = useMemo(() => readDiscovery(pipelineRun?.summary), [pipelineRun])
+  const bridgeContext = useMemo((): BridgeContextView => {
+    const c = discovery?.context
+    return {
+      recorded: c !== undefined,
+      kb: c?.knowledgeBase.entries ?? knowledge.filter((k) => k.active).length,
+      brand: c?.brand.positioning ?? null,
+      brandTopics: c?.brand.topics ?? null,
+      keywords: c?.keywords.count ?? null,
+      searched: discovery?.keywordsUsed ?? [],
+      windowHours: discovery?.windowHours ?? 168,
+      maxSearches: discovery?.maxSearchesPerPlatform ?? 3,
+    }
+  }, [discovery, knowledge])
+  const platformStates = useMemo((): PlatformState[] => {
+    return DISCOVERY_PLATFORMS.map(({ id, label }) => {
+      const lane = liveLanes.find((l) => l.platform === id)
+      if (lane && (live || lane.status === 'running')) {
+        const reason = lane.reason ?? ''
+        const skipped = reason.includes('is skipped')
+        const undated = reason.includes('listed with no date')
+        return {
+          id,
+          label,
+          status:
+            lane.status === 'running'
+              ? 'running'
+              : lane.status === 'warn'
+                ? skipped
+                  ? 'skipped'
+                  : undated
+                    ? 'undated'
+                    : (lane.kept ?? 0) > 0
+                      ? 'older'
+                      : 'empty'
+                : 'ok',
+          kept: lane.kept,
+        }
+      }
+      const recorded = discovery?.platforms.find((p) => p.platformId === id)
+      if (recorded) {
+        return { id, label, status: recorded.status === 'error' ? 'empty' : recorded.status, kept: recorded.kept }
+      }
+      return { id, label, status: 'idle', kept: null }
+    })
+  }, [liveLanes, discovery, live])
+
   const stations = useMemo((): Station[] => {
     const captured = rows.filter((r) => r.kind === 'capture').length
     const emptyLanes = liveLanes.filter((l) => l.status === 'warn').length
@@ -658,40 +716,38 @@ export function PipelineTheater() {
       const n = summary.keywordsScanned
       return typeof n === 'number' && n > 0 ? n : null
     })()
-    const liveKeywords = new Set(liveLanes.map((l) => l.keyword)).size
-    const keywords = liveKeywords > 0 ? liveKeywords : (scannedThisRun ?? keywordCount)
+    const keywords = bridgeContext.keywords ?? scannedThisRun ?? keywordCount
     const gateHeld = heldCount > 0 && scoredNow === 0
     const count = (id: ValidationVerdict): number => buckets.find((b) => b.id === id)?.count ?? 0
+    const trendCount = discovery?.trends.length ?? 0
+    const todayCount = discovery?.trends.filter((t) => t.period === 'today').length ?? 0
+    const windowText = bridgeContext.windowHours < 72 ? `${bridgeContext.windowHours} hours` : `${Math.round(bridgeContext.windowHours / 24)} days`
 
     return [
       {
         id: 'source',
-        tag: 'SOURCE',
-        name: `${keywords} keyword${keywords === 1 ? '' : 's'}`,
-        sub: liveLanes.length > 0
-          ? `${liveLanes.length} lanes opened`
-          : scannedThisRun !== null
-            ? 'scanned this run'
-            : 'active in the workspace',
-        figure: liveLanes.length > 0
-          ? 'resolved by weight'
-          : scannedThisRun !== null
-            ? 'this run'
-            : 'on record',
+        tag: 'CONTEXT',
+        name: 'Claude Bridge',
+        sub: 'Knowledge Base + brand + keywords',
+        figure: `${bridgeContext.kb} KB · ${keywords} keyword${keywords === 1 ? '' : 's'}`,
         caption:
-          `${keywords} active keyword${keywords === 1 ? '' : 's'} resolved by weight` +
-          (liveLanes.length > 0 ? `, opening ${liveLanes.length} keyword-and-lane crawls.` : '.'),
-        status: keywords > 0 ? 'done' : 'idle',
+          `The Claude Bridge took its context from the Knowledge Base (${bridgeContext.kb} entries), Ethara\u2019s brand context` +
+          (bridgeContext.brandTopics === null ? '' : ` (${bridgeContext.brandTopics} topics)`) +
+          ` and ${keywords} existing keyword${keywords === 1 ? '' : 's'}, and built at most ${bridgeContext.maxSearches} focused searches per platform` +
+          (bridgeContext.searched.length > 0 ? ` from: ${bridgeContext.searched.slice(0, 6).join(', ')}.` : '.'),
+        status: stage === 'scrape' ? 'working' : keywords > 0 ? 'done' : 'idle',
       },
       {
         id: 'scraping',
         tag: '01',
         name: 'Sherlock',
         sub: 'Scraping Agent',
-        figure: liveLanes.length > 0 ? `${captured} kept · ${emptyLanes} empty` : `${captured} kept`,
+        figure: `${todayCount} today · ${trendCount} trend${trendCount === 1 ? '' : 's'}` + (emptyLanes > 0 ? ` · ${emptyLanes} empty` : ''),
         caption:
-          `The Scraping Agent read every lane and kept ${captured} page${captured === 1 ? '' : 's'}` +
-          (emptyLanes > 0 ? `. ${emptyLanes} lane${emptyLanes === 1 ? '' : 's'} came back empty.` : '.'),
+          `Through the Claude Bridge, the Scraping Agent searched LinkedIn, Instagram, Facebook and X for what is ` +
+          `trending today and over the last ${windowText}, and kept ${captured} Ethara-relevant post${captured === 1 ? '' : 's'} in ` +
+          `${trendCount} trend${trendCount === 1 ? '' : 's'} (${todayCount} trending today) — topic, date, hashtags, post URL and platform, today first` +
+          (emptyLanes > 0 ? `. ${emptyLanes} platform${emptyLanes === 1 ? '' : 's'} came back empty or skipped, each with its reason.` : '.'),
         status: stage === 'scrape' ? 'working' : captured > 0 || finished ? 'done' : 'idle',
       },
       {
@@ -730,12 +786,12 @@ export function PipelineTheater() {
         figure: newTrendCount > 0 ? `${newTrendCount} placed` : 'nothing to place',
         caption:
           newTrendCount > 0
-            ? `The Calendar Agent placed ${newTrendCount} new trend${newTrendCount === 1 ? '' : 's'} into the week.`
+            ? `The Calendar Agent placed ${newTrendCount} new trend${newTrendCount === 1 ? '' : 's'}: today\u2019s and tomorrow\u2019s posts are written from the freshest, and later dates wait in the Topic Queue.`
             : 'The Calendar Agent had no new trend to place this run.',
         status: stage === 'done' ? (newTrendCount > 0 ? 'done' : 'idle') : 'idle',
       },
     ]
-  }, [rows, liveLanes, live, keywordCount, pipelineRun, stage, finished, scoredNow, heldCount, newTrendCount, buckets, verdictTotal, onRecordOnly, heldSince])
+  }, [rows, liveLanes, keywordCount, pipelineRun, stage, finished, scoredNow, heldCount, newTrendCount, buckets, verdictTotal, onRecordOnly, heldSince, bridgeContext, discovery])
 
   /**
    * The four rails between the stations, each in the state its hand-off is
@@ -785,20 +841,18 @@ export function PipelineTheater() {
       if (live) {
         const open = liveLanes.filter((l) => l.status === 'running').length
         const empty = liveLanes.filter((l) => l.status === 'warn').length
-        const terms = new Set(liveLanes.map((l) => l.keyword)).size
-        // An empty lane is a finding about that lane, so it is counted out
-        // loud rather than folded into a total that reads as failure.
+        // An empty platform is a finding about that platform, so it is counted
+        // out loud rather than folded into a total that reads as failure.
         return (
-          `Sherlock: ${captured} page${captured === 1 ? '' : 's'} kept from ` +
-          `${liveLanes.length} lane${liveLanes.length === 1 ? '' : 's'} across ` +
-          `${terms} keyword${terms === 1 ? '' : 's'}` +
+          `Sherlock, through the Claude Bridge: ${captured} post${captured === 1 ? '' : 's'} kept from ` +
+          `${liveLanes.length} platform${liveLanes.length === 1 ? '' : 's'}` +
           (open > 0 ? ` · ${open} still working` : '') +
           (empty > 0 ? ` · ${empty} came back empty` : '') +
           '.'
         )
       }
       return (
-        `Sherlock: ${captured} post${captured === 1 ? '' : 's'} shown from ` +
+        `Sherlock: ${captured} post${captured === 1 ? '' : 's'} shown, discovered by the Claude Bridge from ` +
         `${keywordCount} active keyword${keywordCount === 1 ? '' : 's'}.`
       )
     }
@@ -883,8 +937,8 @@ export function PipelineTheater() {
             ? 'Nothing new reached scoring'
             : stage === 'scrape'
               ? live
-                ? `Capturing across ${new Set(liveLanes.map((l) => l.platform)).size} lane${new Set(liveLanes.map((l) => l.platform)).size === 1 ? '' : 's'}`
-                : `Scraping ${keywordCount} active keyword${keywordCount === 1 ? '' : 's'}`
+                ? `Claude Bridge · discovering on ${new Set(liveLanes.map((l) => l.platform)).size} platform${new Set(liveLanes.map((l) => l.platform)).size === 1 ? '' : 's'}`
+                : `Claude Bridge · ${keywordCount} active keyword${keywordCount === 1 ? '' : 's'}`
               : stage === 'validate'
                 ? live || !caughtUp
                   ? 'Dexter at work'
@@ -1019,7 +1073,8 @@ export function PipelineTheater() {
           <NeuralStage
             stations={stations}
             buckets={buckets}
-            lanes={liveLanes}
+            context={bridgeContext}
+            platforms={platformStates}
             rails={rails}
             selected={stationIndex}
             paused={paused}
@@ -1075,6 +1130,9 @@ export function PipelineTheater() {
               Filtered · {filter} <X size={11} />
             </button>
           ) : null}
+
+          {/* ── Platform trend discovery: the capture flow and what it found ── */}
+          <PlatformDiscoveryPanel compact />
 
           {/* ── The buckets, named for what they actually are ────────── */}
           <section
@@ -1420,19 +1478,57 @@ const STATION_WORD: Record<StationStatus, string> = {
 const NEURAL_W = 1310
 const NEURAL_H = 654
 
-/** A keyword card and the point its synapse leaves from. */
-const KEYWORD_SLOT = [
-  { top: 158, out: [188, 190] as const },
-  { top: 268, out: [188, 300] as const },
-  { top: 378, out: [188, 410] as const },
+/** The three context sections the Claude Bridge reads, and where each synapse leaves from. */
+const CONTEXT_SLOT = [
+  { top: 150, out: [166, 186] as const },
+  { top: 262, out: [166, 298] as const },
+  { top: 374, out: [166, 410] as const },
 ]
-/** Which slots one, two or three keyword cards occupy, so the fan stays even. */
-const KEYWORD_LAYOUT: Record<number, number[]> = { 0: [], 1: [1], 2: [0, 2], 3: [0, 1, 2] }
 
-const SCRAPE_IN = [262, 300] as const
-const SCRAPE_OUT = [452, 300] as const
-const VALIDATE_IN = [556, 300] as const
-const VALIDATE_OUT = [762, 300] as const
+const BRIDGE_IN = [200, 300] as const
+const BRIDGE_OUT = [330, 300] as const
+const SCRAPE_IN = [372, 300] as const
+const SCRAPE_OUT = [562, 300] as const
+const VALIDATE_IN = [610, 300] as const
+const VALIDATE_OUT = [816, 300] as const
+
+/** The four platforms, in the order the flow names them. */
+const DISCOVERY_PLATFORMS: ReadonlyArray<{ id: Platform; label: string }> = [
+  { id: 'linkedin', label: 'LinkedIn' },
+  { id: 'instagram', label: 'Instagram' },
+  { id: 'facebook', label: 'Facebook' },
+  { id: 'x', label: 'X' },
+]
+
+interface BridgeContextView {
+  /** True when the numbers are the run's own record, false when they are the workspace's. */
+  recorded: boolean
+  kb: number
+  brand: string | null
+  brandTopics: number | null
+  keywords: number | null
+  searched: string[]
+  windowHours: number
+  maxSearches: number
+}
+
+interface PlatformState {
+  id: Platform
+  label: string
+  /** `older` — only posts from before the window; `undated` — posts listed without a date (Facebook). */
+  status: 'idle' | 'running' | 'ok' | 'older' | 'undated' | 'empty' | 'skipped'
+  kept: number | null
+}
+
+const PLATFORM_TONE: Record<PlatformState['status'], string> = {
+  idle: 'var(--color-ink-3)',
+  running: 'var(--color-accent-bright)',
+  ok: 'var(--color-good)',
+  older: 'var(--color-warn)',
+  undated: 'var(--color-ink-2)',
+  empty: 'var(--color-warn)',
+  skipped: 'var(--color-ink-3)',
+}
 
 /** A verdict bucket and the point its synapse arrives at. */
 const BUCKET_SLOT = [
@@ -1491,7 +1587,8 @@ function formatSeconds(total: number): string {
 function NeuralStage({
   stations,
   buckets,
-  lanes,
+  context,
+  platforms,
   rails,
   selected,
   paused,
@@ -1499,7 +1596,8 @@ function NeuralStage({
 }: {
   stations: Station[]
   buckets: GraphBucket[]
-  lanes: LiveLane[]
+  context: BridgeContextView
+  platforms: PlatformState[]
   rails: RailKind[]
   selected: number
   paused: boolean
@@ -1523,30 +1621,27 @@ function NeuralStage({
     return () => observer.disconnect()
   }, [])
 
-  /* One card per keyword actually crawled, heaviest first. A replay opens no
-     lanes, so it falls back to the single source card the run recorded. */
-  const keywordCards = useMemo(() => {
-    const byKeyword = new Map<string, { kept: number; lanes: number; running: boolean }>()
-    for (const lane of lanes) {
-      const entry = byKeyword.get(lane.keyword) ?? { kept: 0, lanes: 0, running: false }
-      entry.kept += lane.kept ?? 0
-      entry.lanes += 1
-      entry.running = entry.running || lane.status === 'running'
-      byKeyword.set(lane.keyword, entry)
-    }
-    return [...byKeyword.entries()]
-      .sort((a, b) => b[1].kept - a[1].kept)
-      .slice(0, 3)
-      .map(([keyword, value]) => ({ keyword, ...value }))
-  }, [lanes])
-
   const source = stations[0]
-  const sourceCards = keywordCards.length > 0
-    ? keywordCards
-    : source
-      ? [{ keyword: source.name, kept: 0, lanes: 0, running: false, fallback: true }]
-      : []
-  const slots = KEYWORD_LAYOUT[Math.min(sourceCards.length, 3)] ?? []
+  const windowText = context.windowHours < 72 ? `${context.windowHours} HOURS` : `${Math.round(context.windowHours / 24)} DAYS`
+  /* The three sections the Claude Bridge takes its context from. */
+  const contextCards = [
+    {
+      label: 'KNOWLEDGE BASE',
+      value: `${context.kb} entries`,
+      note: context.recorded ? 'read this run' : 'in the workspace',
+    },
+    {
+      label: 'ETHARA BRAND',
+      value: context.brand ?? 'Brand voice',
+      note: context.brandTopics === null ? 'positioning · voice · audience' : `${context.brandTopics} brand topics`,
+    },
+    {
+      label: 'KEYWORDS',
+      value: context.keywords === null ? 'existing keywords' : `${context.keywords} keywords`,
+      note: context.searched.length > 0 ? context.searched.slice(0, 3).join(' · ') : 'this week\u2019s rota',
+    },
+  ]
+  const bridgeWorking = rails[0] === 'working'
 
   /** Verdicts counted at all. Zero means not measured, so the buckets read "—". */
   const verdictTotal = buckets.reduce((total, bucket) => total + bucket.count, 0)
@@ -1556,8 +1651,8 @@ function NeuralStage({
   const frozen = useRef(paused || reduced)
   useEffect(() => { frozen.current = paused || reduced }, [paused, reduced])
 
-  const sceneRef = useRef({ slots, buckets, rails, verdictTotal })
-  useEffect(() => { sceneRef.current = { slots, buckets, rails, verdictTotal } })
+  const sceneRef = useRef({ buckets, rails, verdictTotal })
+  useEffect(() => { sceneRef.current = { buckets, rails, verdictTotal } })
 
   const paletteRef = useRef<Record<string, RGB>>({})
   useEffect(() => {
@@ -1669,18 +1764,16 @@ function NeuralStage({
       }
 
       /* light where the two agents meet */
-      const pool = ctx.createRadialGradient(659, 300, 0, 659, 300, 140)
+      const pool = ctx.createRadialGradient(586, 300, 0, 586, 300, 140)
       pool.addColorStop(0, rgba(accent, 0.1))
       pool.addColorStop(1, rgba(accent, 0))
       ctx.fillStyle = pool
-      ctx.fillRect(509, 150, 300, 300)
+      ctx.fillRect(436, 150, 300, 300)
 
-      /* keyword lanes fan in */
+      /* the three context sections fan in to the Claude Bridge, which hands to Sherlock */
       const scraping = scene.rails[0] === 'working'
-      for (const slot of scene.slots) {
-        const anchor = KEYWORD_SLOT[slot]
-        if (anchor) flow(anchor.out, SCRAPE_IN, accent, 2, 0.3, scraping)
-      }
+      for (const slot of CONTEXT_SLOT) flow(slot.out, BRIDGE_IN, tone('--color-good'), 2, 0.3, scraping)
+      flow(BRIDGE_OUT, SCRAPE_IN, accent, 3, 0.34, scraping)
       /* the hand-off */
       flow(SCRAPE_OUT, VALIDATE_IN, accent, 3, 0.34, scene.rails[1] === 'working')
       /* and the bifurcation, each branch in its verdict's colour */
@@ -1693,7 +1786,7 @@ function NeuralStage({
       flow(VALIDATED_OUT, CALENDAR_IN, tone('--color-good'), 2, 0.3, scene.rails[3] !== 'idle')
 
       ctx.fillStyle = rgba(bright, 0.6)
-      for (const point of [SCRAPE_IN, VALIDATE_IN, CALENDAR_IN, ...scene.slots.map((s) => KEYWORD_SLOT[s]?.out), ...BUCKET_SLOT.map((s) => s.into)]) {
+      for (const point of [BRIDGE_IN, BRIDGE_OUT, SCRAPE_IN, VALIDATE_IN, CALENDAR_IN, ...CONTEXT_SLOT.map((s) => s.out), ...BUCKET_SLOT.map((s) => s.into)]) {
         if (!point) continue
         ctx.beginPath()
         ctx.arc(point[0], point[1], 2.2, 0, Math.PI * 2)
@@ -1721,33 +1814,59 @@ function NeuralStage({
       >
         <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" aria-hidden="true" />
 
-        {/* ── the keywords that opened the run ─────────────────────────── */}
-        {sourceCards.map((entry, i) => {
-          const slot = KEYWORD_SLOT[slots[i] ?? i]
+        {/* ── the three sections the Claude Bridge takes its context from ── */}
+        {contextCards.map((entry, i) => {
+          const slot = CONTEXT_SLOT[i]
           if (!slot) return null
-          const measured = !('fallback' in entry)
           return (
             <button
-              key={entry.keyword}
+              key={entry.label}
               type="button"
               onClick={() => onSelect(0)}
-              aria-label={`${entry.keyword} · ${measured ? `${entry.kept} kept` : source?.figure ?? 'on record'}`}
+              aria-label={`${entry.label} · ${entry.value}`}
               className={`${card} px-3 py-[9px] ${selected === 0 ? 'border-accent' : 'hover:border-accent'}`}
-              style={{ left: 20, top: slot.top, width: 168, borderTopWidth: 2, borderTopColor: 'var(--color-good)' }}
+              style={{ left: 14, top: slot.top, width: 152, borderTopWidth: 2, borderTopColor: 'var(--color-good)' }}
             >
               <span className="flex items-center">
-                <span className="mono text-[8.5px] tracking-[0.14em]" style={{ color: 'var(--color-good)' }}>
-                  {measured ? `KEYWORD ${String(i + 1).padStart(2, '0')}` : 'SOURCE'}
-                </span>
+                <span className="mono text-[8px] tracking-[0.14em]" style={{ color: 'var(--color-good)' }}>{entry.label}</span>
                 <span className="ml-auto h-[5px] w-[5px] rounded-full" style={{ background: 'var(--color-good)' }} aria-hidden="true" />
               </span>
-              <span className="mt-[5px] block truncate text-[13px] font-bold text-ink">{entry.keyword}</span>
-              <span className="mono mt-[3px] block truncate text-[8.5px] text-ink-3">
-                {measured ? `${entry.kept} KEPT · ${entry.lanes} LANE${entry.lanes === 1 ? '' : 'S'}` : (source?.figure ?? '').toUpperCase()}
-              </span>
+              <span className="mt-[5px] block truncate text-[12px] font-bold text-ink" title={entry.value}>{entry.value}</span>
+              <span className="mono mt-[3px] block truncate text-[8px] text-ink-3" title={entry.note}>{entry.note.toUpperCase()}</span>
             </button>
           )
         })}
+
+        {/* ── the Claude Bridge ────────────────────────────────────────── */}
+        {source ? (
+          <button
+            type="button"
+            onClick={() => onSelect(0)}
+            aria-label={`Claude Bridge · ${source.figure}`}
+            className={`${card} rounded-[14px] px-[11px] py-[10px] ${selected === 0 ? 'border-accent' : 'hover:border-accent'}`}
+            style={{ left: 200, top: 256, width: 130, borderColor: 'var(--color-accent)', boxShadow: selected === 0 ? '0 0 30px -8px var(--color-accent)' : undefined }}
+          >
+            <span className="flex items-center gap-1.5">
+              <span className="mono text-[8px] tracking-[0.18em] text-ink-3">{source.tag}</span>
+              <span className="ml-auto flex h-3 w-3 items-center justify-center">
+                {bridgeWorking && !paused ? (
+                  <WorkArc size={11} />
+                ) : (
+                  <span className="h-[5px] w-[5px] rounded-full" style={{ background: STATION_TONE[source.status] }} aria-hidden="true" />
+                )}
+              </span>
+            </span>
+            <span className="mt-[4px] block text-[14px] font-bold text-ink">Claude Bridge</span>
+            <span className="mono mt-[5px] block text-[8px] leading-[1.35] text-ink-3">
+              ≤{context.maxSearches} SEARCHES / PLATFORM
+            </span>
+          </button>
+        ) : null}
+
+        {/* ── where Sherlock searches, and how far back ─────────────────── */}
+        <span className="mono absolute text-[8px] tracking-[0.14em] text-ink-3" style={{ left: 372, top: 228 }} aria-hidden="true">
+          4 PLATFORMS · TODAY + LAST {windowText}
+        </span>
 
         {/* ── 01 · the Scraping Agent ──────────────────────────────────── */}
         {scraping ? (
@@ -1757,7 +1876,7 @@ function NeuralStage({
             aria-label={`${scraping.name} · ${scraping.figure}`}
             className={agentCard(1)}
             style={{
-              left: 262,
+              left: 372,
               top: 249,
               width: 190,
               boxShadow: selected === 1 ? '0 0 34px -8px var(--color-accent)' : undefined,
@@ -1781,6 +1900,32 @@ function NeuralStage({
           </button>
         ) : null}
 
+        {/* ── the four platforms Sherlock discovers on, through the bridge ── */}
+        <div className="glass-panel absolute rounded-[12px] px-2.5 py-2" style={{ left: 372, top: 352, width: 190 }}>
+          <div className="grid grid-cols-2 gap-x-2 gap-y-1.5">
+            {platforms.map((p) => (
+              <span key={p.id} className="flex min-w-0 items-center gap-1.5" title={`${p.label} · ${p.status}`}>
+                <PlatformIcon platform={p.id} size={11} />
+                <span className="truncate text-[9.5px] text-ink-2">{p.label}</span>
+                <span className="mono ml-auto shrink-0 text-[8px]" style={{ color: PLATFORM_TONE[p.status] }}>
+                  {p.status === 'ok'
+                    ? `${p.kept ?? 0}`
+                    : p.status === 'older' || p.status === 'undated'
+                      ? `${p.kept ?? 0} ${p.status.toUpperCase()}`
+                      : p.status === 'running'
+                        ? '…'
+                        : p.status === 'idle'
+                          ? '—'
+                          : p.status.toUpperCase()}
+                </span>
+              </span>
+            ))}
+          </div>
+          <span className="mono mt-1.5 block border-t border-line pt-1.5 text-[7.5px] tracking-[0.08em] text-ink-3">
+            → TOPICS · POSTS · HASHTAGS · URLS
+          </span>
+        </div>
+
         {/* ── 02 · the Validation Agent, where the run bifurcates ──────── */}
         {validation ? (
           <button
@@ -1789,7 +1934,7 @@ function NeuralStage({
             aria-label={`${validation.name} · ${validation.figure}`}
             className={agentCard(2)}
             style={{
-              left: 556,
+              left: 610,
               top: 236,
               width: 206,
               boxShadow: selected === 2 ? '0 0 34px -8px var(--color-accent)' : undefined,
@@ -2419,6 +2564,8 @@ function RunReport({
    * anyway: what was searched for, rather than how many pipes were open.
    */
   const laneCount = new Set(captures.map((c) => c.keyword).filter((k) => k !== '—')).size
+  // The recorded run: its platform-by-platform output, when it has one.
+  const runSummary = useStore((st) => st.pipeline?.summary as Record<string, unknown> | undefined)
 
   const held = captures.filter((c) => c.held !== null)
   const kept = captures.filter((c) => c.held === null)
@@ -2528,7 +2675,18 @@ function RunReport({
           </div>
         ) : null}
 
-        {/* ── Every page this run read ──────────────────────────────────── */}
+        {/* ── The run's output, platform by platform ─────────────────────── */}
+        {runSummary && (runSummary.discoveryResults || runSummary.platformDiscovery) ? (
+          <div className="mt-5">
+            <p className="mono mb-1.5 text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
+              Output by platform · Date · Trending topic · Account · Hashtags · Post URL
+            </p>
+            <PlatformBreakdown summary={runSummary} />
+          </div>
+        ) : null}
+
+        {/* ── Every page this run read (runs recorded before the breakdown existed) ── */}
+        {runSummary && (runSummary.discoveryResults || runSummary.platformDiscovery) ? null : (
         <div className="mt-5">
           <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
             Everything captured on this run
@@ -2615,13 +2773,13 @@ function RunReport({
             </ul>
           )}
         </div>
+        )}
 
         {/* ── What reached the calendar ─────────────────────────────────── */}
         {newTrendIdeas.length > 0 ? (
           <div className="mt-5">
             <p className="mono text-[10.5px] uppercase tracking-[0.12em] text-ink-3">
-              New trends added to the calendar · {placed.length} placed, {newTrendIdeas.length - placed.length} in
-              more suggestions
+              New trends added to the calendar · {placed.length} placed as topics
             </p>
             <ul className="mt-1.5 grid grid-cols-1 gap-1 lg:grid-cols-2">
               {newTrendIdeas.map((idea) => (
@@ -2629,7 +2787,7 @@ function RunReport({
                   <PlatformIcon platform={idea.platform} size={12} />
                   <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2">{idea.title}</span>
                   <Badge tone={idea.slot === 'primary' ? 'good' : 'neutral'}>
-                    {idea.slot === 'primary' ? `On the calendar · #${idea.rank}` : `More suggestions · #${idea.rank}`}
+                    {idea.slot === 'primary' ? `On the calendar · #${idea.rank ?? '—'}` : 'Withdrawn'}
                   </Badge>
                 </li>
               ))}

@@ -6,7 +6,12 @@
  */
 
 import { BRAND, similarity } from '../../../../shared/brand-voice'
-import { listPosts } from '../../db/repo'
+import { insertListenerReport, latestListenerReport, listPosts } from '../../db/repo'
+import { socialFetchConfigured, socialFetchUnavailableReason } from '../../integrations/socialfetch'
+import { runSocialListener, type ListenerPlatform, type SocialMediaListener } from './social-listener'
+import { runCompetitorIntel, type CompetitorIntelConfig } from './competitor-intel'
+import { loadBridgeConfig } from '../../bridges/claude-bridge/config'
+import type { SkillContext } from '../../../../shared/agent-contract'
 import { angleFor, audienceFor, clamp, countTopicMatches, engagementLevel, EDITORIAL_FORMATS, headlineFrom, mean, seededFor, type EditorialFormat } from '../corpus'
 import { registerSkill } from '../runtime'
 import type { HashtagCandidate, Opportunity, PipelinePayload, ScrapedPost } from '../skills/index'
@@ -536,3 +541,146 @@ registerSkill<PipelinePayload>('analysis.recommendation.explain', (payload, ctx)
 
 /** Exposed for the Calendar Agent's deterministic spreading. */
 export { seededFor }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   9 · analysis.social.listen — THE SOCIAL MEDIA LISTENER
+   ═══════════════════════════════════════════════════════════════════════════
+
+   What is happening around Ethara.AI on social media, and what are people
+   saying about the company? SocialFetch supplies the data (the only source);
+   the computation is in `social-listener/`; Claude reads the comments and
+   writes the insights from computed facts. Non-critical: a failure here is
+   recorded and never stops the rest of the Analysis Agent.
+*/
+
+registerSkill<PipelinePayload>('analysis.social.listen', async (payload, ctx) => {
+  const refreshHours = ctx.num('refreshHours', 24)
+  if (payload.listenerForceRefresh !== true && refreshHours > 0) {
+    const latest = await latestListenerReport<SocialMediaListener>(ctx.workspaceId)
+    if (latest && Date.now() - Date.parse(latest.created_at) < refreshHours * 3_600_000) {
+      ctx.log(`Social Media Listener: reusing the report from ${latest.created_at} (younger than ${refreshHours} h) — no SocialFetch call made.`)
+      return { socialMediaListener: latest.report }
+    }
+  }
+  if (!socialFetchConfigured()) throw new Error(socialFetchUnavailableReason() ?? 'SocialFetch is not configured.')
+
+  const company = ctx.str('company', 'Ethara.AI')
+  const platforms: ListenerPlatform[] = [
+    ...(ctx.bool('includeLinkedin', true) ? (['linkedin'] as const) : []),
+    ...(ctx.bool('includeInstagram', true) ? (['instagram'] as const) : []),
+    ...(ctx.bool('includeFacebook', true) ? (['facebook'] as const) : []),
+    ...(ctx.bool('includeX', true) ? (['x'] as const) : []),
+  ]
+  ctx.emit('activity', `Social Media Listener: reading ${company} on ${platforms.length} platform(s) through SocialFetch`, { status: 'running' })
+
+  const report = await runSocialListener({
+    company,
+    targets: {
+      linkedin: ctx.str('linkedinPage', ''),
+      instagram: ctx.str('instagramHandle', ''),
+      facebook: ctx.str('facebookPage', ''),
+      x: ctx.str('xHandle', ''),
+    },
+    platforms,
+    postsPerPlatform: ctx.num('postsPerPlatform', 10),
+    commentPostsPerPlatform: ctx.num('commentPostsPerPlatform', 4),
+    commentsPerPost: ctx.num('commentsPerPost', 20),
+    topPosts: ctx.num('topPostsCount', 3),
+    lowestPosts: ctx.num('lowestPostsCount', 2),
+    includeReposts: ctx.bool('includeReposts', true),
+    claude: {
+      enabled: ctx.bool('claudeAnalysis', true),
+      model: ctx.str('claudeModel', 'sonnet'),
+      maxBudgetUsd: ctx.num('claudeBudgetCents', 50) / 100,
+      timeoutMs: 180_000,
+      batchSize: ctx.num('claudeBatchSize', 40),
+    },
+    glassdoor: {
+      enabled: ctx.bool('includeGlassdoor', true),
+      employer: ctx.str('glassdoorEmployer', 'Ethara.AI'),
+      reviewLimit: ctx.num('glassdoorReviewLimit', 15),
+    },
+  })
+
+  for (const p of Object.values(report.platforms)) {
+    ctx.emit(
+      'activity',
+      p.status === 'ok'
+        ? `Social Media Listener · ${p.label}: ${p.posts_analyzed} post(s), ${p.comments_analyzed} comment(s)`
+        : `Social Media Listener · ${p.label}: ${p.reason ?? p.status}`,
+      { status: p.status === 'ok' ? 'ok' : 'warn', platform: p.platform },
+    )
+  }
+  if (report.glassdoor) {
+    const g = report.glassdoor
+    ctx.emit(
+      'activity',
+      g.status === 'ok'
+        ? `Social Media Listener · Glassdoor: ${g.overall_rating ?? '—'}/5 from ${g.reviews_analyzed} review(s) read`
+        : `Social Media Listener · Glassdoor: ${g.reason ?? g.status}`,
+      { status: g.status === 'ok' ? 'ok' : 'warn' },
+    )
+  }
+  ctx.log(
+    `Social Media Listener: ${report.sample_size.posts} posts and ${report.sample_size.comments} comments analysed across ` +
+      `${report.sample_size.platforms_with_data} platform(s) · ${report.credits_used} SocialFetch credit(s)` +
+      (report.glassdoor?.status === 'ok' ? ` · Glassdoor ${report.glassdoor.overall_rating ?? '—'}/5 (${report.glassdoor.credits_used} FetchLayer credit(s))` : '') +
+      (report.claude_cost_usd > 0 ? ` · Claude $${report.claude_cost_usd}` : ''),
+  )
+
+  await insertListenerReport(ctx.workspaceId, report, {
+    pipelineRunId: ctx.runId ?? null,
+    trigger: payload.listenerForceRefresh === true ? 'manual' : 'pipeline',
+    creditsUsed: report.credits_used,
+  })
+  return { socialMediaListener: report }
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   10 · analysis.competitor.intel — COMPETITOR INTELLIGENCE
+   ═══════════════════════════════════════════════════════════════════════════
+
+   The competitor-profiling skill (coreyhaines31/marketingskills) as the
+   methodology; the SMA's universe, sources, storage and history. Inside a
+   pipeline run it profiles at most `maxCompetitorsPerPipelineRun` DUE
+   competitors (zero by default — a universe takes many minutes); the tab's Run
+   action passes `competitorIds` and `competitorForce`. Non-critical.
+*/
+
+export function competitorIntelConfig(ctx: Pick<SkillContext, 'num' | 'bool' | 'str'>, depthOverride?: 'quick' | 'deep'): CompetitorIntelConfig {
+  const depth = depthOverride ?? (ctx.str('depth', 'quick') === 'deep' ? 'deep' : 'quick')
+  const model = ctx.str('claudeModel', 'sonnet')
+  return {
+    depth,
+    maxPagesPerCompetitor: Math.max(1, ctx.num('maxPagesPerCompetitor', 5) + (depth === 'deep' ? 3 : 0)),
+    maxCharsPerPage: depth === 'deep' ? 9_000 : 6_000,
+    newsWindowDays: ctx.num('newsWindowDays', 30),
+    maxNewsItems: ctx.num('maxNewsItems', 8),
+    includeSeo: ctx.bool('includeSeo', true),
+    includeReviews: ctx.bool('includeReviews', true),
+    concurrency: ctx.num('concurrency', 2),
+    runMarketAnalysis: ctx.bool('runMarketAnalysis', true),
+    profileClaude: { model, maxBudgetUsd: ctx.num('claudeBudgetCents', 60) / 100, timeoutMs: 360_000 },
+    marketClaude: { model, maxBudgetUsd: ctx.num('marketBudgetCents', 120) / 100, timeoutMs: 480_000 },
+    userAgent: loadBridgeConfig().page_metadata.user_agent,
+  }
+}
+
+registerSkill<PipelinePayload>('analysis.competitor.intel', async (payload, ctx) => {
+  const explicit = payload.competitorIds ?? []
+  const perRun = payload.competitorForce === true ? 100 : ctx.num('maxCompetitorsPerPipelineRun', 0)
+  if (explicit.length === 0 && perRun <= 0) {
+    ctx.log('Competitor Intelligence: not run inside the pipeline (Due competitors per pipeline run is 0) — run it from Analysis → Competitor Intelligence.')
+    return {}
+  }
+  const cfg = competitorIntelConfig(ctx, payload.competitorDepth)
+  ctx.emit('activity', `Competitor Intelligence: ${explicit.length > 0 ? `${explicit.length} competitor(s)` : 'due competitors'} · ${cfg.depth} scan`, { status: 'running' })
+  const result = await runCompetitorIntel(
+    ctx.workspaceId,
+    cfg,
+    explicit.length > 0 ? { competitorIds: explicit } : { onlyDue: true, maxCompetitors: perRun },
+    (m) => ctx.emit('activity', m, { status: 'running' }),
+  )
+  ctx.log(`Competitor Intelligence: ${result.profiled} profile(s) written · Claude $${result.costUsd.toFixed(2)}${result.errors.length > 0 ? ` · ${result.errors.length} issue(s): ${result.errors.slice(0, 3).join(' | ')}` : ''}`)
+  return {}
+})

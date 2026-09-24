@@ -157,7 +157,9 @@ export default defineConfig({
     port: 4173,
     strictPort: false,
     host: true,
-    allowedHosts: ['.local', '.lan', '.home', '.internal', '.trycloudflare.com'],
+    // The production domain is served from HERE: nginx fronts `vite preview` on
+    // :3010 (deploy/aws/). Without it every request answered 403.
+    allowedHosts: ['.local', '.lan', '.home', '.internal', '.trycloudflare.com', 'sma.ethara.ai', ...EXTRA_ALLOWED_HOSTS],
     proxy: {
       '/api': {
         target: `http://127.0.0.1:${API_PORT}`,

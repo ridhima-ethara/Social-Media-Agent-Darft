@@ -77,16 +77,21 @@ describe('an unreachable database', () => {
   })
 })
 
-describe('a model that is configured but not pulled', () => {
-  const run = doctor({ OLLAMA_TEXT_MODEL: 'not-a-real-model:v99' })
+describe('no Google credential', () => {
+  const run = doctor({ GCP_API_KEY: '', GCP_SERVICE_ACCOUNT_JSON: '' })
 
-  it('names the key and the tag', () => {
-    expect(run.output).toContain('OLLAMA_TEXT_MODEL')
-    expect(run.output).toContain('not-a-real-model:v99')
+  it('names the GCP credential as the reason text generation degrades', () => {
+    expect(run.output).toMatch(/no GCP credential|template writer/i)
   })
 
-  it('gives the pull command for that exact model', () => {
-    expect(run.output).toContain('ollama pull not-a-real-model')
+  it('treats it as a degradation, not a blocker — the template writer still runs', () => {
+    // Gemini is the only model provider, but its absence degrades to the
+    // deterministic template writer rather than stopping the pipeline. The
+    // degradation line is marked `·`; a blocker line is marked `✗ … fix:`.
+    // Assert the GCP line is never rendered as a blocker.
+    expect(run.output).not.toMatch(/✗\s+.*GCP credential/i)
+    // And it IS present as a degradation line.
+    expect(run.output).toMatch(/·\s+no GCP credential/i)
   })
 })
 

@@ -24,6 +24,8 @@ import { AgentStudio } from './pages/AgentStudio'
 import { SettingsPage } from './pages/SettingsPage'
 import { KnowledgeBase, KnowledgeDrawer } from './pages/KnowledgeBase'
 import { ReviewPanel } from './pages/ReviewPanel'
+import { DiscoveryResultsDialog } from './components/discovery-results-dialog'
+import { SocialListenerPage } from './pages/SocialListenerPage'
 import { PipelineTheater } from './pages/PipelineTheater'
 
 function CurrentPage() {
@@ -35,6 +37,8 @@ function CurrentPage() {
       return <Dashboard />
     case 'intelligence':
       return <ContentIntelligence />
+    case 'listener':
+      return <SocialListenerPage />
     case 'calendar':
       return <CalendarPage />
     case 'published':
@@ -119,6 +123,7 @@ export default function App() {
 
       <KnowledgeDrawer />
       <ReviewPanel />
+      <DiscoveryResultsDialog />
       <PipelineTheater />
       <ToastHost toasts={toasts} onDismiss={dismissToast} />
     </>
